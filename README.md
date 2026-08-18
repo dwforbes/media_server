@@ -127,4 +127,4 @@ sends `ssdp:byebye`.
 - ContentDirectory `Search` (returns UPnP error 602) and GENA eventing (clients poll).
 - DLNA.ORG_PN media profiles — protocolInfo is the permissive generic form, which VLC,
   BubbleUPnP, and most TVs accept.
-- Thumbnails/artwork, transcoding, playlists.
+- Transcoding, playlists.
