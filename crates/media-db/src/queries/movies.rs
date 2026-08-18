@@ -104,6 +104,28 @@ pub fn years(conn: &Connection) -> Result<Vec<i64>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Decades (as their first year, e.g. 1980) with at least one ready movie,
+/// newest first.
+pub fn decades(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT (m.year / 10) * 10 AS decade
+         FROM movies m JOIN files f ON f.id = m.file_id
+         WHERE f.status = 'ready' AND m.year IS NOT NULL ORDER BY decade DESC",
+    )?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn by_decade(conn: &Connection, decade: i64) -> Result<Vec<BrowseItem>> {
+    let sql = format!(
+        "{MOVIE_SELECT} AND m.year >= ?1 AND m.year < ?1 + 10
+         ORDER BY m.year, m.sort_title"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([decade], movie_from_row)?;
+    Ok(merge_movies(rows.collect::<Result<Vec<_>, _>>()?))
+}
+
 pub fn by_year(conn: &Connection, year: i64) -> Result<Vec<BrowseItem>> {
     let sql = format!("{MOVIE_SELECT} AND m.year = ?1 ORDER BY m.sort_title");
     let mut stmt = conn.prepare(&sql)?;

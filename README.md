@@ -51,7 +51,7 @@ it, videos are still catalogued from their names — just without technical attr
 ## What clients see
 
 ```
-Movies    → All Movies / By Year / By Genre / By Director / By Rating / Folders
+Movies    → All Movies / By Year / By Decade / By Genre / By Director / By Rating / Folders
 Music     → Artists / Albums / Genres / Folders
 TV Shows  → Series → Season → Episodes, plus Folders
 ```

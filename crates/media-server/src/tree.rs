@@ -133,6 +133,7 @@ pub fn browse_children(conn: &Connection, oid: &ObjectId) -> Result<Vec<Entry>> 
         Movies => vec![
             container(&MoviesAll, oid, "All Movies"),
             container(&MoviesByYear, oid, "By Year"),
+            container(&MoviesByDecade, oid, "By Decade"),
             container(&MoviesByGenre, oid, "By Genre"),
             container(&MoviesByDirector, oid, "By Director"),
             container(&MoviesByRating, oid, "By Rating"),
@@ -144,6 +145,11 @@ pub fn browse_children(conn: &Connection, oid: &ObjectId) -> Result<Vec<Entry>> 
             .map(|y| container(&MoviesYear(y), oid, y.to_string()))
             .collect(),
         MoviesYear(y) => items(oid, movies::by_year(conn, *y)?),
+        MoviesByDecade => movies::decades(conn)?
+            .into_iter()
+            .map(|d| container(&MoviesDecade(d), oid, format!("{d}s")))
+            .collect(),
+        MoviesDecade(d) => items(oid, movies::by_decade(conn, *d)?),
         MoviesByGenre => movies::genres(conn)?
             .into_iter()
             .map(|(id, name)| container_class(&MoviesGenre(id), oid, name, CLASS_MOVIE_GENRE))
@@ -285,6 +291,8 @@ pub fn browse_metadata(conn: &Connection, oid: &ObjectId) -> Result<Entry> {
         MoviesAll => container(oid, &Movies, "All Movies"),
         MoviesByYear => container(oid, &Movies, "By Year"),
         MoviesYear(y) => container(oid, &MoviesByYear, y.to_string()),
+        MoviesByDecade => container(oid, &Movies, "By Decade"),
+        MoviesDecade(d) => container(oid, &MoviesByDecade, format!("{d}s")),
         MoviesByGenre => container(oid, &Movies, "By Genre"),
         MoviesGenre(g) => {
             container_class(oid, &MoviesByGenre, genre_name(conn, *g)?, CLASS_MOVIE_GENRE)
