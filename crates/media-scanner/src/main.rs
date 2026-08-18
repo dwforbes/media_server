@@ -17,6 +17,22 @@ use walkdir::WalkDir;
 
 use config::{Config, EnrichConfig};
 
+/// Resolve the enrich command: an explicit path is used as-is; a bare name
+/// prefers a sibling of this executable (the binaries are built together),
+/// falling back to $PATH lookup.
+fn resolve_enrich_command(command: &str) -> PathBuf {
+    if !command.contains(std::path::MAIN_SEPARATOR) {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(sibling) = exe.parent().map(|d| d.join(command)) {
+                if sibling.is_file() {
+                    return sibling;
+                }
+            }
+        }
+    }
+    PathBuf::from(command)
+}
+
 /// Debounced, serialized runner for the media-enrich subprocess. Triggered
 /// only by new/changed media files — never by sidecar events, which is what
 /// keeps enrichment's own .nfo writes from re-triggering it.
@@ -75,16 +91,17 @@ impl EnrichRunner {
         }
         self.pending = false;
         self.last_run = Some(Instant::now());
-        match std::process::Command::new(&self.cfg.command)
+        let command = resolve_enrich_command(&self.cfg.command);
+        match std::process::Command::new(&command)
             .arg("--config")
             .arg(&self.config_path)
             .spawn()
         {
             Ok(child) => {
-                tracing::info!("new media settled; running {}", self.cfg.command);
+                tracing::info!("new media settled; running {}", command.display());
                 self.child = Some(child);
             }
-            Err(err) => tracing::warn!("could not launch {}: {err}", self.cfg.command),
+            Err(err) => tracing::warn!("could not launch {}: {err}", command.display()),
         }
     }
 }
@@ -123,8 +140,9 @@ fn main() -> Result<()> {
             // Synchronous: enrich, then a second pass to ingest the
             // sidecars it wrote.
             let enrich = cfg.enrich.as_ref().unwrap();
-            tracing::info!("new media found; running {}", enrich.command);
-            let status = std::process::Command::new(&enrich.command)
+            let command = resolve_enrich_command(&enrich.command);
+            tracing::info!("new media found; running {}", command.display());
+            let status = std::process::Command::new(&command)
                 .arg("--config")
                 .arg(&args.config)
                 .status();
@@ -133,7 +151,7 @@ fn main() -> Result<()> {
                     reconcile_all(&mut conn, &cfg, &roots)?;
                 }
                 Ok(s) => tracing::warn!("media-enrich exited with {s}"),
-                Err(err) => tracing::warn!("could not launch {}: {err}", enrich.command),
+                Err(err) => tracing::warn!("could not launch {}: {err}", command.display()),
             }
         }
         tracing::info!("--once: reconcile complete, exiting");
