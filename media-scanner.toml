@@ -12,6 +12,18 @@ reconcile_interval_hours = 1
 
 ffprobe_path = "ffprobe"
 
+# Run media-enrich automatically when new media is catalogued. The scanner
+# waits for a quiet period after the last arrival (so a season drop is one
+# run), keeps one run in flight, and never triggers on sidecar changes.
+# media-enrich inherits the environment, so export TMDB_API_KEY before
+# starting the scanner. Remove this section (or set auto = false) to keep
+# enrichment manual.
+[enrich]
+auto = true
+command = "media-enrich"
+quiet_secs = 60
+min_interval_secs = 600
+
 [[roots]]
 path = "/Volumes/172.17.0.1/Movies"
 kind = "movies"

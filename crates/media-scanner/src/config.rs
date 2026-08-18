@@ -18,6 +18,40 @@ pub struct Config {
     pub reconcile_interval_hours: u64,
     #[serde(default = "default_ffprobe")]
     pub ffprobe_path: String,
+    /// Optional: run media-enrich automatically when new media appears.
+    pub enrich: Option<EnrichConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrichConfig {
+    /// Master switch; the section can stay in the file with auto = false.
+    #[serde(default = "default_true")]
+    pub auto: bool,
+    /// The media-enrich binary (name on PATH or absolute path). It inherits
+    /// the scanner's environment, so TMDB_API_KEY flows through.
+    #[serde(default = "default_enrich_command")]
+    pub command: String,
+    /// Quiet period after the last new-media event before running, so a
+    /// burst of files (a season drop) produces one run.
+    #[serde(default = "default_quiet_secs")]
+    pub quiet_secs: u64,
+    /// Floor between consecutive runs.
+    #[serde(default = "default_min_interval_secs")]
+    pub min_interval_secs: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_enrich_command() -> String {
+    "media-enrich".into()
+}
+fn default_quiet_secs() -> u64 {
+    60
+}
+fn default_min_interval_secs() -> u64 {
+    600
 }
 
 #[derive(Debug, Deserialize)]

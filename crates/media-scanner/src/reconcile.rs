@@ -28,19 +28,23 @@ pub fn stat(path: &Path) -> Option<(i64, i64)> {
 }
 
 /// Full pass over one root: upsert new/changed files, extract anything not
-/// ready, delete rows whose file is gone. Returns number extracted.
-pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Result<usize> {
+/// ready, delete rows whose file is gone. Returns (new or changed media
+/// files, total files extracted) — the distinction matters to the
+/// auto-enrich trigger, which must ignore sidecar-driven re-extraction or
+/// enrichment's own .nfo writes would re-trigger it.
+pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Result<(usize, usize)> {
     let root_path = Path::new(&root.path);
     if !root_path.is_dir() {
         tracing::warn!(
             "root {} is not accessible; skipping (files kept in catalog)",
             root.path
         );
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     let mut known: HashMap<String, files::KnownFile> = files::known_files(conn, root.id)?;
     let mut to_extract: Vec<(i64, String)> = Vec::new();
+    let mut new_media = 0usize;
 
     for entry in WalkDir::new(root_path)
         .follow_links(false)
@@ -75,10 +79,12 @@ pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Resu
                 };
                 if db_size != size || db_mtime != mtime {
                     files::upsert_pending(conn, root.id, &rel, size, mtime, root.kind, mime)?;
+                    new_media += 1;
                     to_extract.push((id, rel));
                 } else if status != "ready" {
                     // Retry files that were pending/errored last time and
                     // have been stable since.
+                    new_media += 1;
                     to_extract.push((id, rel));
                 } else if extract::nfo_mtime(entry.path()) != db_nfo_mtime || art_stale() {
                     // A sidecar (.nfo or artwork) appeared, vanished, or
@@ -89,6 +95,7 @@ pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Resu
             None => {
                 let id =
                     files::upsert_pending(conn, root.id, &rel, size, mtime, root.kind, mime)?;
+                new_media += 1;
                 to_extract.push((id, rel));
             }
         }
@@ -104,5 +111,5 @@ pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Resu
     for (id, rel) in to_extract {
         extract::extract_file(conn, ffprobe, root, &rel, id)?;
     }
-    Ok(count)
+    Ok((new_media, count))
 }
