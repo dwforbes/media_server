@@ -70,7 +70,11 @@ impl EnrichRunner {
                     if status.success() {
                         tracing::info!("media-enrich run finished");
                     } else {
-                        tracing::warn!("media-enrich exited with {status}");
+                        // Failed run (network down, missing key, ...): the
+                        // backlog still needs enriching — retry on the
+                        // min-interval throttle until a run succeeds.
+                        tracing::warn!("media-enrich exited with {status}; will retry");
+                        self.pending = true;
                     }
                     self.child = None;
                 }
@@ -101,7 +105,10 @@ impl EnrichRunner {
                 tracing::info!("new media settled; running {}", command.display());
                 self.child = Some(child);
             }
-            Err(err) => tracing::warn!("could not launch {}: {err}", command.display()),
+            Err(err) => {
+                tracing::warn!("could not launch {}: {err}; will retry", command.display());
+                self.pending = true;
+            }
         }
     }
 }
