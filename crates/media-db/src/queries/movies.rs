@@ -119,7 +119,7 @@ pub fn decades(conn: &Connection) -> Result<Vec<i64>> {
 pub fn by_decade(conn: &Connection, decade: i64) -> Result<Vec<BrowseItem>> {
     let sql = format!(
         "{MOVIE_SELECT} AND m.year >= ?1 AND m.year < ?1 + 10
-         ORDER BY m.year, m.sort_title"
+         ORDER BY m.sort_title"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([decade], movie_from_row)?;
