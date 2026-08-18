@@ -1,0 +1,15 @@
+# Build output
+/target/
+
+# macOS
+.DS_Store
+._*
+
+# rustfmt backups
+**/*.rs.bk
+
+# In case a catalog database ever gets pointed into the repo
+*.db
+*.db-shm
+*.db-wal
+*.uuid

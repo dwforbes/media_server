@@ -1,0 +1,75 @@
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// Defaults to ~/Library/Application Support/mediaserver/media.db
+    pub db_path: Option<PathBuf>,
+    /// HTTP listen address, e.g. "0.0.0.0:8200".
+    #[serde(default = "default_bind")]
+    pub bind: SocketAddr,
+    /// LAN IP advertised in SSDP and media URLs. Auto-detected when unset.
+    pub advertise_ip: Option<IpAddr>,
+    #[serde(default = "default_name")]
+    pub friendly_name: String,
+    /// Optional custom device icon (PNG, ideally 120x120) shown by clients
+    /// next to the server name. A built-in icon is used when unset.
+    pub icon_png: Option<PathBuf>,
+}
+
+fn default_bind() -> SocketAddr {
+    "0.0.0.0:8200".parse().unwrap()
+}
+fn default_name() -> String {
+    "Rust Media Server".into()
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading config {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
+    }
+
+    pub fn db_path(&self) -> PathBuf {
+        self.db_path.clone().unwrap_or_else(media_db::open::default_db_path)
+    }
+
+    /// The IP other devices should use to reach us.
+    pub fn advertised_ip(&self) -> Result<IpAddr> {
+        if let Some(ip) = self.advertise_ip {
+            return Ok(ip);
+        }
+        if !self.bind.ip().is_unspecified() {
+            return Ok(self.bind.ip());
+        }
+        // Routing-table trick: connecting a UDP socket picks the outbound
+        // interface without sending a packet.
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        sock.connect("8.8.8.8:80")?;
+        Ok(sock.local_addr()?.ip())
+    }
+}
+
+/// The UPnP device UUID must survive restarts so clients recognize us.
+/// Stored next to the database.
+pub fn load_or_create_uuid(db_path: &Path) -> Result<String> {
+    let uuid_path = db_path.with_extension("uuid");
+    if let Ok(existing) = std::fs::read_to_string(&uuid_path) {
+        let trimmed = existing.trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+    let fresh = uuid::Uuid::new_v4().to_string();
+    if let Some(dir) = uuid_path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&uuid_path, &fresh)
+        .with_context(|| format!("persisting device uuid to {}", uuid_path.display()))?;
+    Ok(fresh)
+}

@@ -1,0 +1,11 @@
+# media-server configuration.
+# db_path defaults to ~/Library/Application Support/mediaserver/media.db —
+# matches the scanner. Run the scanner at least once before the server.
+
+# Listen on all interfaces so LAN clients (TVs, VLC, BubbleUPnP) can reach us.
+bind = "0.0.0.0:8200"
+
+# LAN IP advertised to UPnP clients; auto-detected when unset.
+#advertise_ip = "192.168.1.10"
+
+friendly_name = "Rust Media Server"

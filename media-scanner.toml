@@ -1,0 +1,25 @@
+# media-scanner configuration.
+# Database lives on the internal disk (default path) — SQLite WAL is
+# unreliable on external/network volumes:
+#   ~/Library/Application Support/mediaserver/media.db
+
+# How long a file's size must be stable before metadata extraction.
+settle_ms = 2000
+
+# Full reconcile pass every N hours. Kept short because FSEvents on an
+# SMB-mounted share are unreliable; the reconcile is the backstop.
+reconcile_interval_hours = 1
+
+ffprobe_path = "ffprobe"
+
+[[roots]]
+path = "/Volumes/172.17.0.1/Movies"
+kind = "movies"
+
+[[roots]]
+path = "/Volumes/172.17.0.1/Series"
+kind = "tv"
+
+[[roots]]
+path = "/Volumes/172.17.0.1/Audio"
+kind = "music"

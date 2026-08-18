@@ -1,0 +1,10 @@
+[package]
+name = "media-db"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
