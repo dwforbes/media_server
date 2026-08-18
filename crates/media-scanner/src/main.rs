@@ -171,6 +171,14 @@ fn main() -> Result<()> {
             Ok(Ok(events)) => {
                 let mut paths: Vec<PathBuf> = Vec::new();
                 for event in events {
+                    // Reads/opens are not changes; CIFS and atime updates
+                    // produce these for files nobody modified.
+                    if matches!(
+                        event.kind,
+                        notify_debouncer_full::notify::EventKind::Access(_)
+                    ) {
+                        continue;
+                    }
                     for path in &event.paths {
                         if !paths.contains(path) {
                             paths.push(path.clone());
@@ -332,8 +340,8 @@ fn refresh_art_siblings(conn: &mut Connection, cfg: &Config, root: &Root, rel: &
         .or_else(|| lower.strip_suffix("-poster.png"))
         .map(|s| format!("{dir_prefix}{}.", &name[..s.len()]));
 
-    for (rel2, (id, _, _, status, ..)) in known {
-        if status != "ready" {
+    for (rel2, kf) in known {
+        if kf.status != "ready" {
             continue;
         }
         let affected = match &poster_stem {
@@ -347,10 +355,31 @@ fn refresh_art_siblings(conn: &mut Connection, cfg: &Config, root: &Root, rel: &
                         .is_some_and(|rest| rest.matches('/').count() <= 1)
             }
         };
-        if affected {
-            tracing::info!("artwork changed; re-extracting {}/{rel2}", root.path);
-            extract::extract_file(conn, &cfg.ffprobe_path, root, &rel2, id)?;
+        if !affected {
+            continue;
         }
+        // Verify actual change before re-extracting: network filesystems
+        // (CIFS especially) surface events for files nobody modified.
+        let abs = Path::new(&root.path).join(&rel2);
+        let discovered = extract::discover_sidecar_art(&abs, &rel2, root.kind);
+        let same_art = match (kf.art.as_deref(), discovered.as_deref()) {
+            (Some("embedded"), None) => true,
+            (stored, found) => stored == found,
+        };
+        if same_art {
+            // Same art file as before: only re-extract if its content is
+            // newer than our extraction.
+            let art_fresh = discovered
+                .as_deref()
+                .and_then(|art_rel| reconcile::stat(&Path::new(&root.path).join(art_rel)))
+                .is_some_and(|(_, art_mtime)| art_mtime > kf.updated_at);
+            if !art_fresh {
+                tracing::debug!("ignoring no-op artwork event for {}/{rel2}", root.path);
+                continue;
+            }
+        }
+        tracing::info!("artwork changed; re-extracting {}/{rel2}", root.path);
+        extract::extract_file(conn, &cfg.ffprobe_path, root, &rel2, kf.id)?;
     }
     Ok(())
 }
@@ -359,11 +388,18 @@ fn refresh_art_siblings(conn: &mut Connection, cfg: &Config, root: &Root, rel: &
 fn refresh_nfo_sibling(conn: &mut Connection, cfg: &Config, root: &Root, nfo_rel: &str) -> Result<()> {
     let stem_prefix = format!("{}.", nfo_rel.trim_end_matches("nfo").trim_end_matches('.'));
     let known = files::known_files(conn, root.id)?;
-    for (rel, (id, ..)) in known {
-        if rel.starts_with(&stem_prefix) && rel != nfo_rel {
-            tracing::info!("nfo changed; re-extracting {}/{rel}", root.path);
-            extract::extract_file(conn, &cfg.ffprobe_path, root, &rel, id)?;
+    for (rel, kf) in known {
+        if !rel.starts_with(&stem_prefix) || rel == nfo_rel {
+            continue;
         }
+        // Verify actual change: spurious events are common on CIFS.
+        let abs = Path::new(&root.path).join(&rel);
+        if extract::nfo_mtime(&abs) == kf.nfo_mtime {
+            tracing::debug!("ignoring no-op nfo event for {}/{rel}", root.path);
+            continue;
+        }
+        tracing::info!("nfo changed; re-extracting {}/{rel}", root.path);
+        extract::extract_file(conn, &cfg.ffprobe_path, root, &rel, kf.id)?;
     }
     Ok(())
 }

@@ -67,29 +67,30 @@ pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Resu
         let Some((size, mtime)) = stat(entry.path()) else { continue };
 
         match known.remove(&rel) {
-            Some((id, db_size, db_mtime, status, db_nfo_mtime, db_art)) => {
+            Some(kf) => {
                 let art_stale = || {
                     let found = extract::discover_sidecar_art(entry.path(), &rel, root.kind);
-                    match db_art.as_deref() {
+                    match kf.art.as_deref() {
                         // Embedded art isn't discoverable by stat; only a
                         // new sidecar (which takes precedence) matters.
                         Some("embedded") => found.is_some(),
                         stored => stored != found.as_deref(),
                     }
                 };
-                if db_size != size || db_mtime != mtime {
+                if kf.size != size || kf.mtime != mtime {
                     files::upsert_pending(conn, root.id, &rel, size, mtime, root.kind, mime)?;
                     new_media += 1;
-                    to_extract.push((id, rel));
-                } else if status != "ready" {
+                    to_extract.push((kf.id, rel));
+                } else if kf.status != "ready" {
                     // Retry files that were pending/errored last time and
-                    // have been stable since.
-                    new_media += 1;
-                    to_extract.push((id, rel));
-                } else if extract::nfo_mtime(entry.path()) != db_nfo_mtime || art_stale() {
+                    // have been stable since. Not counted as new media: a
+                    // permanently-failing file must not re-trigger
+                    // auto-enrichment every reconcile.
+                    to_extract.push((kf.id, rel));
+                } else if extract::nfo_mtime(entry.path()) != kf.nfo_mtime || art_stale() {
                     // A sidecar (.nfo or artwork) appeared, vanished, or
                     // changed since extraction.
-                    to_extract.push((id, rel));
+                    to_extract.push((kf.id, rel));
                 }
             }
             None => {
@@ -102,9 +103,9 @@ pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Resu
     }
 
     // Anything left in `known` no longer exists on disk.
-    for (rel, (id, ..)) in &known {
+    for (rel, kf) in &known {
         tracing::info!("removing vanished file {}/{}", root.path, rel);
-        files::delete_file(conn, *id)?;
+        files::delete_file(conn, kf.id)?;
     }
 
     let count = to_extract.len();

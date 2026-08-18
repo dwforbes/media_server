@@ -56,18 +56,35 @@ pub fn get_root(conn: &Connection, id: i64) -> Result<Option<Root>> {
 
 // ---------------------------------------------------------------- scanner side
 
-/// Everything known for one root:
-/// rel_path -> (id, size, mtime, status, nfo_mtime, art).
-pub type KnownFile = (i64, i64, i64, String, Option<i64>, Option<String>);
+/// Everything known for one root, keyed by rel_path.
+#[derive(Debug, Clone)]
+pub struct KnownFile {
+    pub id: i64,
+    pub size: i64,
+    pub mtime: i64,
+    pub status: String,
+    pub nfo_mtime: Option<i64>,
+    pub art: Option<String>,
+    pub updated_at: i64,
+}
 
 pub fn known_files(conn: &Connection, root_id: i64) -> Result<HashMap<String, KnownFile>> {
     let mut stmt = conn.prepare(
-        "SELECT rel_path, id, size, mtime, status, nfo_mtime, art FROM files WHERE root_id = ?1",
+        "SELECT rel_path, id, size, mtime, status, nfo_mtime, art, updated_at
+         FROM files WHERE root_id = ?1",
     )?;
     let rows = stmt.query_map([root_id], |r| {
         Ok((
             r.get::<_, String>(0)?,
-            (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?),
+            KnownFile {
+                id: r.get(1)?,
+                size: r.get(2)?,
+                mtime: r.get(3)?,
+                status: r.get(4)?,
+                nfo_mtime: r.get(5)?,
+                art: r.get(6)?,
+                updated_at: r.get(7)?,
+            },
         ))
     })?;
     let mut out = HashMap::new();
