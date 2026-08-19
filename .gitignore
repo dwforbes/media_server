@@ -13,3 +13,7 @@
 *.db-shm
 *.db-wal
 *.uuid
+
+# Live configs are per-machine; the repo tracks *.example.toml instead
+/media-scanner.toml
+/media-server.toml

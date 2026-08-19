@@ -21,8 +21,8 @@ crates/media-db        shared library: schema, migrations, models, queries
 crates/media-scanner   the watcher/extractor daemon
 crates/media-server    the UPnP server
 crates/media-enrich    optional: writes TMDB-sourced .nfo sidecars (see below)
-media-scanner.toml     example configs (copy & edit)
-media-server.toml
+media-scanner.example.toml   example configs — copy to media-scanner.toml /
+media-server.example.toml    media-server.toml (gitignored) and edit
 ```
 
 ## Build & run
@@ -30,12 +30,17 @@ media-server.toml
 ```sh
 cargo build --release
 
-# 1. Edit media-scanner.toml: set your source folders ([[roots]] with kind
-#    movies / music / tv). Then populate the catalog:
+# 1. Copy the example configs and set your source folders ([[roots]] with
+#    kind movies / music / tv). The copies are gitignored — pulls never
+#    touch them.
+cp media-scanner.example.toml media-scanner.toml
+cp media-server.example.toml media-server.toml
+
+# 2. Populate the catalog:
 ./target/release/media-scanner --once          # single pass, then exits
 ./target/release/media-scanner                 # or run as the daemon
 
-# 2. Start the server (defaults: port 8200, auto-detected LAN IP):
+# 3. Start the server (defaults: port 8200, auto-detected LAN IP):
 ./target/release/media-server
 ```
 

@@ -1,4 +1,7 @@
-# media-scanner configuration.
+# media-scanner example configuration.
+# Copy to media-scanner.toml (gitignored) and edit — the live config is
+# yours and never conflicts with a git pull. New options appear here;
+# adopt them into your copy as needed.
 # Database lives on the internal disk (default path) — SQLite WAL is
 # unreliable on external/network volumes:
 #   ~/Library/Application Support/mediaserver/media.db

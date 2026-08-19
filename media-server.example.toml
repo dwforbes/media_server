@@ -1,4 +1,6 @@
-# media-server configuration.
+# media-server example configuration.
+# Copy to media-server.toml (gitignored) and edit — the live config is
+# yours and never conflicts with a git pull.
 # db_path defaults to ~/Library/Application Support/mediaserver/media.db —
 # matches the scanner. Run the scanner at least once before the server.
 
