@@ -26,8 +26,16 @@ fn is_mp4(path: &Path) -> bool {
         .is_some_and(|e| e == "mp4" || e == "m4v")
 }
 
-/// Counts of (subtitle streams, all streams) plus duration in seconds.
-fn probe(ffprobe: &str, path: &Path) -> Result<(usize, usize, f64)> {
+/// Stream census of a file.
+#[derive(Debug, Default, Clone, Copy)]
+struct Probe {
+    video: usize,
+    audio: usize,
+    subtitle: usize,
+    duration: f64,
+}
+
+fn probe(ffprobe: &str, path: &Path) -> Result<Probe> {
     let output = Command::new(ffprobe)
         .args([
             "-v", "error",
@@ -41,20 +49,21 @@ fn probe(ffprobe: &str, path: &Path) -> Result<(usize, usize, f64)> {
         bail!("ffprobe failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut subs = 0;
-    let mut streams = 0;
-    let mut duration = 0.0;
+    let mut p = Probe::default();
     for line in text.lines() {
-        if let Some(kind) = line.strip_prefix("codec_type=") {
-            streams += 1;
-            if kind == "subtitle" {
-                subs += 1;
+        match line.strip_prefix("codec_type=") {
+            Some("video") => p.video += 1,
+            Some("audio") => p.audio += 1,
+            Some("subtitle") => p.subtitle += 1,
+            Some(_) => {} // data/attachment streams: irrelevant to the check
+            None => {
+                if let Some(d) = line.strip_prefix("duration=") {
+                    p.duration = d.parse().unwrap_or(0.0);
+                }
             }
-        } else if let Some(d) = line.strip_prefix("duration=") {
-            duration = d.parse().unwrap_or(0.0);
         }
     }
-    Ok((subs, streams, duration))
+    Ok(p)
 }
 
 /// Embed `<stem>.srt` into an MP4 with no subtitle stream.
@@ -73,12 +82,12 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
         return Ok(Outcome::Skipped("srt empty or not UTF-8"));
     }
 
-    let (subs, streams, duration_before) = probe(ffprobe, media)?;
-    if subs > 0 {
+    let before = probe(ffprobe, media)?;
+    if before.subtitle > 0 {
         return Ok(Outcome::Skipped("already has subtitles"));
     }
-    if streams == 0 {
-        return Ok(Outcome::Skipped("no streams"));
+    if before.video == 0 {
+        return Ok(Outcome::Skipped("no video stream"));
     }
 
     // Mux to a temp file beside the original (same filesystem => atomic
@@ -97,7 +106,7 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
         // the moov atom, doubling I/O and leaving a window where the output
         // can lack its moov entirely; range-request streaming doesn't need it.
         .args([
-            "-map", "0", "-map", "1",
+            "-map", "0:v", "-map", "0:a?", "-map", "0:s?", "-map", "1",
             "-c", "copy", "-c:s", "mov_text",
             "-metadata:s:s:0", "language=eng",
             "-y",
@@ -114,16 +123,21 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
         let _ = f.sync_all();
     }
 
-    // Verify before replacing anything.
-    let (subs_after, streams_after, duration_after) = probe(ffprobe, &temp)?;
-    let sane = subs_after >= 1
-        && streams_after == streams + 1
-        && (duration_after - duration_before).abs() <= 1.0 + duration_before * 0.01;
+    // Verify before replacing anything: every video/audio stream preserved,
+    // a subtitle present, duration unchanged. Data/attachment streams are
+    // ignored on both sides — faithful copies of odd containers carry them.
+    let after = probe(ffprobe, &temp)?;
+    let sane = after.subtitle >= 1
+        && after.video == before.video
+        && after.audio == before.audio
+        && (after.duration - before.duration).abs() <= 1.0 + before.duration * 0.01;
     if !sane {
         let _ = std::fs::remove_file(&temp);
         bail!(
-            "mux verification failed (streams {streams}->{streams_after}, subs {subs_after}, \
-             duration {duration_before:.1}->{duration_after:.1}); original untouched"
+            "mux verification failed (video {}->{}, audio {}->{}, subs {}, \
+             duration {:.1}->{:.1}); original untouched",
+            before.video, after.video, before.audio, after.audio, after.subtitle,
+            before.duration, after.duration
         );
     }
 
