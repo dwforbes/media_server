@@ -18,3 +18,8 @@ friendly_name = "Home Media Server"
 
 # How many items each "Recently Added" view lists (Movies, TV Shows, Music).
 recent_count = 25
+
+# Seconds between periodic SSDP alive announcements (each sent twice per
+# cycle). Lower helps clients on lossy links (wifi) discover the server
+# sooner; 120 is a good balance.
+ssdp_alive_secs = 120

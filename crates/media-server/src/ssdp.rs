@@ -128,19 +128,21 @@ async fn notify(
     }
 }
 
-/// Periodic ssdp:alive announcements (with an initial double burst).
+/// Periodic ssdp:alive announcements. Each cycle sends the set twice a
+/// beat apart — multicast is unacknowledged and lossy (wifi especially),
+/// so a single datagram per cycle leaves clients waiting a whole interval
+/// when one drops.
 pub async fn alive_loop(
     senders: Arc<Vec<(Ipv4Addr, UdpSocket)>>,
     uuid: String,
     location: String,
+    every_secs: u64,
 ) {
-    notify(&senders, &uuid, &location, true).await;
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    notify(&senders, &uuid, &location, true).await;
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-    interval.tick().await; // consume the immediate first tick
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(every_secs.max(30)));
     loop {
-        interval.tick().await;
+        interval.tick().await; // first tick fires immediately (startup burst)
+        notify(&senders, &uuid, &location, true).await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         notify(&senders, &uuid, &location, true).await;
     }
 }

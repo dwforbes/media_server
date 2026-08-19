@@ -28,6 +28,14 @@ pub struct Config {
     /// How many items the "Recently Added" views list per media type.
     #[serde(default = "default_recent_count")]
     pub recent_count: usize,
+    /// Seconds between periodic SSDP alive announcements. Lower helps
+    /// clients on lossy links (wifi) discover the server sooner.
+    #[serde(default = "default_ssdp_alive_secs")]
+    pub ssdp_alive_secs: u64,
+}
+
+fn default_ssdp_alive_secs() -> u64 {
+    120
 }
 
 fn default_recent_count() -> usize {

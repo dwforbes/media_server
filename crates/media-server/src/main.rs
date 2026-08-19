@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
         ssdp_senders.clone(),
         uuid.clone(),
         location.clone(),
+        cfg.ssdp_alive_secs,
     ));
 
     let listener = tokio::net::TcpListener::bind(cfg.bind)
