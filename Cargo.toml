@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/media-db",
+    "crates/mp4-title",
     "crates/media-enrich",
     "crates/media-scanner",
     "crates/media-server",

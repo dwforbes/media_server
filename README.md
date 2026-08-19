@@ -131,6 +131,20 @@ sends `ssdp:byebye`.
   `mu:album:<b64>:<b64>`, `dir:<root>:<b64 path>`, `it:<file id>`) that maps directly to
   a query — no in-memory tree to invalidate.
 
+### mp4-title: fixing scene-titled containers
+
+Some release MP4s embed the scene filename as the container title, which players
+like VLC prefer over the server-supplied name once playback starts. `mp4-title`
+inspects and neutralizes that in place — a four-byte patch renaming the title atom
+to `free` (the standard padding atom), no re-muxing:
+
+```sh
+mp4-title file.mp4            # show the embedded title
+mp4-title --strip file.mp4    # neutralize it
+```
+
+The running scanner re-extracts touched files automatically (a harmless no-op).
+
 ## Not implemented (v1)
 
 - ContentDirectory `Search` (returns UPnP error 602) and GENA eventing (clients poll).
