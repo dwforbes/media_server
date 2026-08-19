@@ -10,6 +10,7 @@ anyhow.workspace = true
 axum = "0.8"
 base64.workspace = true
 clap.workspace = true
+if-addrs = "0.13"
 lofty = "0.21"
 quick-xml.workspace = true
 rusqlite.workspace = true

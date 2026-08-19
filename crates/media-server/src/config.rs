@@ -12,8 +12,14 @@ pub struct Config {
     /// HTTP listen address, e.g. "0.0.0.0:8200".
     #[serde(default = "default_bind")]
     pub bind: SocketAddr,
-    /// LAN IP advertised in SSDP and media URLs. Auto-detected when unset.
+    /// LAN IP advertised in SSDP and media URLs — the canonical address
+    /// clients connect to. Auto-detected when unset.
     pub advertise_ip: Option<IpAddr>,
+    /// Local interface IPv4 addresses to announce SSDP on. On a multi-homed
+    /// host (wired + wifi on different networks) announcements go out on
+    /// each, all pointing at the canonical advertise_ip. Defaults to every
+    /// non-loopback IPv4 interface.
+    pub ssdp_addrs: Option<Vec<std::net::Ipv4Addr>>,
     #[serde(default = "default_name")]
     pub friendly_name: String,
     /// Optional custom device icon (PNG, ideally 120x120) shown by clients
@@ -52,6 +58,28 @@ impl Config {
         let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
         sock.connect("8.8.8.8:80")?;
         Ok(sock.local_addr()?.ip())
+    }
+
+    /// Interfaces to announce SSDP on: the configured list, else every
+    /// usable local IPv4 interface.
+    pub fn ssdp_interfaces(&self) -> Vec<std::net::Ipv4Addr> {
+        if let Some(addrs) = &self.ssdp_addrs {
+            return addrs.clone();
+        }
+        if_addrs::get_if_addrs()
+            .map(|ifs| {
+                ifs.into_iter()
+                    .filter_map(|i| match i.ip() {
+                        IpAddr::V4(v4)
+                            if !v4.is_loopback() && !v4.is_link_local() =>
+                        {
+                            Some(v4)
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 

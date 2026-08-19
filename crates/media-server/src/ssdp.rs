@@ -25,7 +25,9 @@ fn targets(uuid: &str) -> Vec<(String, String)> {
     out
 }
 
-pub fn bind_socket() -> Result<Arc<UdpSocket>> {
+/// Receiver: one socket on 0.0.0.0:1900, joined to the SSDP group on every
+/// announce interface so M-SEARCH is heard from each attached network.
+pub fn bind_socket(interfaces: &[Ipv4Addr]) -> Result<Arc<UdpSocket>> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .context("creating SSDP socket")?;
     socket.set_reuse_address(true)?;
@@ -35,10 +37,41 @@ pub fn bind_socket() -> Result<Arc<UdpSocket>> {
     socket.bind(&addr.into()).context("binding UDP 1900")?;
     socket.set_nonblocking(true)?;
     let socket = UdpSocket::from_std(socket.into())?;
-    socket
-        .join_multicast_v4(Ipv4Addr::new(239, 255, 255, 250), Ipv4Addr::UNSPECIFIED)
-        .context("joining SSDP multicast group")?;
+    let group = Ipv4Addr::new(239, 255, 255, 250);
+    if interfaces.is_empty() {
+        socket
+            .join_multicast_v4(group, Ipv4Addr::UNSPECIFIED)
+            .context("joining SSDP multicast group")?;
+    } else {
+        for iface in interfaces {
+            if let Err(err) = socket.join_multicast_v4(group, *iface) {
+                tracing::warn!("could not join SSDP group on {iface}: {err}");
+            }
+        }
+    }
     Ok(Arc::new(socket))
+}
+
+/// Announce senders: one socket per interface with IP_MULTICAST_IF set, so
+/// NOTIFY goes out on every attached network (all advertising the same
+/// canonical LOCATION).
+pub fn make_senders(interfaces: &[Ipv4Addr]) -> Result<Arc<Vec<(Ipv4Addr, UdpSocket)>>> {
+    let mut senders = Vec::new();
+    for iface in interfaces {
+        let make = || -> Result<UdpSocket> {
+            let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+            socket.set_multicast_if_v4(iface)?;
+            let bind: SocketAddr = SocketAddr::new((*iface).into(), 0);
+            socket.bind(&bind.into())?;
+            socket.set_nonblocking(true)?;
+            Ok(UdpSocket::from_std(socket.into())?)
+        };
+        match make() {
+            Ok(socket) => senders.push((*iface, socket)),
+            Err(err) => tracing::warn!("no SSDP announcements on {iface}: {err}"),
+        }
+    }
+    Ok(Arc::new(senders))
 }
 
 /// Answer M-SEARCH queries forever.
@@ -74,33 +107,44 @@ pub async fn respond_loop(socket: Arc<UdpSocket>, uuid: String, location: String
     }
 }
 
-async fn notify(socket: &UdpSocket, uuid: &str, location: &str, alive: bool) {
+async fn notify(
+    senders: &[(Ipv4Addr, UdpSocket)],
+    uuid: &str,
+    location: &str,
+    alive: bool,
+) {
     let nts = if alive { "ssdp:alive" } else { "ssdp:byebye" };
+    let addr: SocketAddr = SSDP_ADDR.parse().unwrap();
     for (nt, usn) in targets(uuid) {
         let msg = format!(
             "NOTIFY * HTTP/1.1\r\nHOST: {SSDP_ADDR}\r\nCACHE-CONTROL: max-age={MAX_AGE}\r\nLOCATION: {location}\r\nNT: {nt}\r\nNTS: {nts}\r\nSERVER: {SERVER_ID}\r\nUSN: {usn}\r\n\r\n"
         );
-        let addr: SocketAddr = SSDP_ADDR.parse().unwrap();
-        if let Err(err) = socket.send_to(msg.as_bytes(), addr).await {
-            tracing::warn!("SSDP notify failed: {err}");
+        for (iface, socket) in senders {
+            if let Err(err) = socket.send_to(msg.as_bytes(), addr).await {
+                tracing::debug!("SSDP notify on {iface} failed: {err}");
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
 /// Periodic ssdp:alive announcements (with an initial double burst).
-pub async fn alive_loop(socket: Arc<UdpSocket>, uuid: String, location: String) {
-    notify(&socket, &uuid, &location, true).await;
+pub async fn alive_loop(
+    senders: Arc<Vec<(Ipv4Addr, UdpSocket)>>,
+    uuid: String,
+    location: String,
+) {
+    notify(&senders, &uuid, &location, true).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    notify(&socket, &uuid, &location, true).await;
+    notify(&senders, &uuid, &location, true).await;
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
     interval.tick().await; // consume the immediate first tick
     loop {
         interval.tick().await;
-        notify(&socket, &uuid, &location, true).await;
+        notify(&senders, &uuid, &location, true).await;
     }
 }
 
-pub async fn byebye(socket: &UdpSocket, uuid: &str, location: &str) {
-    notify(socket, uuid, location, false).await;
+pub async fn byebye(senders: &[(Ipv4Addr, UdpSocket)], uuid: &str, location: &str) {
+    notify(senders, uuid, location, false).await;
 }

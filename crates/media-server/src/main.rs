@@ -69,14 +69,24 @@ async fn main() -> Result<()> {
     // know to refresh. data_version changes on any other-connection commit.
     spawn_db_watch(&db_path, state.clone())?;
 
-    let ssdp_socket = ssdp::bind_socket()?;
+    let interfaces = cfg.ssdp_interfaces();
+    tracing::info!(
+        "SSDP announcing on [{}], canonical address {ip}",
+        interfaces
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let ssdp_socket = ssdp::bind_socket(&interfaces)?;
+    let ssdp_senders = ssdp::make_senders(&interfaces)?;
     tokio::spawn(ssdp::respond_loop(
         ssdp_socket.clone(),
         uuid.clone(),
         location.clone(),
     ));
     tokio::spawn(ssdp::alive_loop(
-        ssdp_socket.clone(),
+        ssdp_senders.clone(),
         uuid.clone(),
         location.clone(),
     ));
@@ -93,7 +103,7 @@ async fn main() -> Result<()> {
         })
         .await?;
 
-    ssdp::byebye(&ssdp_socket, &uuid, &location).await;
+    ssdp::byebye(&ssdp_senders, &uuid, &location).await;
     Ok(())
 }
 

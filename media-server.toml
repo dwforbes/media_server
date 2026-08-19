@@ -9,3 +9,9 @@ bind = "0.0.0.0:8200"
 #advertise_ip = "192.168.1.10"
 
 friendly_name = "Rust Media Server"
+
+# Multi-homed hosts (e.g. wired + wifi on different networks): SSDP is
+# announced on every non-loopback IPv4 interface by default, each
+# announcement pointing clients at the canonical advertise_ip. List
+# interfaces explicitly to restrict:
+#ssdp_addrs = ["192.168.1.42", "10.0.0.5"]
