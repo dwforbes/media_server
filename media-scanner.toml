@@ -23,6 +23,11 @@ auto = true
 command = "media-enrich"
 quiet_secs = 60
 min_interval_secs = 600
+# Also neutralize scene-filename titles embedded in MP4/MKV containers
+# (players otherwise show them instead of the catalog title once playback
+# starts). The one enrichment step that writes into media files — a
+# header-only, in-place patch; opt-in.
+strip_titles = true
 
 [[roots]]
 path = "/Volumes/172.17.0.1/Movies"

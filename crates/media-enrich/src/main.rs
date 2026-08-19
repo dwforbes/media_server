@@ -40,6 +40,10 @@ struct Args {
     /// Skip IMDb ratings.
     #[arg(long)]
     no_ratings: bool,
+    /// Neutralize embedded container titles in video files (also enabled by
+    /// strip_titles = true in the config's [enrich] section).
+    #[arg(long)]
+    strip_titles: bool,
     /// Re-download the cached IMDb ratings dataset when older than this.
     #[arg(long, default_value_t = 7)]
     ratings_max_age_days: u64,
@@ -51,6 +55,21 @@ struct Args {
 #[derive(Deserialize)]
 struct ScannerConfig {
     roots: Vec<RootConfig>,
+    #[serde(default)]
+    enrich: EnrichSection,
+}
+
+/// The scanner's [enrich] section; only strip_titles concerns this tool,
+/// the rest is read (and ignored here) so the shared config file parses.
+#[derive(Deserialize, Default)]
+struct EnrichSection {
+    /// Neutralize scene-filename titles embedded in MP4/MKV containers, which
+    /// players otherwise show in place of the catalog title during playback.
+    /// Opt-in: this is the one enrichment step that writes into media files.
+    #[serde(default)]
+    strip_titles: bool,
+    #[serde(flatten)]
+    _rest: std::collections::HashMap<String, toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +100,44 @@ fn nfo_state(nfo_path: &Path) -> (NfoState, bool) {
     }
 }
 
+/// Walk every video file in movie/tv roots and neutralize embedded
+/// container titles. Read-only inspection first, so untitled files (the
+/// vast majority) are never opened for writing.
+fn strip_embedded_titles(config: &ScannerConfig) {
+    use media_db::container_title::{self, TitleStatus};
+    let mut stripped = 0usize;
+    for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
+        if !root.path.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&root.path)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .flatten()
+            .filter(|e| e.file_type().is_file() && is_video(e.path()))
+        {
+            let path = entry.path();
+            match container_title::inspect(path) {
+                Ok(TitleStatus::Titles(_)) => match container_title::strip(path) {
+                    Ok(removed) => {
+                        for text in removed {
+                            println!("stripped embedded title {text:?} from {}", path.display());
+                            stripped += 1;
+                        }
+                    }
+                    Err(err) => eprintln!("{}: could not strip title: {err:#}", path.display()),
+                },
+                Ok(_) => {}
+                Err(err) => tracing::debug!("{}: title inspect failed: {err:#}", path.display()),
+            }
+        }
+    }
+    if stripped > 0 {
+        println!("embedded titles stripped: {stripped}");
+    }
+}
+
 /// "<stem>-poster.jpg" next to the media file (Kodi convention).
 fn poster_path_for(media: &Path) -> PathBuf {
     let stem = media.file_stem().unwrap_or_default().to_string_lossy();
@@ -108,6 +165,12 @@ fn main() -> Result<()> {
             .with_context(|| format!("reading {}", args.config.display()))?,
     )
     .with_context(|| format!("parsing {}", args.config.display()))?;
+
+    if (args.strip_titles || config.enrich.strip_titles) && !args.dry_run {
+        strip_embedded_titles(&config);
+    } else if args.dry_run && (args.strip_titles || config.enrich.strip_titles) {
+        println!("(dry run: embedded-title stripping skipped)");
+    }
 
     // Gather every movie file and decide what to do with it. A file needs
     // work when its .nfo is missing/refreshable or its poster is missing.

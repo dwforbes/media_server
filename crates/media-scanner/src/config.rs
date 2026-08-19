@@ -39,6 +39,12 @@ pub struct EnrichConfig {
     /// Floor between consecutive runs.
     #[serde(default = "default_min_interval_secs")]
     pub min_interval_secs: u64,
+    /// Read by media-enrich (which shares this file): neutralize embedded
+    /// container titles in video files. Accepted here so the strict parser
+    /// allows it; the scanner itself does not act on it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub strip_titles: bool,
 }
 
 fn default_true() -> bool {

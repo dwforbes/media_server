@@ -157,6 +157,11 @@ find /mnt/media -type f \( -iname "*.mp4" -o -iname "*.mkv" \) -print0 \
 
 The running scanner re-extracts touched files automatically (a harmless no-op).
 
+The same stripping runs automatically as part of enrichment when `strip_titles = true`
+is set in the scanner config's `[enrich]` section (or with `media-enrich
+--strip-titles`), so newly added releases are cleaned without a manual step. It is
+opt-in because it is the one step that writes into media files rather than beside them.
+
 ## Not implemented (v1)
 
 - ContentDirectory `Search` (returns UPnP error 602) and GENA eventing (clients poll).
