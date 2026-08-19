@@ -92,11 +92,14 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
         .arg(media)
         .arg("-i")
         .arg(&srt)
+        // A plain single-pass stream copy, exactly like the manual recipe.
+        // No +faststart: it rewrites the whole file a second time to move
+        // the moov atom, doubling I/O and leaving a window where the output
+        // can lack its moov entirely; range-request streaming doesn't need it.
         .args([
-            "-map", "0", "-map", "1:0",
+            "-map", "0", "-map", "1",
             "-c", "copy", "-c:s", "mov_text",
             "-metadata:s:s:0", "language=eng",
-            "-movflags", "+faststart",
             "-y",
         ])
         .arg(&temp)
@@ -105,6 +108,10 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
     if !status.success() {
         let _ = std::fs::remove_file(&temp);
         bail!("ffmpeg mux failed ({status})");
+    }
+    // Make sure the mux is fully on disk before probing or renaming.
+    if let Ok(f) = std::fs::File::open(&temp) {
+        let _ = f.sync_all();
     }
 
     // Verify before replacing anything.
