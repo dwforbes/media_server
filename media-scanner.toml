@@ -30,13 +30,13 @@ min_interval_secs = 600
 strip_titles = true
 
 [[roots]]
-path = "/Volumes/172.17.0.1/Movies"
+path = "/mnt/media/Movies"
 kind = "movies"
 
 [[roots]]
-path = "/Volumes/172.17.0.1/Series"
+path = "/mnt/media/Series"
 kind = "tv"
 
 [[roots]]
-path = "/Volumes/172.17.0.1/Audio"
+path = "/mnt/media/Audio"
 kind = "music"
