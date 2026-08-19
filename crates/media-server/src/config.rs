@@ -25,6 +25,13 @@ pub struct Config {
     /// Optional custom device icon (PNG, ideally 120x120) shown by clients
     /// next to the server name. A built-in icon is used when unset.
     pub icon_png: Option<PathBuf>,
+    /// How many items the "Recently Added" views list per media type.
+    #[serde(default = "default_recent_count")]
+    pub recent_count: usize,
+}
+
+fn default_recent_count() -> usize {
+    25
 }
 
 fn default_bind() -> SocketAddr {

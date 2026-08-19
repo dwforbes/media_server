@@ -28,6 +28,7 @@ pub struct AppState {
     pub base_url: String,
     /// (120px icon bytes, 48px icon bytes, whether user-supplied).
     pub icon: (Vec<u8>, Vec<u8>, bool),
+    pub recent_count: usize,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -147,7 +148,7 @@ async fn browse(state: &AppState, body: &str, update_id: u32) -> Response {
             }
         }
     } else {
-        match tree::browse_children(&conn, &oid) {
+        match tree::browse_children(&conn, &oid, state.recent_count) {
             Ok(entries) => {
                 let total = entries.len();
                 let end = if requested_count == 0 {

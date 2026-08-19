@@ -121,9 +121,10 @@ pub fn upsert_pending(
     kind: MediaKind,
     mime: &str,
 ) -> Result<i64> {
+    // added_at is set on insert only; the conflict branch leaves it alone.
     conn.execute(
-        "INSERT INTO files(root_id, rel_path, size, mtime, kind, mime, status, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', unixepoch())
+        "INSERT INTO files(root_id, rel_path, size, mtime, kind, mime, status, updated_at, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', unixepoch(), unixepoch())
          ON CONFLICT(root_id, rel_path) DO UPDATE SET
              size = excluded.size, mtime = excluded.mtime, kind = excluded.kind,
              mime = excluded.mime, status = 'pending', updated_at = excluded.updated_at",

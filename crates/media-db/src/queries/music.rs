@@ -85,6 +85,14 @@ fn track_from_row(row: &Row) -> rusqlite::Result<BrowseItem> {
     Ok(item)
 }
 
+/// The most recently catalogued tracks, newest first.
+pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<BrowseItem>> {
+    let sql = format!("{TRACK_SELECT} ORDER BY f.added_at DESC, f.id DESC LIMIT ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([limit as i64], track_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Display artist = album_artist when set, else track artist.
 const DISPLAY_ARTIST: &str = "COALESCE(mu.album_artist, mu.artist, 'Unknown Artist')";
 

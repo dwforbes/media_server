@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -108,4 +108,12 @@ pub const MIGRATIONS: &[&str] = &[
     "ALTER TABLE files ADD COLUMN art TEXT;",
     // 4 -> 5: IMDb rating (0-10), sourced from .nfo sidecars.
     "ALTER TABLE movies ADD COLUMN rating REAL;",
+    // 5 -> 6: when a file first entered the catalog (never rewritten, unlike
+    // updated_at), for the Recently Added views. Existing rows inherit their
+    // file mtime as the best available approximation.
+    r#"
+    ALTER TABLE files ADD COLUMN added_at INTEGER NOT NULL DEFAULT 0;
+    UPDATE files SET added_at = mtime;
+    CREATE INDEX idx_files_added ON files(kind, status, added_at DESC);
+    "#,
 ];

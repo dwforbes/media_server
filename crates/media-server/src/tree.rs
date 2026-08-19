@@ -111,8 +111,31 @@ fn season_title(season: i64) -> String {
     }
 }
 
+/// A recently-added movie keeps its title (the All Movies name is clear on
+/// its own); TV and music entries get a fully-qualified name since a bare
+/// episode or track title means little out of context.
+fn recent_tv_title(ep: &media_db::BrowseItem) -> String {
+    let series = ep.series.as_deref().unwrap_or("Unknown Series");
+    match (ep.season, ep.episode) {
+        (Some(s), Some(e)) => format!("{series} S{s:02}E{e:02} - {}", ep.title),
+        _ => format!("{series} - {}", ep.title),
+    }
+}
+
+fn recent_track_title(track: &media_db::BrowseItem) -> String {
+    let artist = track.artist.as_deref().unwrap_or("Unknown Artist");
+    match &track.album {
+        Some(album) => format!("{artist} - {album} - {}", track.title),
+        None => format!("{artist} - {}", track.title),
+    }
+}
+
 /// Children of a container, for BrowseDirectChildren.
-pub fn browse_children(conn: &Connection, oid: &ObjectId) -> Result<Vec<Entry>> {
+pub fn browse_children(
+    conn: &Connection,
+    oid: &ObjectId,
+    recent_count: usize,
+) -> Result<Vec<Entry>> {
     use ObjectId::*;
     Ok(match oid {
         Root => {
@@ -132,6 +155,7 @@ pub fn browse_children(conn: &Connection, oid: &ObjectId) -> Result<Vec<Entry>> 
 
         Movies => vec![
             container(&MoviesAll, oid, "All Movies"),
+            container(&MoviesRecent, oid, "Recently Added"),
             container(&MoviesByYear, oid, "By Year"),
             container(&MoviesByDecade, oid, "By Decade"),
             container(&MoviesByGenre, oid, "By Genre"),
@@ -140,6 +164,7 @@ pub fn browse_children(conn: &Connection, oid: &ObjectId) -> Result<Vec<Entry>> 
             container(&MoviesFolders, oid, "Folders"),
         ],
         MoviesAll => items(oid, movies::all_movies(conn)?),
+        MoviesRecent => items(oid, movies::recent(conn, recent_count)?),
         MoviesByYear => movies::years(conn)?
             .into_iter()
             .map(|y| container(&MoviesYear(y), oid, y.to_string()))
@@ -167,11 +192,22 @@ pub fn browse_children(conn: &Connection, oid: &ObjectId) -> Result<Vec<Entry>> 
         MoviesFolders => folder_roots(conn, MediaKind::Movies, oid)?,
 
         Music => vec![
+            container(&MusicRecent, oid, "Recently Added"),
             container(&MusicArtists, oid, "Artists"),
             container(&MusicAlbums, oid, "Albums"),
             container(&MusicByGenre, oid, "Genres"),
             container(&MusicFolders, oid, "Folders"),
         ],
+        MusicRecent => {
+            let tracks = music::recent(conn, recent_count)?
+                .into_iter()
+                .map(|mut t| {
+                    t.title = recent_track_title(&t);
+                    t
+                })
+                .collect();
+            items(oid, tracks)
+        }
         MusicArtists => music::artists(conn)?
             .into_iter()
             .map(|a| container_class(&MusicArtist(a.clone()), oid, a, CLASS_ARTIST))
@@ -213,7 +249,10 @@ pub fn browse_children(conn: &Connection, oid: &ObjectId) -> Result<Vec<Entry>> 
         MusicFolders => folder_roots(conn, MediaKind::Music, oid)?,
 
         Tv => {
-            let mut out = vec![container(&TvFolders, oid, "Folders")];
+            let mut out = vec![
+                container(&TvRecent, oid, "Recently Added"),
+                container(&TvFolders, oid, "Folders"),
+            ];
             for (series, art) in tv::series_list(conn)? {
                 out.push(with_art(
                     container(&TvSeries(series.clone()), oid, series),
@@ -221,6 +260,16 @@ pub fn browse_children(conn: &Connection, oid: &ObjectId) -> Result<Vec<Entry>> 
                 ));
             }
             out
+        }
+        TvRecent => {
+            let eps = tv::recent(conn, recent_count)?
+                .into_iter()
+                .map(|mut ep| {
+                    ep.title = recent_tv_title(&ep);
+                    ep
+                })
+                .collect();
+            items(oid, eps)
         }
         TvSeries(series) => tv::seasons(conn, series)?
             .into_iter()
@@ -289,6 +338,9 @@ pub fn browse_metadata(conn: &Connection, oid: &ObjectId) -> Result<Entry> {
         Root => container(&Root, &Root, "Media"),
         Movies => container(oid, &Root, "Movies"),
         MoviesAll => container(oid, &Movies, "All Movies"),
+        MoviesRecent => container(oid, &Movies, "Recently Added"),
+        MusicRecent => container(oid, &Music, "Recently Added"),
+        TvRecent => container(oid, &Tv, "Recently Added"),
         MoviesByYear => container(oid, &Movies, "By Year"),
         MoviesYear(y) => container(oid, &MoviesByYear, y.to_string()),
         MoviesByDecade => container(oid, &Movies, "By Decade"),

@@ -95,6 +95,17 @@ pub fn all_movies(conn: &Connection) -> Result<Vec<BrowseItem>> {
     Ok(merge_movies(rows.collect::<Result<Vec<_>, _>>()?))
 }
 
+/// The most recently catalogued movies, newest first. Fetches a margin so
+/// rendition merging (which collapses rows) still yields `limit` items.
+pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<BrowseItem>> {
+    let sql = format!("{MOVIE_SELECT} ORDER BY f.added_at DESC, f.id DESC LIMIT ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([(limit * 2) as i64], movie_from_row)?;
+    let mut merged = merge_movies(rows.collect::<Result<Vec<_>, _>>()?);
+    merged.truncate(limit);
+    Ok(merged)
+}
+
 pub fn years(conn: &Connection) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT m.year FROM movies m JOIN files f ON f.id = m.file_id

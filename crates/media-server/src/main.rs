@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
         friendly_name: cfg.friendly_name.clone(),
         base_url: base_url.clone(),
         icon,
+        recent_count: cfg.recent_count,
     });
 
     // Bump SystemUpdateID whenever the scanner commits, so browsing clients

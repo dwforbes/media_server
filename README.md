@@ -51,15 +51,22 @@ it, videos are still catalogued from their names — just without technical attr
 ## What clients see
 
 ```
-Movies    → All Movies / By Year / By Decade / By Genre / By Director / By Rating / Folders
-Music     → Artists / Albums / Genres / Folders
-TV Shows  → Series → Season → Episodes, plus Folders
+Movies    → All Movies / Recently Added / By Year / By Decade / By Genre /
+            By Director / By Rating / Folders
+Music     → Recently Added / Artists / Albums / Genres / Folders
+TV Shows  → Recently Added / Series → Season → Episodes, plus Folders
 ```
 
 Metadata is local-only: filename parsing (`Heat (1995).mkv`, `Show S01E02 Title.mkv`),
 embedded tags (ID3/Vorbis/FLAC/MP4 via lofty), and Kodi-style `.nfo` sidecars
 (`<movie><title><year><genre><director>`, `<episodedetails>`), which override
 name-parsed values.
+
+**Recently Added** lists the newest catalogued items per type (`recent_count` in
+`media-server.toml`, default 25), by the time the file entered the catalog — not its
+mtime, and untouched by later re-extraction. TV and music entries are fully qualified
+("The Wire S01E03 - The Buys", "Artist - Album - Track") since a bare title means
+little out of context.
 
 **Multiple qualities of the same item** (same movie title + year, or the same
 episode number) are merged into a single entry carrying one `<res>` per file,

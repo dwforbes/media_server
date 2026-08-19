@@ -10,6 +10,7 @@ pub enum ObjectId {
     // Movies
     Movies,
     MoviesAll,
+    MoviesRecent,
     MoviesByYear,
     MoviesYear(i64),
     MoviesByDecade,
@@ -23,6 +24,7 @@ pub enum ObjectId {
     MoviesFolders,
     // Music
     Music,
+    MusicRecent,
     MusicArtists,
     MusicArtist(String),
     MusicAlbums,
@@ -32,6 +34,7 @@ pub enum ObjectId {
     MusicFolders,
     // TV
     Tv,
+    TvRecent,
     TvSeries(String),
     TvSeason { series: String, season: i64 },
     TvFolders,
@@ -57,6 +60,9 @@ impl ObjectId {
             Root => "0".into(),
             Movies => "mv".into(),
             MoviesAll => "mv:all".into(),
+            MoviesRecent => "mv:recent".into(),
+            MusicRecent => "mu:recent".into(),
+            TvRecent => "tv:recent".into(),
             MoviesByYear => "mv:year".into(),
             MoviesYear(y) => format!("mv:year:{y}"),
             MoviesByDecade => "mv:decade".into(),
@@ -95,6 +101,9 @@ impl ObjectId {
         Some(match parts.as_slice() {
             ["mv"] => Movies,
             ["mv", "all"] => MoviesAll,
+            ["mv", "recent"] => MoviesRecent,
+            ["mu", "recent"] => MusicRecent,
+            ["tv", "recent"] => TvRecent,
             ["mv", "year"] => MoviesByYear,
             ["mv", "year", y] => MoviesYear(y.parse().ok()?),
             ["mv", "decade"] => MoviesByDecade,

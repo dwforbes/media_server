@@ -53,6 +53,15 @@ fn episode_from_row(row: &Row) -> rusqlite::Result<BrowseItem> {
     Ok(item)
 }
 
+/// The most recently catalogued episodes, newest first (no rendition
+/// merging: a REPACK arriving is itself a recent addition).
+pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<BrowseItem>> {
+    let sql = format!("{EPISODE_SELECT} ORDER BY f.added_at DESC, f.id DESC LIMIT ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([limit as i64], episode_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Series grouped case-insensitively (release names vary in casing):
 /// (display name, art file id).
 pub fn series_list(conn: &Connection) -> Result<Vec<(String, Option<i64>)>> {
