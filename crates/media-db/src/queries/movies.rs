@@ -89,7 +89,7 @@ fn movie_from_row(row: &Row) -> rusqlite::Result<BrowseItem> {
 }
 
 pub fn all_movies(conn: &Connection) -> Result<Vec<BrowseItem>> {
-    let sql = format!("{MOVIE_SELECT} ORDER BY m.sort_title");
+    let sql = format!("{MOVIE_SELECT} ORDER BY m.sort_title COLLATE NOCASE");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], movie_from_row)?;
     Ok(merge_movies(rows.collect::<Result<Vec<_>, _>>()?))
@@ -119,7 +119,7 @@ pub fn decades(conn: &Connection) -> Result<Vec<i64>> {
 pub fn by_decade(conn: &Connection, decade: i64) -> Result<Vec<BrowseItem>> {
     let sql = format!(
         "{MOVIE_SELECT} AND m.year >= ?1 AND m.year < ?1 + 10
-         ORDER BY m.sort_title"
+         ORDER BY m.sort_title COLLATE NOCASE"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([decade], movie_from_row)?;
@@ -127,7 +127,7 @@ pub fn by_decade(conn: &Connection, decade: i64) -> Result<Vec<BrowseItem>> {
 }
 
 pub fn by_year(conn: &Connection, year: i64) -> Result<Vec<BrowseItem>> {
-    let sql = format!("{MOVIE_SELECT} AND m.year = ?1 ORDER BY m.sort_title");
+    let sql = format!("{MOVIE_SELECT} AND m.year = ?1 ORDER BY m.sort_title COLLATE NOCASE");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([year], movie_from_row)?;
     Ok(merge_movies(rows.collect::<Result<Vec<_>, _>>()?))
@@ -160,7 +160,7 @@ pub fn directors(conn: &Connection) -> Result<Vec<(i64, String)>> {
 pub fn by_director(conn: &Connection, director_id: i64) -> Result<Vec<BrowseItem>> {
     let sql = format!(
         "{MOVIE_SELECT} AND f.id IN (SELECT file_id FROM movie_directors WHERE director_id = ?1)
-         ORDER BY m.year, m.sort_title"
+         ORDER BY m.year, m.sort_title COLLATE NOCASE"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([director_id], movie_from_row)?;
@@ -171,7 +171,7 @@ pub fn by_director(conn: &Connection, director_id: i64) -> Result<Vec<BrowseItem
 pub fn by_rating(conn: &Connection, lo: f64, hi: f64) -> Result<Vec<BrowseItem>> {
     let sql = format!(
         "{MOVIE_SELECT} AND m.rating >= ?1 AND m.rating < ?2
-         ORDER BY m.rating DESC, m.sort_title"
+         ORDER BY m.rating DESC, m.sort_title COLLATE NOCASE"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![lo, hi], movie_from_row)?;
@@ -179,7 +179,7 @@ pub fn by_rating(conn: &Connection, lo: f64, hi: f64) -> Result<Vec<BrowseItem>>
 }
 
 pub fn unrated(conn: &Connection) -> Result<Vec<BrowseItem>> {
-    let sql = format!("{MOVIE_SELECT} AND m.rating IS NULL ORDER BY m.sort_title");
+    let sql = format!("{MOVIE_SELECT} AND m.rating IS NULL ORDER BY m.sort_title COLLATE NOCASE");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], movie_from_row)?;
     Ok(merge_movies(rows.collect::<Result<Vec<_>, _>>()?))
@@ -188,7 +188,7 @@ pub fn unrated(conn: &Connection) -> Result<Vec<BrowseItem>> {
 pub fn by_genre(conn: &Connection, genre_id: i64) -> Result<Vec<BrowseItem>> {
     let sql = format!(
         "{MOVIE_SELECT} AND f.id IN (SELECT file_id FROM movie_genres WHERE genre_id = ?1)
-         ORDER BY m.sort_title"
+         ORDER BY m.sort_title COLLATE NOCASE"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([genre_id], movie_from_row)?;
