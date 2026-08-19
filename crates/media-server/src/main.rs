@@ -98,6 +98,19 @@ async fn main() -> Result<()> {
 
     axum::serve(listener, http::router(state))
         .with_graceful_shutdown(async move {
+            // SIGINT for the terminal, SIGTERM for systemd stop/restart.
+            #[cfg(unix)]
+            {
+                let mut term = tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::terminate(),
+                )
+                .expect("installing SIGTERM handler");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            #[cfg(not(unix))]
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down: sending ssdp:byebye");
         })
