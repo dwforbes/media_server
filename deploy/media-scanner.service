@@ -1,5 +1,11 @@
 # /etc/systemd/system/media-scanner.service
-# Adjust User= and the /home/pi/media_server paths to your install.
+# Before installing:
+#   1. Set User= to your actual account (`whoami`) — newer Raspberry Pi OS
+#      images have no `pi` user. A wrong user fails with status=217/USER.
+#   2. Fix every /home/pi and /mnt/media path to match your install.
+#   3. Pre-create the catalog directory (mkdir -p ~/.local/state/mediaserver):
+#      ReadWritePaths targets must exist when the unit starts, or the
+#      sandbox fails with status=226/NAMESPACE.
 [Unit]
 Description=Media catalog scanner (watch + reconcile + auto-enrich)
 Wants=network-online.target
