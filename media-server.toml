@@ -8,7 +8,7 @@ bind = "0.0.0.0:8200"
 # LAN IP advertised to UPnP clients; auto-detected when unset.
 #advertise_ip = "192.168.1.10"
 
-friendly_name = "Rust Media Server"
+friendly_name = "Home Media Server"
 
 # Multi-homed hosts (e.g. wired + wifi on different networks): SSDP is
 # announced on every non-loopback IPv4 interface by default, each
