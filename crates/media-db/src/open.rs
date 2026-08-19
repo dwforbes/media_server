@@ -5,12 +5,16 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::schema::{MIGRATIONS, SCHEMA_VERSION};
 
-/// Default database location: on the internal disk (not the media volume),
-/// since SQLite WAL locking is unreliable on external/network filesystems.
+/// Default database location: on local disk (not the media volume), since
+/// SQLite WAL locking is unreliable on external/network filesystems.
 pub fn default_db_path() -> std::path::PathBuf {
     #[allow(deprecated)]
     let home = std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join("Library/Application Support/mediaserver/media.db")
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/mediaserver/media.db")
+    } else {
+        home.join(".local/state/mediaserver/media.db")
+    }
 }
 
 fn apply_pragmas(conn: &Connection) -> Result<()> {

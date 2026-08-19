@@ -1,0 +1,28 @@
+# /etc/systemd/system/media-scanner.service
+# Adjust User= and the /home/pi/media_server paths to your install.
+[Unit]
+Description=Media catalog scanner (watch + reconcile + auto-enrich)
+Wants=network-online.target
+After=network-online.target
+# Don't start until the media share is mounted; adjust to your mount point.
+RequiresMountsFor=/mnt/media
+
+[Service]
+User=pi
+ExecStart=/home/pi/media_server/target/release/media-scanner --config /home/pi/media_server/media-scanner.toml
+# TMDB_API_KEY lives here, root-owned mode 600 — not in this unit, where
+# any local user could read it via `systemctl show`.
+EnvironmentFile=/etc/mediaserver/enrich.env
+Restart=on-failure
+RestartSec=10
+
+# Hardening: no privilege escalation, read-only system, writable only where
+# needed (catalog db + the share, which enrichment writes sidecars to).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pi/.local/state/mediaserver /mnt/media
+
+[Install]
+WantedBy=multi-user.target

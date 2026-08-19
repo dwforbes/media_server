@@ -1,0 +1,26 @@
+# /etc/systemd/system/media-server.service
+# Adjust User= and the /home/pi/media_server paths to your install.
+[Unit]
+Description=UPnP media server
+Wants=network-online.target
+After=network-online.target media-scanner.service
+RequiresMountsFor=/mnt/media
+
+[Service]
+User=pi
+ExecStart=/home/pi/media_server/target/release/media-server --config /home/pi/media_server/media-server.toml
+# On first boot the server exits until the scanner has created/migrated the
+# catalog; Restart covers that window.
+Restart=on-failure
+RestartSec=10
+
+# Hardening: the server only reads — media, catalog, nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# The .uuid file is created next to the db on first run.
+ReadWritePaths=/home/pi/.local/state/mediaserver
+
+[Install]
+WantedBy=multi-user.target
