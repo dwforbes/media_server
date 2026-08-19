@@ -45,6 +45,15 @@ pub struct EnrichConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub strip_titles: bool,
+    /// Read by media-enrich: embed same-name .srt sidecars into MP4s that
+    /// have no subtitle stream. Accepted here; the scanner does not act on it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub embed_subtitles: bool,
+    /// Read by media-enrich: ffmpeg binary for subtitle embedding.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub ffmpeg_path: Option<String>,
 }
 
 fn default_true() -> bool {

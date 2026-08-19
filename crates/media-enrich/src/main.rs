@@ -1,4 +1,5 @@
 mod imdb;
+mod subtitles;
 mod tmdb;
 
 use std::path::{Path, PathBuf};
@@ -44,6 +45,10 @@ struct Args {
     /// strip_titles = true in the config's [enrich] section).
     #[arg(long)]
     strip_titles: bool,
+    /// Embed same-name .srt sidecars into subtitle-less MP4s (also enabled by
+    /// embed_subtitles = true in the config's [enrich] section).
+    #[arg(long)]
+    embed_subtitles: bool,
     /// Re-download the cached IMDb ratings dataset when older than this.
     #[arg(long, default_value_t = 7)]
     ratings_max_age_days: u64,
@@ -55,8 +60,14 @@ struct Args {
 #[derive(Deserialize)]
 struct ScannerConfig {
     roots: Vec<RootConfig>,
+    #[serde(default = "default_ffprobe")]
+    ffprobe_path: String,
     #[serde(default)]
     enrich: EnrichSection,
+}
+
+fn default_ffprobe() -> String {
+    "ffprobe".into()
 }
 
 /// The scanner's [enrich] section; only strip_titles concerns this tool,
@@ -68,8 +79,19 @@ struct EnrichSection {
     /// Opt-in: this is the one enrichment step that writes into media files.
     #[serde(default)]
     strip_titles: bool,
+    /// Embed a same-name .srt sidecar into MP4 files that have no subtitle
+    /// stream (ffmpeg stream copy + mov_text; replaces the file atomically
+    /// after verification). Opt-in.
+    #[serde(default)]
+    embed_subtitles: bool,
+    #[serde(default = "default_ffmpeg")]
+    ffmpeg_path: String,
     #[serde(flatten)]
     _rest: std::collections::HashMap<String, toml::Value>,
+}
+
+fn default_ffmpeg() -> String {
+    "ffmpeg".into()
 }
 
 #[derive(Deserialize)]
@@ -138,6 +160,46 @@ fn strip_embedded_titles(config: &ScannerConfig) {
     }
 }
 
+/// Embed same-name .srt sidecars into MP4 files lacking a subtitle stream.
+fn embed_sidecar_subtitles(config: &ScannerConfig) {
+    let mut embedded = 0usize;
+    for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
+        if !root.path.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&root.path)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .flatten()
+            .filter(|e| e.file_type().is_file() && is_video(e.path()))
+        {
+            let path = entry.path();
+            // Cheap pre-check before spending an ffprobe call.
+            if !path.with_extension("srt").is_file() {
+                continue;
+            }
+            match subtitles::embed_if_applicable(
+                &config.enrich.ffmpeg_path,
+                &config.ffprobe_path,
+                path,
+            ) {
+                Ok(subtitles::Outcome::Embedded) => {
+                    println!("embedded subtitles into {}", path.display());
+                    embedded += 1;
+                }
+                Ok(subtitles::Outcome::Skipped(why)) => {
+                    tracing::debug!("{}: subtitles not embedded ({why})", path.display());
+                }
+                Err(err) => eprintln!("{}: subtitle embedding failed: {err:#}", path.display()),
+            }
+        }
+    }
+    if embedded > 0 {
+        println!("subtitle tracks embedded: {embedded}");
+    }
+}
+
 /// "<stem>-poster.jpg" next to the media file (Kodi convention).
 fn poster_path_for(media: &Path) -> PathBuf {
     let stem = media.file_stem().unwrap_or_default().to_string_lossy();
@@ -166,10 +228,24 @@ fn main() -> Result<()> {
     )
     .with_context(|| format!("parsing {}", args.config.display()))?;
 
-    if (args.strip_titles || config.enrich.strip_titles) && !args.dry_run {
-        strip_embedded_titles(&config);
-    } else if args.dry_run && (args.strip_titles || config.enrich.strip_titles) {
-        println!("(dry run: embedded-title stripping skipped)");
+    let do_strip = args.strip_titles || config.enrich.strip_titles;
+    let do_subs = args.embed_subtitles || config.enrich.embed_subtitles;
+    if args.dry_run {
+        if do_strip {
+            println!("(dry run: embedded-title stripping skipped)");
+        }
+        if do_subs {
+            println!("(dry run: subtitle embedding skipped)");
+        }
+    } else {
+        // Subtitles first: muxing produces a fresh container, and the title
+        // pass should see the final file.
+        if do_subs {
+            embed_sidecar_subtitles(&config);
+        }
+        if do_strip {
+            strip_embedded_titles(&config);
+        }
     }
 
     // Gather every movie file and decide what to do with it. A file needs

@@ -162,6 +162,18 @@ is set in the scanner config's `[enrich]` section (or with `media-enrich
 --strip-titles`), so newly added releases are cleaned without a manual step. It is
 opt-in because it is the one step that writes into media files rather than beside them.
 
+### Embedding sidecar subtitles
+
+Some MP4 releases ship subtitles only as a same-name `.srt` beside the file, which
+many UPnP clients can't use. With `embed_subtitles = true` in the `[enrich]` section
+(or `media-enrich --embed-subtitles`), enrichment muxes that sidecar in as a
+`mov_text` track — the equivalent of `ffmpeg -i in.mp4 -i in.srt -c copy -c:s mov_text`
+— for MP4s that have **no** subtitle stream and exactly that one `.srt`. Existing
+streams are copied, never re-encoded. It is the most invasive step (a whole-file
+replacement), so it is conservative: mux to a temp file in the same directory, verify
+the result with ffprobe (stream count, subtitle present, duration unchanged), then a
+single atomic rename. Opt-in; needs `ffmpeg` on the PATH (`ffmpeg_path` otherwise).
+
 ## Not implemented (v1)
 
 - ContentDirectory `Search` (returns UPnP error 602) and GENA eventing (clients poll).

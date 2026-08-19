@@ -28,6 +28,11 @@ min_interval_secs = 600
 # starts). The one enrichment step that writes into media files — a
 # header-only, in-place patch; opt-in.
 strip_titles = true
+# Embed a same-name .srt sidecar into MP4 files that have no subtitle
+# stream (ffmpeg stream copy, mov_text track added; verified, then the
+# file is replaced atomically). Replaces whole media files — opt-in.
+embed_subtitles = true
+#ffmpeg_path = "ffmpeg"
 
 [[roots]]
 path = "/mnt/media/Movies"
