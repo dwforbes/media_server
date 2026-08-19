@@ -336,13 +336,31 @@ pub fn browse_children(
 }
 
 fn folder_roots(conn: &Connection, kind: MediaKind, parent: &ObjectId) -> Result<Vec<Entry>> {
-    Ok(files::roots_of_kind(conn, kind)?
+    let roots = files::roots_of_kind(conn, kind)?;
+    // Multiple roots of one kind often share a basename ("Movies" on two
+    // volumes); include one more path component to tell them apart.
+    let mut basenames = std::collections::HashMap::new();
+    for r in &roots {
+        *basenames.entry(root_title(&r.path)).or_insert(0usize) += 1;
+    }
+    Ok(roots
         .into_iter()
         .map(|r| {
+            let base = root_title(&r.path);
+            let title = if basenames[&base] > 1 {
+                let parent_dir = std::path::Path::new(&r.path)
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                format!("{base} ({parent_dir})")
+            } else {
+                base
+            };
             container(
                 &ObjectId::Dir { root_id: r.id, rel_dir: String::new() },
                 parent,
-                root_title(&r.path),
+                title,
             )
         })
         .collect())
