@@ -95,8 +95,25 @@ fn item(parent: &ObjectId, item: BrowseItem) -> Entry {
     }
 }
 
+/// Movies carry their year in the title — "The Game (1997)" — since few
+/// clients surface dc:date in lists. Skipped where it would be redundant
+/// (a single-year container) or misleading (the Folders view, which shows
+/// files as they are on disk).
 fn items(parent: &ObjectId, list: Vec<BrowseItem>) -> Vec<Entry> {
-    list.into_iter().map(|i| item(parent, i)).collect()
+    let suffix_year = !matches!(
+        parent,
+        ObjectId::MoviesYear(_) | ObjectId::Dir { .. } | ObjectId::Item(_)
+    );
+    list.into_iter()
+        .map(|mut i| {
+            if suffix_year && i.kind == MediaKind::Movies {
+                if let Some(year) = i.year {
+                    i.title = format!("{} ({year})", i.title);
+                }
+            }
+            item(parent, i)
+        })
+        .collect()
 }
 
 fn root_title(path: &str) -> String {
