@@ -131,16 +131,21 @@ sends `ssdp:byebye`.
   `mu:album:<b64>:<b64>`, `dir:<root>:<b64 path>`, `it:<file id>`) that maps directly to
   a query — no in-memory tree to invalidate.
 
-### mp4-title: fixing scene-titled containers
+### media-title: fixing scene-titled containers
 
-Some release MP4s embed the scene filename as the container title, which players
-like VLC prefer over the server-supplied name once playback starts. `mp4-title`
-inspects and neutralizes that in place — a four-byte patch renaming the title atom
-to `free` (the standard padding atom), no re-muxing:
+Some releases embed the scene filename as the container title, which players like
+VLC prefer over the server-supplied name once playback starts. `media-title`
+inspects and neutralizes that in place — a header-only patch, no re-muxing: MP4
+title atoms are renamed to `free` (the standard padding atom); MKV/WebM Title
+elements are rewritten as Void. Format is detected by magic bytes, not extension.
 
 ```sh
-mp4-title file.mp4            # show the embedded title
-mp4-title --strip file.mp4    # neutralize it
+media-title file.mp4 episode.mkv     # show embedded titles
+media-title --strip *.mp4 *.mkv      # neutralize them (titleless files untouched)
+
+# audit a whole library:
+find /mnt/media -type f \( -iname "*.mp4" -o -iname "*.mkv" \) -print0 \
+  | xargs -0 media-title | grep ': title '
 ```
 
 The running scanner re-extracts touched files automatically (a harmless no-op).

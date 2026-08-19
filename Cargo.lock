@@ -923,6 +923,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "media-title"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -964,14 +972,6 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mp4-title"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
 ]
 
 [[package]]
