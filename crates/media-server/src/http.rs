@@ -218,13 +218,20 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
                  <small><a href=\"/playlist/id/{id}.m3u\">[playlist]</a></small></li>",
                 xml_escape(&title)
             )),
-            tree::Entry::Item { item, .. } => rows.push_str(&format!(
-                "<li><a href=\"/item/{0}\">{1}</a> \
-                 <small><a href=\"{2}/media/{0}\">[▶ play]</a></small></li>",
-                item.file_id,
-                xml_escape(&item.title),
-                state.base_url
-            )),
+            tree::Entry::Item { item, .. } => {
+                let chip = if item.kind == media_db::MediaKind::Music {
+                    String::new()
+                } else {
+                    uhd_chip(is_uhd(item.width, item.height))
+                };
+                rows.push_str(&format!(
+                    "<li>{chip}<a href=\"/item/{0}\">{1}</a> \
+                     <small><a href=\"{2}/media/{0}\">[▶ play]</a></small></li>",
+                    item.file_id,
+                    xml_escape(&item.title),
+                    state.base_url
+                ))
+            }
         }
     }
     let html = format!(
@@ -276,6 +283,21 @@ async fn index_page(State(state): State<Arc<AppState>>) -> Response {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
+fn is_uhd(width: Option<i64>, height: Option<i64>) -> bool {
+    width.unwrap_or(0) > 1920 || height.unwrap_or(0) > 1080
+}
+
+/// A small "4K" chip; hidden-but-space-reserving for non-4K rows so
+/// listing titles align.
+fn uhd_chip(uhd: bool) -> String {
+    let visibility = if uhd { "" } else { "visibility:hidden" };
+    format!(
+        "<span style=\"display:inline-block;font-size:.7em;border:1px solid #999;\
+         border-radius:3px;padding:0 .3em;margin-right:.5em;color:#666;\
+         vertical-align:middle;{visibility}\">4K</span>"
+    )
+}
+
 fn human_size(bytes: i64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
@@ -313,6 +335,10 @@ async fn item_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     let mut heading = xml_escape(&detail.title);
     if let Some(year) = detail.year {
         heading.push_str(&format!(" ({year})"));
+    }
+    if is_uhd(detail.width, detail.height) {
+        heading.push_str(" <span style=\"font-size:.45em;border:1.5px solid #666;\
+            border-radius:4px;padding:.05em .35em;color:#555;vertical-align:middle\">4K</span>");
     }
     let mut subtitle = String::new();
     if let (Some(series), Some(season), Some(episode)) =
