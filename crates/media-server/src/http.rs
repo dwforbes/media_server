@@ -330,8 +330,23 @@ async fn item_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     }
 
     let mut facts: Vec<(&str, String)> = Vec::new();
-    if let Some(rating) = detail.rating {
-        facts.push(("IMDb rating", format!("{rating:.1} / 10")));
+    let imdb = detail
+        .imdb_id
+        .as_deref()
+        .filter(|id| id.starts_with("tt"));
+    match (detail.rating, imdb) {
+        (Some(rating), Some(id)) => facts.push((
+            "IMDb",
+            format!(
+                "{rating:.1} / 10 — <a href=\"https://www.imdb.com/title/{id}/\">{id}</a>"
+            ),
+        )),
+        (Some(rating), None) => facts.push(("IMDb rating", format!("{rating:.1} / 10"))),
+        (None, Some(id)) => facts.push((
+            "IMDb",
+            format!("<a href=\"https://www.imdb.com/title/{id}/\">{id}</a>"),
+        )),
+        (None, None) => {}
     }
     if let Some(genre) = &detail.genre {
         facts.push(("Genre", xml_escape(genre)));

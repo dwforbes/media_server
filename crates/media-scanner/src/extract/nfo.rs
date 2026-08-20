@@ -15,6 +15,7 @@ pub struct NfoData {
     pub directors: Vec<String>,
     pub rating: Option<f64>,
     pub plot: Option<String>,
+    pub imdb_id: Option<String>,
     pub show_title: Option<String>,
     pub season: Option<i64>,
     pub episode: Option<i64>,
@@ -39,11 +40,21 @@ fn parse(text: &str) -> Result<NfoData> {
     reader.config_mut().trim_text(true);
     let mut data = NfoData::default();
     let mut current: Option<String> = None;
+    let mut uniqueid_is_imdb = false;
 
     loop {
         match reader.read_event()? {
             Event::Start(e) => {
-                current = Some(String::from_utf8_lossy(e.local_name().as_ref()).to_string());
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+                if name == "uniqueid" {
+                    uniqueid_is_imdb = e
+                        .try_get_attribute("type")
+                        .ok()
+                        .flatten()
+                        .and_then(|a| a.unescape_value().ok())
+                        .is_some_and(|v| v == "imdb");
+                }
+                current = Some(name);
             }
             Event::End(_) => current = None,
             Event::Text(t) => {
@@ -70,6 +81,9 @@ fn parse(text: &str) -> Result<NfoData> {
                     }
                     "plot" => {
                         data.plot.get_or_insert(value);
+                    }
+                    "uniqueid" if uniqueid_is_imdb => {
+                        data.imdb_id.get_or_insert(value);
                     }
                     "genre" => data.genres.push(value),
                     "director" => data.directors.push(value),

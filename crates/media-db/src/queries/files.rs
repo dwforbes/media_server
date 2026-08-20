@@ -309,6 +309,7 @@ pub struct ItemDetail {
     pub series: Option<String>,
     pub season: Option<i64>,
     pub episode: Option<i64>,
+    pub imdb_id: Option<String>,
 }
 
 pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
@@ -316,7 +317,7 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
         "SELECT f.id, f.kind, f.rel_path, f.size, f.mime, f.container, f.duration_ms,
                 f.width, f.height, f.video_codec, f.audio_codec,
                 datetime(f.added_at, 'unixepoch', 'localtime'), f.art IS NOT NULL,
-                m.title, m.year, m.rating, m.plot,
+                m.title, m.year, m.rating, m.plot, m.imdb_id,
                 (SELECT group_concat(g.name, ', ') FROM movie_genres mg
                   JOIN genres g ON g.id = mg.genre_id WHERE mg.file_id = f.id),
                 (SELECT group_concat(d.name, ', ') FROM movie_directors md
@@ -335,8 +336,8 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
             let kind = MediaKind::parse(&r.get::<_, String>(1)?).unwrap_or(MediaKind::Movies);
             let rel_path: String = r.get(2)?;
             let movie_title: Option<String> = r.get(13)?;
-            let ep_title: Option<String> = r.get(22)?;
-            let track_title: Option<String> = r.get(24)?;
+            let ep_title: Option<String> = r.get(23)?;
+            let track_title: Option<String> = r.get(25)?;
             let stem = rel_path
                 .rsplit('/')
                 .next()
@@ -359,17 +360,18 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 audio_codec: r.get(10)?,
                 added_at_text: r.get(11)?,
                 has_art: r.get(12)?,
-                year: r.get::<_, Option<i64>>(14)?.or(r.get(28)?),
+                year: r.get::<_, Option<i64>>(14)?.or(r.get(29)?),
                 rating: r.get(15)?,
-                plot: r.get::<_, Option<String>>(16)?.or(r.get(23)?),
-                genre: r.get::<_, Option<String>>(17)?.or(r.get(29)?),
-                director: r.get(18)?,
-                series: r.get(19)?,
-                season: r.get(20)?,
-                episode: r.get(21)?,
-                artist: r.get(25)?,
-                album: r.get(26)?,
-                track_no: r.get(27)?,
+                plot: r.get::<_, Option<String>>(16)?.or(r.get(24)?),
+                imdb_id: r.get(17)?,
+                genre: r.get::<_, Option<String>>(18)?.or(r.get(30)?),
+                director: r.get(19)?,
+                series: r.get(20)?,
+                season: r.get(21)?,
+                episode: r.get(22)?,
+                artist: r.get(26)?,
+                album: r.get(27)?,
+                track_no: r.get(28)?,
             })
         },
     )

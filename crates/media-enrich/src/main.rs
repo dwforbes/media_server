@@ -107,17 +107,18 @@ enum NfoState {
     HandWritten,
 }
 
-/// (state, has <rating>, has <plot>).
-fn nfo_state(nfo_path: &Path) -> (NfoState, bool, bool) {
+/// (state, has <rating>, has <plot>, has an imdb uniqueid).
+fn nfo_state(nfo_path: &Path) -> (NfoState, bool, bool, bool) {
     match std::fs::read_to_string(nfo_path) {
-        Err(_) => (NfoState::Missing, false, false),
+        Err(_) => (NfoState::Missing, false, false, false),
         Ok(text) => {
             let has_rating = text.contains("<rating>");
             let has_plot = text.contains("<plot>");
+            let has_imdb = text.contains("type=\"imdb\"");
             if text.contains(MARKER) {
-                (NfoState::Generated, has_rating, has_plot)
+                (NfoState::Generated, has_rating, has_plot, has_imdb)
             } else {
-                (NfoState::HandWritten, has_rating, has_plot)
+                (NfoState::HandWritten, has_rating, has_plot, has_imdb)
             }
         }
     }
@@ -279,12 +280,14 @@ fn main() -> Result<()> {
             .filter(|e| e.file_type().is_file() && is_video(e.path()))
         {
             let path = entry.into_path();
-            let (state, has_rating, _) = nfo_state(&path.with_extension("nfo"));
+            let (state, has_rating, _, has_imdb) = nfo_state(&path.with_extension("nfo"));
             let write_nfo = match state {
                 NfoState::Missing => true,
-                // A generated .nfo without a rating predates the ratings
-                // feature; upgrade it in place.
-                NfoState::Generated => args.refresh || (!has_rating && !args.no_ratings),
+                // A generated .nfo without a rating or imdb uniqueid
+                // predates those features; upgrade it in place.
+                NfoState::Generated => {
+                    args.refresh || (!has_rating && !args.no_ratings) || !has_imdb
+                }
                 NfoState::HandWritten => {
                     if args.refresh && !args.force {
                         skipped_handwritten += 1;
@@ -345,7 +348,7 @@ fn main() -> Result<()> {
 
             // A generated episode .nfo without a <plot> predates episode
             // overviews; upgrade it in place (like movie ratings).
-            let (ep_state, _, ep_has_plot) = nfo_state(&path.with_extension("nfo"));
+            let (ep_state, _, ep_has_plot, _) = nfo_state(&path.with_extension("nfo"));
             let write_nfo = match ep_state {
                 NfoState::Missing => true,
                 NfoState::Generated => args.refresh || !ep_has_plot,
@@ -468,11 +471,7 @@ fn main() -> Result<()> {
         match tmdb.find_movie(&title, year) {
             Ok(Some(info)) => {
                 if task.write_nfo {
-                    let imdb_id = if args.no_ratings {
-                        None
-                    } else {
-                        tmdb.imdb_id(info.tmdb_id).unwrap_or_default()
-                    };
+                    let imdb_id = tmdb.imdb_id(info.tmdb_id).unwrap_or_default();
                     pending_nfos.push((task.path.with_extension("nfo"), info.clone(), imdb_id));
                 }
                 let mut poster_note = "";
@@ -526,7 +525,7 @@ fn main() -> Result<()> {
         if rating.is_some() {
             rated += 1;
         }
-        std::fs::write(nfo_path, render_nfo(info, rating))
+        std::fs::write(nfo_path, render_nfo(info, rating, imdb_id.as_deref()))
             .with_context(|| format!("writing {}", nfo_path.display()))?;
         nfos_written += 1;
     }
@@ -633,7 +632,7 @@ fn render_episode_nfo(
     )
 }
 
-fn render_nfo(info: &tmdb::MovieInfo, rating: Option<f64>) -> String {
+fn render_nfo(info: &tmdb::MovieInfo, rating: Option<f64>, imdb_id: Option<&str>) -> String {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n");
     out.push_str(&format!("<!-- {MARKER} (TMDB) -->\n<movie>\n"));
     out.push_str(&format!("  <title>{}</title>\n", xml_escape(&info.title)));
@@ -652,6 +651,12 @@ fn render_nfo(info: &tmdb::MovieInfo, rating: Option<f64>) -> String {
     for director in &info.directors {
         out.push_str(&format!("  <director>{}</director>\n", xml_escape(director)));
     }
+    // Always written (possibly empty) so the upgrade check can tell
+    // "TMDB has no imdb id" apart from "predates the imdb feature".
+    out.push_str(&format!(
+        "  <uniqueid type=\"imdb\">{}</uniqueid>\n",
+        xml_escape(imdb_id.unwrap_or(""))
+    ));
     out.push_str(&format!(
         "  <uniqueid type=\"tmdb\" default=\"true\">{}</uniqueid>\n</movie>\n",
         info.tmdb_id

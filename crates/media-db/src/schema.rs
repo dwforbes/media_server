@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 8;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -124,4 +124,6 @@ pub const MIGRATIONS: &[&str] = &[
     ALTER TABLE tv_episodes ADD COLUMN plot TEXT;
     UPDATE files SET nfo_mtime = -1 WHERE kind = 'movies' AND nfo_mtime IS NOT NULL;
     "#,
+    // 7 -> 8: IMDb id (tt0083658) from .nfo uniqueid, for external links.
+    "ALTER TABLE movies ADD COLUMN imdb_id TEXT;",
 ];

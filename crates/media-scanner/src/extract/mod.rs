@@ -65,6 +65,7 @@ fn try_extract(
             let mut directors: Vec<String> = Vec::new();
             let mut rating = None;
             let mut plot = None;
+            let mut imdb_id = None;
             if let Some(nfo) = nfo::read_sidecar(&abs) {
                 if let Some(t) = nfo.title {
                     title = t;
@@ -78,11 +79,12 @@ fn try_extract(
                 directors = nfo.directors;
                 rating = nfo.rating;
                 plot = nfo.plot;
+                imdb_id = nfo.imdb_id;
             }
             let sort = nameparse::sort_title(&title);
             movies::finalize_movie(
                 conn, file_id, &tech, &title, &sort, year, rating, plot.as_deref(),
-                &genres, &directors,
+                imdb_id.as_deref(), &genres, &directors,
             )?;
         }
         MediaKind::Tv => {
