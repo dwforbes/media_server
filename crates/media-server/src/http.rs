@@ -51,6 +51,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/browse", get(|s: State<Arc<AppState>>| browse_page(s, Path("0".into()))))
         .route("/browse/{oid}", get(browse_page))
         .route("/item/{id}", get(item_page))
+        .route("/play/{id}", get(play_page))
+        .route("/subs/{id}", get(serve_subs))
         .with_state(state)
 }
 
@@ -283,6 +285,90 @@ async fn index_page(State(state): State<Arc<AppState>>) -> Response {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
+fn srt_to_vtt(srt: &str) -> String {
+    let mut out = String::from("WEBVTT\n\n");
+    for line in srt.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.contains("-->") {
+            out.push_str(&line.replace(',', "."));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The media file's .srt sidecar as WebVTT — browsers ignore embedded
+/// mov_text tracks; <track> + WebVTT is the web's subtitle mechanism.
+async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Ok(id) = id.trim_end_matches(".vtt").parse::<i64>() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let servable = {
+        let conn = state.db.lock().await;
+        files::servable(&conn, id)
+    };
+    let Ok(Some(servable)) = servable else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let srt_path = servable.abs_path.with_extension("srt");
+    let Ok(bytes) = std::fs::read(&srt_path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(text) = media_db::textenc::decode_subtitle_text(&bytes) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        [(header::CONTENT_TYPE, "text/vtt; charset=utf-8")],
+        srt_to_vtt(&text),
+    )
+        .into_response()
+}
+
+/// In-browser player: native <video> controls, poster art, and the .srt
+/// sidecar as a selectable subtitle track.
+async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    let conn = state.db.lock().await;
+    let detail = files::detail(&conn, id);
+    let servable = files::servable(&conn, id);
+    drop(conn);
+    let (Ok(Some(detail)), Ok(Some(servable))) = (detail, servable) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut heading = xml_escape(&detail.title);
+    if let Some(year) = detail.year {
+        heading.push_str(&format!(" ({year})"));
+    }
+    let poster = if detail.has_art {
+        format!(" poster=\"/art/{id}\"")
+    } else {
+        String::new()
+    };
+    let track = if servable.abs_path.with_extension("srt").is_file() {
+        format!(
+            "<track kind=\"subtitles\" src=\"/subs/{id}.vtt\" \
+             srclang=\"en\" label=\"Subtitles\" default>"
+        )
+    } else {
+        String::new()
+    };
+    let html = format!(
+        "<!doctype html><meta charset=utf-8><title>{heading}</title>\
+         <body style=\"font-family:sans-serif;max-width:60em;margin:1.5em auto;\
+         background:#111;color:#ddd\">\
+         <p><a href=\"/item/{id}\" style=\"color:#9cf\">← details</a></p>\
+         <h2>{heading}</h2>\
+         <video controls autoplay playsinline{poster} \
+          style=\"width:100%;max-height:80vh;background:#000\">\
+         <source src=\"{}/media/{id}\" type=\"{}\">{track}\
+         Your browser cannot play this format.</video>",
+        state.base_url,
+        xml_escape(&servable.mime)
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
 fn is_uhd(width: Option<i64>, height: Option<i64>) -> bool {
     width.unwrap_or(0) > 1920 || height.unwrap_or(0) > 1080
 }
@@ -411,6 +497,15 @@ async fn item_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     } else {
         String::new()
     };
+    let play_links = if detail.kind == media_db::MediaKind::Music {
+        format!("<p><a href=\"{}/media/{id}\" style=\"font-size:1.1em\">▶ Play</a></p>", state.base_url)
+    } else {
+        format!(
+            "<p><a href=\"/play/{id}\" style=\"font-size:1.1em\">▶ Play in browser</a> \
+             &nbsp; <small><a href=\"{}/media/{id}\">direct stream</a></small></p>",
+            state.base_url
+        )
+    };
     let plot = detail
         .plot
         .as_deref()
@@ -435,10 +530,8 @@ async fn item_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         "<!doctype html><meta charset=utf-8><title>{heading}</title>\
          <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
          <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading}</h1>\
-         {subtitle_html}{plot}\
-         <p><a href=\"{}/media/{id}\" style=\"font-size:1.1em\">▶ Play</a></p>\
-         <table style=\"border-collapse:collapse\">{rows}</table>",
-        state.base_url
+         {subtitle_html}{plot}{play_links}\
+         <table style=\"border-collapse:collapse\">{rows}</table>"
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
