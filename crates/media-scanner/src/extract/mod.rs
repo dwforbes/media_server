@@ -66,6 +66,7 @@ fn try_extract(
             let mut rating = None;
             let mut plot = None;
             let mut imdb_id = None;
+            let mut collection = None;
             if let Some(nfo) = nfo::read_sidecar(&abs) {
                 if let Some(t) = nfo.title {
                     title = t;
@@ -80,11 +81,12 @@ fn try_extract(
                 rating = nfo.rating;
                 plot = nfo.plot;
                 imdb_id = nfo.imdb_id;
+                collection = nfo.set;
             }
             let sort = nameparse::sort_title(&title);
             movies::finalize_movie(
                 conn, file_id, &tech, &title, &sort, year, rating, plot.as_deref(),
-                imdb_id.as_deref(), &genres, &directors,
+                imdb_id.as_deref(), collection.as_deref(), &genres, &directors,
             )?;
         }
         MediaKind::Tv => {

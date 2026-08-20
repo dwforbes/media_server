@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 9;
+pub const SCHEMA_VERSION: i32 = 10;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -132,4 +132,7 @@ pub const MIGRATIONS: &[&str] = &[
     ALTER TABLE tv_episodes ADD COLUMN rating REAL;
     ALTER TABLE tv_episodes ADD COLUMN imdb_id TEXT;
     "#,
+    // 9 -> 10: TMDB collection ("Harry Potter Collection") from .nfo <set>,
+    // for the Franchises view.
+    "ALTER TABLE movies ADD COLUMN collection TEXT;",
 ];

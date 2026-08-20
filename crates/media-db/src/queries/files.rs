@@ -310,6 +310,7 @@ pub struct ItemDetail {
     pub season: Option<i64>,
     pub episode: Option<i64>,
     pub imdb_id: Option<String>,
+    pub collection: Option<String>,
 }
 
 pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
@@ -326,7 +327,7 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 mu.title, mu.artist, mu.album, mu.track_no, mu.year,
                 (SELECT group_concat(g.name, ', ') FROM track_genres tg
                   JOIN genres g ON g.id = tg.genre_id WHERE tg.file_id = f.id),
-                t.rating, t.imdb_id
+                t.rating, t.imdb_id, m.collection
          FROM files f
          LEFT JOIN movies m        ON m.file_id  = f.id
          LEFT JOIN tv_episodes t   ON t.file_id  = f.id
@@ -365,6 +366,7 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 rating: r.get::<_, Option<f64>>(15)?.or(r.get(31)?),
                 plot: r.get::<_, Option<String>>(16)?.or(r.get(24)?),
                 imdb_id: r.get::<_, Option<String>>(17)?.or(r.get(32)?),
+                collection: r.get::<_, Option<String>>(33)?.filter(|c| !c.is_empty()),
                 genre: r.get::<_, Option<String>>(18)?.or(r.get(30)?),
                 director: r.get(19)?,
                 series: r.get(20)?,

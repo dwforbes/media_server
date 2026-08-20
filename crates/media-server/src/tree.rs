@@ -178,6 +178,7 @@ pub fn browse_children(
             container(&MoviesByDecade, oid, "By Decade"),
             container(&MoviesByGenre, oid, "By Genre"),
             container(&MoviesByDirector, oid, "By Director"),
+            container(&MoviesByFranchise, oid, "Franchises"),
             container(&MoviesByRating, oid, "By Rating"),
             container(&MoviesFolders, oid, "Folders"),
         ],
@@ -204,6 +205,13 @@ pub fn browse_children(
             .map(|(id, name)| container_class(&MoviesDirector(id), oid, name, CLASS_PERSON))
             .collect(),
         MoviesDirector(d) => items(oid, movies::by_director(conn, *d)?),
+        MoviesByFranchise => movies::franchises(conn)?
+            .into_iter()
+            .map(|(name, art)| {
+                with_art(container(&MoviesFranchise(name.clone()), oid, name), art)
+            })
+            .collect(),
+        MoviesFranchise(name) => items(oid, movies::by_franchise(conn, name)?),
         MoviesByRating => (0..=RATING_BUCKETS.len())
             .map(|bucket| container(&MoviesRating(bucket), oid, rating_bucket_title(bucket)))
             .collect(),
@@ -405,6 +413,8 @@ pub fn browse_metadata(conn: &Connection, oid: &ObjectId) -> Result<Entry> {
                 conn.query_row("SELECT name FROM directors WHERE id = ?1", [d], |r| r.get(0))?;
             container_class(oid, &MoviesByDirector, name, CLASS_PERSON)
         }
+        MoviesByFranchise => container(oid, &Movies, "Franchises"),
+        MoviesFranchise(name) => container(oid, &MoviesByFranchise, name.clone()),
         MoviesByRating => container(oid, &Movies, "By Rating"),
         MoviesRating(bucket) => {
             container(oid, &MoviesByRating, rating_bucket_title(*bucket))

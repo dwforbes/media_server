@@ -107,18 +107,19 @@ enum NfoState {
     HandWritten,
 }
 
-/// (state, has <rating>, has <plot>, has an imdb uniqueid).
-fn nfo_state(nfo_path: &Path) -> (NfoState, bool, bool, bool) {
+/// (state, has <rating>, has <plot>, has imdb uniqueid, has <set>).
+fn nfo_state(nfo_path: &Path) -> (NfoState, bool, bool, bool, bool) {
     match std::fs::read_to_string(nfo_path) {
-        Err(_) => (NfoState::Missing, false, false, false),
+        Err(_) => (NfoState::Missing, false, false, false, false),
         Ok(text) => {
             let has_rating = text.contains("<rating>");
             let has_plot = text.contains("<plot>");
             let has_imdb = text.contains("type=\"imdb\"");
+            let has_set = text.contains("<set");
             if text.contains(MARKER) {
-                (NfoState::Generated, has_rating, has_plot, has_imdb)
+                (NfoState::Generated, has_rating, has_plot, has_imdb, has_set)
             } else {
-                (NfoState::HandWritten, has_rating, has_plot, has_imdb)
+                (NfoState::HandWritten, has_rating, has_plot, has_imdb, has_set)
             }
         }
     }
@@ -280,13 +281,14 @@ fn main() -> Result<()> {
             .filter(|e| e.file_type().is_file() && is_video(e.path()))
         {
             let path = entry.into_path();
-            let (state, has_rating, _, has_imdb) = nfo_state(&path.with_extension("nfo"));
+            let (state, has_rating, _, has_imdb, has_set) =
+                nfo_state(&path.with_extension("nfo"));
             let write_nfo = match state {
                 NfoState::Missing => true,
-                // A generated .nfo without a rating or imdb uniqueid
-                // predates those features; upgrade it in place.
+                // A generated .nfo missing a later-added field (rating,
+                // imdb uniqueid, set) upgrades in place.
                 NfoState::Generated => {
-                    args.refresh || (!has_rating && !args.no_ratings) || !has_imdb
+                    args.refresh || (!has_rating && !args.no_ratings) || !has_imdb || !has_set
                 }
                 NfoState::HandWritten => {
                     if args.refresh && !args.force {
@@ -348,7 +350,7 @@ fn main() -> Result<()> {
 
             // A generated episode .nfo without a <plot> predates episode
             // overviews; upgrade it in place (like movie ratings).
-            let (ep_state, _, ep_has_plot, ep_has_imdb) = nfo_state(&path.with_extension("nfo"));
+            let (ep_state, _, ep_has_plot, ep_has_imdb, _) = nfo_state(&path.with_extension("nfo"));
             let write_nfo = match ep_state {
                 NfoState::Missing => true,
                 NfoState::Generated => args.refresh || !ep_has_plot || !ep_has_imdb,
@@ -471,7 +473,7 @@ fn main() -> Result<()> {
         match tmdb.find_movie(&title, year) {
             Ok(Some(info)) => {
                 if task.write_nfo {
-                    let imdb_id = tmdb.imdb_id(info.tmdb_id).unwrap_or_default();
+                    let imdb_id = info.imdb_id.clone();
                     pending_nfos.push((task.path.with_extension("nfo"), info.clone(), imdb_id));
                 }
                 let mut poster_note = "";
@@ -733,8 +735,14 @@ fn render_nfo(info: &tmdb::MovieInfo, rating: Option<f64>, imdb_id: Option<&str>
     for director in &info.directors {
         out.push_str(&format!("  <director>{}</director>\n", xml_escape(director)));
     }
-    // Always written (possibly empty) so the upgrade check can tell
-    // "TMDB has no imdb id" apart from "predates the imdb feature".
+    // The set (TMDB collection) and imdb uniqueid are always written,
+    // possibly empty, so the upgrade checks can tell "TMDB has nothing"
+    // apart from "predates the feature". Flat <set> is Kodi's legacy form,
+    // still read by everything.
+    out.push_str(&format!(
+        "  <set>{}</set>\n",
+        xml_escape(info.collection.as_deref().unwrap_or(""))
+    ));
     out.push_str(&format!(
         "  <uniqueid type=\"imdb\">{}</uniqueid>\n",
         xml_escape(imdb_id.unwrap_or(""))

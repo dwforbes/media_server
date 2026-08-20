@@ -567,6 +567,16 @@ async fn item_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     } else if let Some(genre) = &detail.genre {
         facts.push(("Genre", xml_escape(genre)));
     }
+    if let Some(collection) = &detail.collection {
+        facts.push((
+            "Franchise",
+            format!(
+                "<a href=\"/browse/{}\">{}</a>",
+                ObjectId::MoviesFranchise(collection.clone()).to_id(),
+                xml_escape(collection)
+            ),
+        ));
+    }
     if !director_pairs.is_empty() {
         let links: Vec<String> = director_pairs
             .iter()

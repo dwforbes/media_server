@@ -21,19 +21,20 @@ pub fn finalize_movie(
     rating: Option<f64>,
     plot: Option<&str>,
     imdb_id: Option<&str>,
+    collection: Option<&str>,
     genres: &[String],
     directors: &[String],
 ) -> Result<()> {
     let tx = conn.transaction()?;
     files::update_tech(&tx, file_id, tech)?;
     tx.execute(
-        "INSERT INTO movies(file_id, title, sort_title, year, rating, plot, imdb_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO movies(file_id, title, sort_title, year, rating, plot, imdb_id, collection)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(file_id) DO UPDATE SET
              title = excluded.title, sort_title = excluded.sort_title,
              year = excluded.year, rating = excluded.rating, plot = excluded.plot,
-             imdb_id = excluded.imdb_id",
-        params![file_id, title, sort_title, year, rating, plot, imdb_id],
+             imdb_id = excluded.imdb_id, collection = excluded.collection",
+        params![file_id, title, sort_title, year, rating, plot, imdb_id, collection],
     )?;
     tx.execute("DELETE FROM movie_genres WHERE file_id = ?1", [file_id])?;
     for genre in genres {
@@ -118,6 +119,36 @@ pub fn uhd(conn: &Connection) -> Result<Vec<BrowseItem>> {
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], movie_from_row)?;
+    Ok(merge_movies(rows.collect::<Result<Vec<_>, _>>()?))
+}
+
+/// Franchises (TMDB collections) with at least two movies in the library:
+/// (name, art file id of the earliest member with art).
+pub fn franchises(conn: &Connection) -> Result<Vec<(String, Option<i64>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.collection,
+                (SELECT f2.id FROM movies m2 JOIN files f2 ON f2.id = m2.file_id
+                  WHERE f2.status = 'ready' AND f2.art IS NOT NULL
+                    AND m2.collection = m.collection COLLATE NOCASE
+                  ORDER BY m2.year LIMIT 1)
+         FROM movies m JOIN files f ON f.id = m.file_id
+         WHERE f.status = 'ready' AND m.collection IS NOT NULL AND m.collection != ''
+         GROUP BY m.collection COLLATE NOCASE
+         HAVING count(*) >= 2
+         ORDER BY m.collection COLLATE NOCASE",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// A franchise's movies in release order (the natural watch order).
+pub fn by_franchise(conn: &Connection, name: &str) -> Result<Vec<BrowseItem>> {
+    let sql = format!(
+        "{MOVIE_SELECT} AND m.collection = ?1 COLLATE NOCASE
+         ORDER BY m.year, m.sort_title COLLATE NOCASE"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([name], movie_from_row)?;
     Ok(merge_movies(rows.collect::<Result<Vec<_>, _>>()?))
 }
 

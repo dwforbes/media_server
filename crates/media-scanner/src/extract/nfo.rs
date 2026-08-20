@@ -16,6 +16,8 @@ pub struct NfoData {
     pub rating: Option<f64>,
     pub plot: Option<String>,
     pub imdb_id: Option<String>,
+    /// Movie set/collection (Kodi flat <set> form).
+    pub set: Option<String>,
     pub show_title: Option<String>,
     pub season: Option<i64>,
     pub episode: Option<i64>,
@@ -84,6 +86,9 @@ fn parse(text: &str) -> Result<NfoData> {
                     }
                     "uniqueid" if uniqueid_is_imdb => {
                         data.imdb_id.get_or_insert(value);
+                    }
+                    "set" => {
+                        data.set.get_or_insert(value);
                     }
                     "genre" => data.genres.push(value),
                     "director" => data.directors.push(value),

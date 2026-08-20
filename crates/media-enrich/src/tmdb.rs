@@ -14,6 +14,9 @@ pub struct MovieInfo {
     pub genres: Vec<String>,
     pub directors: Vec<String>,
     pub poster_path: Option<String>,
+    pub imdb_id: Option<String>,
+    /// TMDB collection ("Harry Potter Collection") — franchise membership.
+    pub collection: Option<String>,
 }
 
 pub struct SeriesInfo {
@@ -28,7 +31,6 @@ pub struct Tmdb {
     /// A TMDB "API Read Access Token" (v4, a JWT) goes in the Authorization
     /// header; a classic v3 key goes in the api_key query parameter.
     bearer: bool,
-    genre_names: Option<HashMap<i64, String>>,
 }
 
 impl Tmdb {
@@ -41,7 +43,6 @@ impl Tmdb {
                 .expect("building HTTP client"),
             key,
             bearer,
-            genre_names: None,
         }
     }
 
@@ -63,48 +64,33 @@ impl Tmdb {
         response.json().context("parsing TMDB response")
     }
 
-    fn genre_name(&mut self, id: i64) -> Result<Option<String>> {
-        if self.genre_names.is_none() {
-            let json = self.get("/genre/movie/list", &[])?;
-            let mut map = HashMap::new();
-            if let Some(genres) = json.get("genres").and_then(|g| g.as_array()) {
-                for genre in genres {
-                    if let (Some(gid), Some(name)) =
-                        (genre.get("id").and_then(Value::as_i64), genre.get("name").and_then(Value::as_str))
-                    {
-                        map.insert(gid, name.to_string());
-                    }
-                }
-            }
-            self.genre_names = Some(map);
-        }
-        Ok(self.genre_names.as_ref().unwrap().get(&id).cloned())
-    }
-
-    /// Best match for (title, year); retries without the year if nothing hits.
+    /// Best match for (title, year); retries without the year if nothing
+    /// hits. One details call (credits and external ids appended) supplies
+    /// genres, directors, imdb id, and collection membership together.
     pub fn find_movie(&mut self, title: &str, year: Option<i64>) -> Result<Option<MovieInfo>> {
         let mut result = self.search(title, year)?;
         if result.is_none() && year.is_some() {
             result = self.search(title, None)?;
         }
         let Some(hit) = result else { return Ok(None) };
-
         let tmdb_id = hit.get("id").and_then(Value::as_i64).context("result missing id")?;
-        let mut genres = Vec::new();
-        for gid in hit
-            .get("genre_ids")
-            .and_then(|g| g.as_array())
-            .map(|a| a.iter().filter_map(Value::as_i64).collect::<Vec<_>>())
-            .unwrap_or_default()
-        {
-            if let Some(name) = self.genre_name(gid)? {
-                genres.push(name);
-            }
-        }
 
-        let credits = self.get(&format!("/movie/{tmdb_id}/credits"), &[])?;
-        let directors = credits
-            .get("crew")
+        let details = self.get(
+            &format!("/movie/{tmdb_id}"),
+            &[("append_to_response", "credits,external_ids")],
+        )?;
+        let genres = details
+            .get("genres")
+            .and_then(|g| g.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|g| g.get("name").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let directors = details
+            .pointer("/credits/crew")
             .and_then(|c| c.as_array())
             .map(|crew| {
                 crew.iter()
@@ -114,30 +100,42 @@ impl Tmdb {
                     .collect()
             })
             .unwrap_or_default();
+        let imdb_id = details
+            .get("imdb_id")
+            .or_else(|| details.pointer("/external_ids/imdb_id"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let collection = details
+            .pointer("/belongs_to_collection/name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
         Ok(Some(MovieInfo {
             tmdb_id,
-            title: hit
+            title: details
                 .get("title")
                 .and_then(Value::as_str)
                 .unwrap_or(title)
                 .to_string(),
-            year: hit
+            year: details
                 .get("release_date")
                 .and_then(Value::as_str)
                 .and_then(|d| d.get(..4))
                 .and_then(|y| y.parse().ok()),
-            plot: hit
+            plot: details
                 .get("overview")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
             genres,
             directors,
-            poster_path: hit
+            poster_path: details
                 .get("poster_path")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            imdb_id,
+            collection,
         }))
     }
 
