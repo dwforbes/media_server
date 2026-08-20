@@ -310,16 +310,40 @@ fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Does the media file carry a text subtitle stream? (Quick demux-header
-/// probe; used to decide whether the player page offers a track.)
-async fn has_embedded_subs(ffprobe: &str, path: &std::path::Path) -> bool {
-    tokio::process::Command::new(ffprobe)
-        .args(["-v", "error", "-select_streams", "s", "-show_entries", "stream=codec_type", "-of", "csv=p=0"])
+const TEXT_SUB_CODECS: &[&str] =
+    &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text", "subviewer"];
+
+/// The ordinal (among subtitle streams) of the best text subtitle track:
+/// English text track preferred, else the first text track. None when the
+/// file has no text subtitles (bitmap PGS/VobSub can't become WebVTT).
+async fn text_sub_stream(ffprobe: &str, path: &std::path::Path) -> Option<usize> {
+    let out = tokio::process::Command::new(ffprobe)
+        .args([
+            "-v", "error", "-select_streams", "s",
+            "-show_entries", "stream=codec_name:stream_tags=language",
+            "-of", "csv=p=0",
+        ])
         .arg(path)
         .output()
         .await
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false)
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut first_text = None;
+    for (ordinal, line) in String::from_utf8_lossy(&out.stdout).lines().enumerate() {
+        let mut fields = line.split(',');
+        let codec = fields.next().unwrap_or("").trim();
+        let lang = fields.next().unwrap_or("").trim().to_lowercase();
+        if !TEXT_SUB_CODECS.contains(&codec) {
+            continue;
+        }
+        if lang == "eng" || lang == "en" {
+            return Some(ordinal);
+        }
+        first_text.get_or_insert(ordinal);
+    }
+    first_text
 }
 
 /// Subtitles as WebVTT: the .srt sidecar when present, else the embedded
@@ -355,11 +379,15 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
         }
     }
 
-    // 3. Extract the embedded track (demux only, no decoding).
+    // 3. Extract the best text track (demux only, no decoding). Files with
+    // only bitmap tracks (PGS/VobSub) have nothing extractable.
+    let Some(ordinal) = text_sub_stream(&state.ffprobe, &servable.abs_path).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let output = tokio::process::Command::new(&state.ffmpeg)
         .args(["-v", "error", "-nostdin", "-i"])
         .arg(&servable.abs_path)
-        .args(["-map", "0:s:0", "-f", "webvtt", "-"])
+        .args(["-map", &format!("0:s:{ordinal}"), "-f", "webvtt", "-"])
         .output()
         .await;
     match output {
@@ -405,7 +433,7 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     // only probe the container when the cheap checks miss.
     let has_subs = servable.abs_path.with_extension("srt").is_file()
         || state.vtt_cache.join(format!("{id}.vtt")).is_file()
-        || has_embedded_subs(&state.ffprobe, &servable.abs_path).await;
+        || text_sub_stream(&state.ffprobe, &servable.abs_path).await.is_some();
     let track = if has_subs {
         format!(
             "<track kind=\"subtitles\" src=\"/subs/{id}.vtt\" \
