@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::Router;
 use media_db::mime::{AUDIO_EXTENSIONS, VIDEO_EXTENSIONS};
-use media_db::queries::{files, movies, music, tv};
+use media_db::queries::files;
 use rusqlite::Connection;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
@@ -47,6 +47,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(index_page))
         .route("/playlist.m3u", get(|s: State<Arc<AppState>>| playlist(s, Path("all".into()))))
         .route("/playlist/{section}", get(playlist))
+        .route("/playlist/id/{oid}", get(playlist_by_id))
+        .route("/browse", get(|s: State<Arc<AppState>>| browse_page(s, Path("0".into()))))
+        .route("/browse/{oid}", get(browse_page))
         .with_state(state)
 }
 
@@ -67,47 +70,66 @@ async fn device_xml(State(state): State<Arc<AppState>>) -> Response {
     ))
 }
 
-/// Discovery-free fallback: the catalog as M3U, playable by anything that
-/// can open a URL — no SSDP involved.
-async fn playlist(State(state): State<Arc<AppState>>, Path(section): Path<String>) -> Response {
-    let section = section.trim_end_matches(".m3u").to_string();
-    let conn = state.db.lock().await;
-    let mut entries: Vec<media_db::BrowseItem> = Vec::new();
-    let result = (|| -> anyhow::Result<()> {
-        if section == "movies" || section == "all" {
-            for mut m in movies::all_movies(&conn)? {
-                if let Some(year) = m.year {
-                    m.title = format!("{} ({year})", m.title);
+/// Recursively collect the playable items under a tree node, deduplicated
+/// by file id (a movie reachable via All, By Year, and By Genre appears
+/// once, at its first-seen position).
+fn flatten_items(
+    conn: &Connection,
+    oid: &ObjectId,
+    recent_count: usize,
+    depth: usize,
+    seen: &mut std::collections::HashSet<i64>,
+    out: &mut Vec<media_db::BrowseItem>,
+) -> anyhow::Result<()> {
+    for entry in tree::browse_children(conn, oid, recent_count)? {
+        match entry {
+            tree::Entry::Item { item, .. } => {
+                if seen.insert(item.file_id) {
+                    out.push(item);
                 }
-                entries.push(m);
+            }
+            tree::Entry::Container { id, .. } => {
+                if depth > 0 {
+                    if let Some(child) = ObjectId::parse(&id) {
+                        flatten_items(conn, &child, recent_count, depth - 1, seen, out)?;
+                    }
+                }
             }
         }
-        if section == "tv" || section == "all" {
-            for mut e in tv::all_episodes(&conn)? {
-                e.title = tree::recent_tv_title(&e);
-                entries.push(e);
-            }
-        }
-        if section == "music" || section == "all" {
-            for mut t in music::all_tracks(&conn)? {
-                t.title = tree::recent_track_title(&t);
-                entries.push(t);
-            }
-        }
-        Ok(())
-    })();
-    drop(conn);
-    if let Err(err) = result {
-        tracing::warn!("playlist {section}: {err:#}");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    if !matches!(section.as_str(), "all" | "movies" | "tv" | "music") {
-        return StatusCode::NOT_FOUND.into_response();
+    Ok(())
+}
+
+/// Fully-qualified playlist titles: flattened lists lose their container
+/// context, so TV and music entries carry it themselves.
+fn playlist_title(item: &media_db::BrowseItem) -> String {
+    match item.kind {
+        media_db::MediaKind::Tv => {
+            // Season-view items arrive pre-decorated as "NN - Title";
+            // drop that so the qualified form doesn't number twice.
+            let mut episode = item.clone();
+            if let Some(n) = episode.episode {
+                if let Some(rest) = episode.title.strip_prefix(&format!("{n:02} - ")) {
+                    episode.title = rest.to_string();
+                }
+            }
+            tree::recent_tv_title(&episode)
+        }
+        media_db::MediaKind::Music => tree::recent_track_title(item),
+        media_db::MediaKind::Movies => match item.year {
+            Some(year) if !item.title.ends_with(&format!("({year})")) => {
+                format!("{} ({year})", item.title)
+            }
+            _ => item.title.clone(),
+        },
     }
+}
+
+fn render_m3u(state: &AppState, entries: &[media_db::BrowseItem]) -> Response {
     let mut out = String::from("#EXTM3U\n");
-    for item in &entries {
+    for item in entries {
         let secs = item.duration_ms.map(|ms| ms / 1000).unwrap_or(-1);
-        let title = item.title.replace(['\n', '\r'], " ");
+        let title = playlist_title(item).replace(['\n', '\r'], " ");
         out.push_str(&format!(
             "#EXTINF:{secs},{title}\n{}/media/{}\n",
             state.base_url, item.file_id
@@ -118,6 +140,101 @@ async fn playlist(State(state): State<Arc<AppState>>, Path(section): Path<String
         out,
     )
         .into_response()
+}
+
+/// M3U for any node of the virtual tree, by its object id.
+async fn playlist_by_id(State(state): State<Arc<AppState>>, Path(oid): Path<String>) -> Response {
+    let oid = oid.trim_end_matches(".m3u");
+    let Some(node) = ObjectId::parse(oid) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let conn = state.db.lock().await;
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    let result = flatten_items(&conn, &node, state.recent_count, 5, &mut seen, &mut entries);
+    drop(conn);
+    match result {
+        Ok(()) => render_m3u(&state, &entries),
+        Err(err) => {
+            tracing::warn!("playlist {oid}: {err:#}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Discovery-free fallback: the catalog as M3U, playable by anything that
+/// can open a URL — no SSDP involved. Friendly aliases over the tree.
+async fn playlist(State(state): State<Arc<AppState>>, Path(section): Path<String>) -> Response {
+    let node = match section.trim_end_matches(".m3u") {
+        "all" => ObjectId::Root,
+        "movies" => ObjectId::Movies,
+        "tv" => ObjectId::Tv,
+        "music" => ObjectId::Music,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let conn = state.db.lock().await;
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    let result = flatten_items(&conn, &node, state.recent_count, 5, &mut seen, &mut entries);
+    drop(conn);
+    match result {
+        Ok(()) => render_m3u(&state, &entries),
+        Err(err) => {
+            tracing::warn!("playlist {section}: {err:#}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// HTML mirror of the virtual tree: every container is browsable and
+/// offers its playlist; items link to their streams.
+async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>) -> Response {
+    let Some(node) = ObjectId::parse(&oid) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let conn = state.db.lock().await;
+    let title = tree::browse_metadata(&conn, &node)
+        .ok()
+        .map(|entry| match entry {
+            tree::Entry::Container { title, .. } => title,
+            tree::Entry::Item { item, .. } => item.title,
+        })
+        .unwrap_or_else(|| "Browse".to_string());
+    let children = tree::browse_children(&conn, &node, state.recent_count);
+    drop(conn);
+    let children = match children {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!("browse {oid}: {err:#}");
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+    let mut rows = String::new();
+    for entry in children {
+        match entry {
+            tree::Entry::Container { id, title, .. } => rows.push_str(&format!(
+                "<li>📁 <a href=\"/browse/{id}\">{}</a> \
+                 <small><a href=\"/playlist/id/{id}.m3u\">[playlist]</a></small></li>",
+                xml_escape(&title)
+            )),
+            tree::Entry::Item { item, .. } => rows.push_str(&format!(
+                "<li>▶ <a href=\"{}/media/{}\">{}</a></li>",
+                state.base_url,
+                item.file_id,
+                xml_escape(&item.title)
+            )),
+        }
+    }
+    let html = format!(
+        "<!doctype html><meta charset=utf-8><title>{}</title>\
+         <body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
+         <p><a href=\"/browse\">⌂ top</a></p><h1>{}</h1>\
+         <p><a href=\"/playlist/id/{oid}.m3u\">Playlist of everything below this point</a></p>\
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>",
+        xml_escape(&title),
+        xml_escape(&title)
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
 /// Minimal index so the base URL is self-explanatory in a browser.
@@ -150,6 +267,8 @@ async fn index_page(State(state): State<Arc<AppState>>) -> Response {
          <p>UPnP/DLNA media server. Clients normally discover it automatically; \
          anything that can open a URL can also use these playlists directly:</p>\
          <ul><li><a href=\"/playlist.m3u\">playlist.m3u</a> — everything</li>{rows}</ul>\
+         <p><a href=\"/browse\">Browse the virtual library</a> — every folder \
+         (by genre, decade, rating, series/season, artist/album) offers its own playlist.</p>\
          <p>Device description: <a href=\"/device.xml\">device.xml</a></p>"
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()

@@ -143,7 +143,11 @@ routers/APs mistreat multicast in creative ways. Two escape hatches:
   and `/playlist.m3u` (or `/playlist/movies.m3u`, `/playlist/tv.m3u`,
   `/playlist/music.m3u`) exposes the whole catalog with proper display titles to
   anything that can open a URL — VLC's "Open Network Stream", a browser, a car head
-  unit. Same streaming endpoints as UPnP, zero SSDP.
+  unit. Same streaming endpoints as UPnP, zero SSDP. The full virtual tree is also
+  browsable as HTML at `/browse`, where **every container — a genre, a decade, a
+  rating bucket, a series or season, an artist or album — offers its own playlist**
+  (`/playlist/id/<objectid>.m3u`, recursive with per-file dedup, so a series playlist
+  spans its seasons).
 
 ## How the pieces cooperate
 
