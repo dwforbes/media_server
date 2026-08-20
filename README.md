@@ -127,8 +127,23 @@ roots. Sidecar changes are noticed by the running scanner immediately (watch eve
 or at the next reconcile pass otherwise — the catalog tracks each sidecar's mtime.
 
 Test with VLC (View → Playlist → Universal Plug'n'Play) or BubbleUPnP. The server
-announces itself over SSDP and refreshes announcements every 5 minutes; on shutdown it
-sends `ssdp:byebye`.
+announces itself over SSDP (every `ssdp_alive_secs`, default 120s, each announcement
+sent twice — multicast is lossy, wifi especially) and sends `ssdp:byebye` on shutdown.
+
+### When discovery misbehaves
+
+UPnP's weakness is that multicast discovery is the only standard entrance, and
+routers/APs mistreat multicast in creative ways. Two escape hatches:
+
+- **Unicast announcements**: list stubborn devices in `ssdp_unicast_clients` and every
+  announcement is also delivered straight to them — no multicast involved. Works for
+  clients that are dropping packets; a device whose SSDP stack is fully wedged (some
+  Apple TVs until rebooted) needs the second hatch.
+- **Playlists, no discovery at all**: `http://<server>:8200/` is a small index page,
+  and `/playlist.m3u` (or `/playlist/movies.m3u`, `/playlist/tv.m3u`,
+  `/playlist/music.m3u`) exposes the whole catalog with proper display titles to
+  anything that can open a URL — VLC's "Open Network Stream", a browser, a car head
+  unit. Same streaming endpoints as UPnP, zero SSDP.
 
 ## How the pieces cooperate
 

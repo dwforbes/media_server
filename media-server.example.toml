@@ -25,3 +25,9 @@ recent_count = 25
 # cycle). Lower helps clients on lossy links (wifi) discover the server
 # sooner; 120 is a good balance.
 ssdp_alive_secs = 120
+
+# Devices whose multicast reception is unreliable (some Apple TVs, TVs
+# behind fussy routers) can be sent every announcement directly: unicast
+# UDP is acknowledged on wifi and immune to router multicast handling.
+# Give listed devices a DHCP reservation so the address stays true.
+#ssdp_unicast_clients = ["192.168.1.50"]
