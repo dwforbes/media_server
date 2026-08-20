@@ -281,6 +281,102 @@ pub fn servable(conn: &Connection, file_id: i64) -> Result<Option<ServableFile>>
     .map_err(Into::into)
 }
 
+/// Everything known about one item, for a detail view.
+#[derive(Debug, Clone)]
+pub struct ItemDetail {
+    pub file_id: i64,
+    pub kind: MediaKind,
+    pub title: String,
+    pub rel_path: String,
+    pub size: i64,
+    pub mime: String,
+    pub container: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
+    pub added_at_text: String,
+    pub has_art: bool,
+    pub year: Option<i64>,
+    pub rating: Option<f64>,
+    pub plot: Option<String>,
+    pub genre: Option<String>,
+    pub director: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub track_no: Option<i64>,
+    pub series: Option<String>,
+    pub season: Option<i64>,
+    pub episode: Option<i64>,
+}
+
+pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
+    conn.query_row(
+        "SELECT f.id, f.kind, f.rel_path, f.size, f.mime, f.container, f.duration_ms,
+                f.width, f.height, f.video_codec, f.audio_codec,
+                datetime(f.added_at, 'unixepoch', 'localtime'), f.art IS NOT NULL,
+                m.title, m.year, m.rating, m.plot,
+                (SELECT group_concat(g.name, ', ') FROM movie_genres mg
+                  JOIN genres g ON g.id = mg.genre_id WHERE mg.file_id = f.id),
+                (SELECT group_concat(d.name, ', ') FROM movie_directors md
+                  JOIN directors d ON d.id = md.director_id WHERE md.file_id = f.id),
+                t.series, t.season, t.episode, t.title, t.plot,
+                mu.title, mu.artist, mu.album, mu.track_no, mu.year,
+                (SELECT group_concat(g.name, ', ') FROM track_genres tg
+                  JOIN genres g ON g.id = tg.genre_id WHERE tg.file_id = f.id)
+         FROM files f
+         LEFT JOIN movies m        ON m.file_id  = f.id
+         LEFT JOIN tv_episodes t   ON t.file_id  = f.id
+         LEFT JOIN music_tracks mu ON mu.file_id = f.id
+         WHERE f.id = ?1 AND f.status = 'ready'",
+        [file_id],
+        |r| {
+            let kind = MediaKind::parse(&r.get::<_, String>(1)?).unwrap_or(MediaKind::Movies);
+            let rel_path: String = r.get(2)?;
+            let movie_title: Option<String> = r.get(13)?;
+            let ep_title: Option<String> = r.get(22)?;
+            let track_title: Option<String> = r.get(24)?;
+            let stem = rel_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&rel_path)
+                .rsplit_once('.')
+                .map(|(s, _)| s.to_string())
+                .unwrap_or_else(|| rel_path.clone());
+            Ok(ItemDetail {
+                file_id: r.get(0)?,
+                kind,
+                title: movie_title.or(track_title).or(ep_title).unwrap_or(stem),
+                rel_path,
+                size: r.get(3)?,
+                mime: r.get(4)?,
+                container: r.get(5)?,
+                duration_ms: r.get(6)?,
+                width: r.get(7)?,
+                height: r.get(8)?,
+                video_codec: r.get(9)?,
+                audio_codec: r.get(10)?,
+                added_at_text: r.get(11)?,
+                has_art: r.get(12)?,
+                year: r.get::<_, Option<i64>>(14)?.or(r.get(28)?),
+                rating: r.get(15)?,
+                plot: r.get::<_, Option<String>>(16)?.or(r.get(23)?),
+                genre: r.get::<_, Option<String>>(17)?.or(r.get(29)?),
+                director: r.get(18)?,
+                series: r.get(19)?,
+                season: r.get(20)?,
+                episode: r.get(21)?,
+                artist: r.get(25)?,
+                album: r.get(26)?,
+                track_no: r.get(27)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 /// Where the artwork for one file lives.
 pub enum ArtSource {
     /// A sidecar image file on disk.

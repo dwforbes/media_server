@@ -19,17 +19,19 @@ pub fn finalize_movie(
     sort_title: &str,
     year: Option<i64>,
     rating: Option<f64>,
+    plot: Option<&str>,
     genres: &[String],
     directors: &[String],
 ) -> Result<()> {
     let tx = conn.transaction()?;
     files::update_tech(&tx, file_id, tech)?;
     tx.execute(
-        "INSERT INTO movies(file_id, title, sort_title, year, rating) VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO movies(file_id, title, sort_title, year, rating, plot)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(file_id) DO UPDATE SET
              title = excluded.title, sort_title = excluded.sort_title,
-             year = excluded.year, rating = excluded.rating",
-        params![file_id, title, sort_title, year, rating],
+             year = excluded.year, rating = excluded.rating, plot = excluded.plot",
+        params![file_id, title, sort_title, year, rating, plot],
     )?;
     tx.execute("DELETE FROM movie_genres WHERE file_id = ?1", [file_id])?;
     for genre in genres {

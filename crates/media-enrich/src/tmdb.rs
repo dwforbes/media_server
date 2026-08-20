@@ -176,13 +176,13 @@ impl Tmdb {
         }))
     }
 
-    /// Episode titles for one season, keyed by episode number. One API call
-    /// covers the whole season.
+    /// Episode (title, overview) for one season, keyed by episode number.
+    /// One API call covers the whole season.
     pub fn season_episode_titles(
         &self,
         series_id: i64,
         season: i64,
-    ) -> Result<HashMap<i64, String>> {
+    ) -> Result<HashMap<i64, (String, String)>> {
         let json = match self.get(&format!("/tv/{series_id}/season/{season}"), &[]) {
             Ok(j) => j,
             // A season TMDB doesn't know just yields no titles.
@@ -195,7 +195,12 @@ impl Tmdb {
                     episode.get("episode_number").and_then(Value::as_i64),
                     episode.get("name").and_then(Value::as_str),
                 ) {
-                    out.insert(number, name.to_string());
+                    let overview = episode
+                        .get("overview")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    out.insert(number, (name.to_string(), overview));
                 }
             }
         }

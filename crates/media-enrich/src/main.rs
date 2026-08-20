@@ -107,16 +107,17 @@ enum NfoState {
     HandWritten,
 }
 
-/// (state, whether the file already carries a <rating>).
-fn nfo_state(nfo_path: &Path) -> (NfoState, bool) {
+/// (state, has <rating>, has <plot>).
+fn nfo_state(nfo_path: &Path) -> (NfoState, bool, bool) {
     match std::fs::read_to_string(nfo_path) {
-        Err(_) => (NfoState::Missing, false),
+        Err(_) => (NfoState::Missing, false, false),
         Ok(text) => {
             let has_rating = text.contains("<rating>");
+            let has_plot = text.contains("<plot>");
             if text.contains(MARKER) {
-                (NfoState::Generated, has_rating)
+                (NfoState::Generated, has_rating, has_plot)
             } else {
-                (NfoState::HandWritten, has_rating)
+                (NfoState::HandWritten, has_rating, has_plot)
             }
         }
     }
@@ -278,7 +279,7 @@ fn main() -> Result<()> {
             .filter(|e| e.file_type().is_file() && is_video(e.path()))
         {
             let path = entry.into_path();
-            let (state, has_rating) = nfo_state(&path.with_extension("nfo"));
+            let (state, has_rating, _) = nfo_state(&path.with_extension("nfo"));
             let write_nfo = match state {
                 NfoState::Missing => true,
                 // A generated .nfo without a rating predates the ratings
@@ -342,9 +343,12 @@ fn main() -> Result<()> {
                 .unwrap_or_default();
             let Some(parsed) = nameparse::episode(&stem, &parent_dirs) else { continue };
 
-            let write_nfo = match nfo_state(&path.with_extension("nfo")).0 {
+            // A generated episode .nfo without a <plot> predates episode
+            // overviews; upgrade it in place (like movie ratings).
+            let (ep_state, _, ep_has_plot) = nfo_state(&path.with_extension("nfo"));
+            let write_nfo = match ep_state {
                 NfoState::Missing => true,
-                NfoState::Generated => args.refresh,
+                NfoState::Generated => args.refresh || !ep_has_plot,
                 NfoState::HandWritten => args.refresh && args.force,
             };
             // Series folder: the file's directory, or its parent when the
@@ -542,22 +546,24 @@ fn main() -> Result<()> {
         };
         std::thread::sleep(Duration::from_millis(args.delay_ms));
 
-        let mut season_titles: std::collections::HashMap<i64, std::collections::HashMap<i64, String>> =
-            Default::default();
+        let mut season_titles: std::collections::HashMap<
+            i64,
+            std::collections::HashMap<i64, (String, String)>,
+        > = Default::default();
         for ep in &plan.episodes {
             if !season_titles.contains_key(&ep.season) {
                 let titles = tmdb.season_episode_titles(info.tmdb_id, ep.season)?;
                 std::thread::sleep(Duration::from_millis(args.delay_ms));
                 season_titles.insert(ep.season, titles);
             }
-            let title = season_titles[&ep.season]
+            let (title, overview) = season_titles[&ep.season]
                 .get(&ep.episode)
                 .cloned()
-                .unwrap_or_else(|| format!("Episode {}", ep.episode));
+                .unwrap_or_else(|| (format!("Episode {}", ep.episode), String::new()));
             let nfo_path = ep.path.with_extension("nfo");
             std::fs::write(
                 &nfo_path,
-                render_episode_nfo(&info.name, ep.season, ep.episode, &title),
+                render_episode_nfo(&info.name, ep.season, ep.episode, &title, &overview),
             )
             .with_context(|| format!("writing {}", nfo_path.display()))?;
             nfos_written += 1;
@@ -604,16 +610,26 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn render_episode_nfo(show: &str, season: i64, episode: i64, title: &str) -> String {
+fn render_episode_nfo(
+    show: &str,
+    season: i64,
+    episode: i64,
+    title: &str,
+    plot: &str,
+) -> String {
+    // <plot> is always present (possibly empty) so the upgrade check can
+    // tell "no overview on TMDB" apart from "predates the plot feature".
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
          <!-- {MARKER} (TMDB) -->\n<episodedetails>\n\
          \x20 <showtitle>{}</showtitle>\n\
          \x20 <season>{season}</season>\n\
          \x20 <episode>{episode}</episode>\n\
-         \x20 <title>{}</title>\n</episodedetails>\n",
+         \x20 <title>{}</title>\n\
+         \x20 <plot>{}</plot>\n</episodedetails>\n",
         xml_escape(show),
-        xml_escape(title)
+        xml_escape(title),
+        xml_escape(plot)
     )
 }
 

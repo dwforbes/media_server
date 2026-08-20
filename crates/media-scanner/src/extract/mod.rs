@@ -64,6 +64,7 @@ fn try_extract(
                 tag_genre.map(|g| audio::split_genres(&g)).unwrap_or_default();
             let mut directors: Vec<String> = Vec::new();
             let mut rating = None;
+            let mut plot = None;
             if let Some(nfo) = nfo::read_sidecar(&abs) {
                 if let Some(t) = nfo.title {
                     title = t;
@@ -76,10 +77,12 @@ fn try_extract(
                 }
                 directors = nfo.directors;
                 rating = nfo.rating;
+                plot = nfo.plot;
             }
             let sort = nameparse::sort_title(&title);
             movies::finalize_movie(
-                conn, file_id, &tech, &title, &sort, year, rating, &genres, &directors,
+                conn, file_id, &tech, &title, &sort, year, rating, plot.as_deref(),
+                &genres, &directors,
             )?;
         }
         MediaKind::Tv => {
@@ -102,11 +105,14 @@ fn try_extract(
                 .and_then(|n| n.episode)
                 .or_else(|| parsed.as_ref().map(|p| p.episode))
                 .unwrap_or(0);
+            let plot = nfo.as_ref().and_then(|n| n.plot.clone());
             let title = nfo
                 .and_then(|n| n.title)
                 .or_else(|| parsed.map(|p| p.title))
                 .unwrap_or_else(|| nameparse::clean_name(&stem));
-            tv::finalize_episode(conn, file_id, &tech, &series, season, episode, &title)?;
+            tv::finalize_episode(
+                conn, file_id, &tech, &series, season, episode, &title, plot.as_deref(),
+            )?;
         }
         MediaKind::Music => {
             let (tech, meta, embedded_art) = audio::extract(&abs, &stem, &parent_dirs)?;

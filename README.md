@@ -147,7 +147,9 @@ routers/APs mistreat multicast in creative ways. Two escape hatches:
   browsable as HTML at `/browse`, where **every container — a genre, a decade, a
   rating bucket, a series or season, an artist or album — offers its own playlist**
   (`/playlist/id/<objectid>.m3u`, recursive with per-file dedup, so a series playlist
-  spans its seasons).
+  spans its seasons). Every item links to a **detail page** (`/item/<id>`) showing
+  the poster, plot, IMDb rating, genres, director, duration, resolution, codecs,
+  container, file size, and when it was added.
 
 ## How the pieces cooperate
 

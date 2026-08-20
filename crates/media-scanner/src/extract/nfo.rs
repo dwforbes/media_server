@@ -14,6 +14,7 @@ pub struct NfoData {
     pub genres: Vec<String>,
     pub directors: Vec<String>,
     pub rating: Option<f64>,
+    pub plot: Option<String>,
     pub show_title: Option<String>,
     pub season: Option<i64>,
     pub episode: Option<i64>,
@@ -66,6 +67,9 @@ fn parse(text: &str) -> Result<NfoData> {
                     }
                     "episode" => {
                         data.episode.get_or_insert(value.parse().unwrap_or(-1));
+                    }
+                    "plot" => {
+                        data.plot.get_or_insert(value);
                     }
                     "genre" => data.genres.push(value),
                     "director" => data.directors.push(value),

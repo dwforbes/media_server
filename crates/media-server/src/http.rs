@@ -50,6 +50,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/playlist/id/{oid}", get(playlist_by_id))
         .route("/browse", get(|s: State<Arc<AppState>>| browse_page(s, Path("0".into()))))
         .route("/browse/{oid}", get(browse_page))
+        .route("/item/{id}", get(item_page))
         .with_state(state)
 }
 
@@ -218,10 +219,11 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
                 xml_escape(&title)
             )),
             tree::Entry::Item { item, .. } => rows.push_str(&format!(
-                "<li>▶ <a href=\"{}/media/{}\">{}</a></li>",
-                state.base_url,
+                "<li><a href=\"/item/{0}\">{1}</a> \
+                 <small><a href=\"{2}/media/{0}\">[▶ play]</a></small></li>",
                 item.file_id,
-                xml_escape(&item.title)
+                xml_escape(&item.title),
+                state.base_url
             )),
         }
     }
@@ -270,6 +272,132 @@ async fn index_page(State(state): State<Arc<AppState>>) -> Response {
          <p><a href=\"/browse\">Browse the virtual library</a> — every folder \
          (by genre, decade, rating, series/season, artist/album) offers its own playlist.</p>\
          <p>Device description: <a href=\"/device.xml\">device.xml</a></p>"
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+fn human_size(bytes: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+fn human_duration(ms: i64) -> String {
+    let secs = ms / 1000;
+    format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+}
+
+/// Detail page: everything the catalog knows about one item.
+async fn item_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    let conn = state.db.lock().await;
+    let detail = files::detail(&conn, id);
+    drop(conn);
+    let detail = match detail {
+        Ok(Some(d)) => d,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::warn!("item {id}: {err:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut heading = xml_escape(&detail.title);
+    if let Some(year) = detail.year {
+        heading.push_str(&format!(" ({year})"));
+    }
+    let mut subtitle = String::new();
+    if let (Some(series), Some(season), Some(episode)) =
+        (&detail.series, detail.season, detail.episode)
+    {
+        subtitle = format!("{} — Season {season}, Episode {episode}", xml_escape(series));
+    } else if let Some(artist) = &detail.artist {
+        subtitle = xml_escape(artist);
+        if let Some(album) = &detail.album {
+            subtitle.push_str(&format!(" — {}", xml_escape(album)));
+            if let Some(n) = detail.track_no {
+                subtitle.push_str(&format!(", track {n}"));
+            }
+        }
+    }
+
+    let mut facts: Vec<(&str, String)> = Vec::new();
+    if let Some(rating) = detail.rating {
+        facts.push(("IMDb rating", format!("{rating:.1} / 10")));
+    }
+    if let Some(genre) = &detail.genre {
+        facts.push(("Genre", xml_escape(genre)));
+    }
+    if let Some(director) = &detail.director {
+        facts.push(("Director", xml_escape(director)));
+    }
+    if let Some(ms) = detail.duration_ms {
+        facts.push(("Duration", human_duration(ms)));
+    }
+    if let (Some(w), Some(h)) = (detail.width, detail.height) {
+        facts.push(("Resolution", format!("{w} × {h}")));
+    }
+    let codecs = match (&detail.video_codec, &detail.audio_codec) {
+        (Some(v), Some(a)) => Some(format!("{v} video, {a} audio")),
+        (Some(v), None) => Some(format!("{v} video")),
+        (None, Some(a)) => Some(a.to_string()),
+        (None, None) => None,
+    };
+    if let Some(codecs) = codecs {
+        facts.push(("Codecs", xml_escape(&codecs)));
+    }
+    if let Some(container) = &detail.container {
+        facts.push(("Container", xml_escape(container)));
+    }
+    facts.push(("File size", human_size(detail.size)));
+    facts.push(("MIME type", xml_escape(&detail.mime)));
+    facts.push(("Added", xml_escape(&detail.added_at_text)));
+    facts.push(("File", xml_escape(&detail.rel_path)));
+
+    let art = if detail.has_art {
+        format!(
+            "<img src=\"/art/{id}\" alt=\"\" style=\"float:right;max-width:220px;\
+             margin:0 0 1em 1.5em;border-radius:6px\">"
+        )
+    } else {
+        String::new()
+    };
+    let plot = detail
+        .plot
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| format!("<p style=\"max-width:38em\">{}</p>", xml_escape(p)))
+        .unwrap_or_default();
+    let subtitle_html = if subtitle.is_empty() {
+        String::new()
+    } else {
+        format!("<p><strong>{subtitle}</strong></p>")
+    };
+    let rows: String = facts
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "<tr><td style=\"color:#666;padding-right:1em;white-space:nowrap\">{k}</td>\
+                 <td>{v}</td></tr>"
+            )
+        })
+        .collect();
+    let html = format!(
+        "<!doctype html><meta charset=utf-8><title>{heading}</title>\
+         <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
+         <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading}</h1>\
+         {subtitle_html}{plot}\
+         <p><a href=\"{}/media/{id}\" style=\"font-size:1.1em\">▶ Play</a></p>\
+         <table style=\"border-collapse:collapse\">{rows}</table>",
+        state.base_url
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }

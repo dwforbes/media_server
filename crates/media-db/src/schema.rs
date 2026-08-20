@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -115,5 +115,13 @@ pub const MIGRATIONS: &[&str] = &[
     ALTER TABLE files ADD COLUMN added_at INTEGER NOT NULL DEFAULT 0;
     UPDATE files SET added_at = mtime;
     CREATE INDEX idx_files_added ON files(kind, status, added_at DESC);
+    "#,
+    // 6 -> 7: plot/description from .nfo sidecars. Movie sidecars have
+    // carried <plot> since the first enrichment, so the nfo_mtime poke
+    // re-extracts them into the new column with no network involved.
+    r#"
+    ALTER TABLE movies ADD COLUMN plot TEXT;
+    ALTER TABLE tv_episodes ADD COLUMN plot TEXT;
+    UPDATE files SET nfo_mtime = -1 WHERE kind = 'movies' AND nfo_mtime IS NOT NULL;
     "#,
 ];
