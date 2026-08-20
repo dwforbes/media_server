@@ -64,12 +64,23 @@ impl Tmdb {
         response.json().context("parsing TMDB response")
     }
 
-    /// Best match for (title, year); retries without the year if nothing
-    /// hits. One details call (credits and external ids appended) supplies
-    /// genres, directors, imdb id, and collection membership together.
+    /// Best match for (title, year). Search precision matters: TMDB's
+    /// "year" parameter is loose (any regional release year), which can
+    /// rank a sibling film first — Deathly Hallows Part 1, with 2011 home
+    /// releases, outranked Part 2 for year=2011. So: strict
+    /// primary_release_year first, loose year as fallback (filename years
+    /// are sometimes regional), then no year. One details call (credits
+    /// and external ids appended) supplies genres, directors, imdb id,
+    /// and collection membership together.
     pub fn find_movie(&mut self, title: &str, year: Option<i64>) -> Result<Option<MovieInfo>> {
-        let mut result = self.search(title, year)?;
-        if result.is_none() && year.is_some() {
+        let mut result = None;
+        if let Some(y) = year {
+            result = self.search(title, Some(("primary_release_year", y)))?;
+            if result.is_none() {
+                result = self.search(title, Some(("year", y)))?;
+            }
+        }
+        if result.is_none() {
             result = self.search(title, None)?;
         }
         let Some(hit) = result else { return Ok(None) };
@@ -226,12 +237,12 @@ impl Tmdb {
         Ok(())
     }
 
-    fn search(&self, title: &str, year: Option<i64>) -> Result<Option<Value>> {
+    fn search(&self, title: &str, year: Option<(&str, i64)>) -> Result<Option<Value>> {
         let year_string;
         let mut params = vec![("query", title), ("include_adult", "false")];
-        if let Some(y) = year {
+        if let Some((param, y)) = year {
             year_string = y.to_string();
-            params.push(("year", &year_string));
+            params.push((param, &year_string));
         }
         let json = self.get("/search/movie", &params)?;
         Ok(json
