@@ -98,6 +98,10 @@ fn make_senders(interfaces: &[Ipv4Addr]) -> Vec<(Ipv4Addr, UdpSocket)> {
 }
 
 fn notify(senders: &[(Ipv4Addr, UdpSocket)], uuid: &str, location: &str, alive: bool) {
+    // A relay that cannot send is worse than none — surface the first
+    // failure loudly (macOS Local Network privacy denies background
+    // processes with "operation not permitted" while logs look healthy).
+    static SEND_FAILURE_WARNED: std::sync::Once = std::sync::Once::new();
     let nts = if alive { "ssdp:alive" } else { "ssdp:byebye" };
     let group: SocketAddr = SSDP_GROUP.parse().unwrap();
     for (nt, usn) in targets(uuid) {
@@ -106,6 +110,13 @@ fn notify(senders: &[(Ipv4Addr, UdpSocket)], uuid: &str, location: &str, alive: 
         );
         for (iface, socket) in senders {
             if let Err(err) = socket.send_to(msg.as_bytes(), group) {
+                SEND_FAILURE_WARNED.call_once(|| {
+                    tracing::warn!(
+                        "SSDP send on {iface} failed: {err} — announcements are NOT \
+                         going out. On macOS, grant this binary Local Network \
+                         permission (System Settings > Privacy & Security)."
+                    );
+                });
                 tracing::debug!("notify on {iface} failed: {err}");
             }
         }
