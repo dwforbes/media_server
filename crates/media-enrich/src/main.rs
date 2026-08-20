@@ -478,9 +478,18 @@ fn main() -> Result<()> {
                 if task.write_poster {
                     match &info.poster_path {
                         Some(remote) => {
-                            tmdb.download_poster(remote, &poster_path_for(&task.path))?;
-                            posters_written += 1;
-                            poster_note = " +poster";
+                            match tmdb.download_poster(remote, &poster_path_for(&task.path)) {
+                                Ok(()) => {
+                                    posters_written += 1;
+                                    poster_note = " +poster";
+                                }
+                                // A single unwritable volume must not
+                                // abort the whole run; retries cover it.
+                                Err(err) => {
+                                    eprintln!("{}: poster not written: {err:#}", task.path.display());
+                                    poster_note = " (poster failed)";
+                                }
+                            }
                         }
                         None => poster_note = " (no poster on TMDB)",
                     }
@@ -525,9 +534,10 @@ fn main() -> Result<()> {
         if rating.is_some() {
             rated += 1;
         }
-        std::fs::write(nfo_path, render_nfo(info, rating, imdb_id.as_deref()))
-            .with_context(|| format!("writing {}", nfo_path.display()))?;
-        nfos_written += 1;
+        match std::fs::write(nfo_path, render_nfo(info, rating, imdb_id.as_deref())) {
+            Ok(()) => nfos_written += 1,
+            Err(err) => eprintln!("{}: nfo not written: {err:#}", nfo_path.display()),
+        }
     }
     if !pending_nfos.is_empty() {
         println!("IMDb ratings attached: {rated}/{}", pending_nfos.len());
@@ -589,15 +599,24 @@ fn main() -> Result<()> {
 
         let mut poster_note = String::new();
         if let Some(remote) = &info.poster_path {
+            let mut poster_targets: Vec<PathBuf> = Vec::new();
             if let Some(dest) = &plan.poster_dest {
-                tmdb.download_poster(remote, dest)?;
-                posters_written += 1;
-                poster_note = " +poster".into();
+                poster_targets.push(dest.clone());
             }
             for path in &plan.loose_posters {
-                tmdb.download_poster(remote, &poster_path_for(path))?;
-                posters_written += 1;
-                poster_note = " +poster".into();
+                poster_targets.push(poster_path_for(path));
+            }
+            for dest in poster_targets {
+                match tmdb.download_poster(remote, &dest) {
+                    Ok(()) => {
+                        posters_written += 1;
+                        poster_note = " +poster".into();
+                    }
+                    Err(err) => {
+                        eprintln!("{}: poster not written: {err:#}", dest.display());
+                        poster_note = " (poster failed)".into();
+                    }
+                }
             }
         }
         println!(
@@ -627,15 +646,16 @@ fn main() -> Result<()> {
             if rating.is_some() {
                 ep_rated += 1;
             }
-            std::fs::write(
+            match std::fs::write(
                 &pe.nfo_path,
                 render_episode_nfo(
                     &pe.show, pe.season, pe.episode, &pe.title, &pe.plot,
                     rating, pe.imdb_id.as_deref(),
                 ),
-            )
-            .with_context(|| format!("writing {}", pe.nfo_path.display()))?;
-            nfos_written += 1;
+            ) {
+                Ok(()) => nfos_written += 1,
+                Err(err) => eprintln!("{}: nfo not written: {err:#}", pe.nfo_path.display()),
+            }
         }
         println!(
             "episode IMDb ratings attached: {ep_rated}/{}",
