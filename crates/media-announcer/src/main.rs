@@ -124,13 +124,51 @@ fn notify(senders: &[(Ipv4Addr, UdpSocket)], uuid: &str, location: &str, alive: 
     }
 }
 
+enum Health {
+    Up(String),
+    /// The server host answered and refused the port, or returned garbage:
+    /// the server is genuinely down.
+    DownConfirmed,
+    /// The *path* failed (timeout, no route — a VPN grabbing the default
+    /// route looks exactly like this). The server may be fine and fully
+    /// reachable by the clients we announce to, so no byebye is warranted.
+    Unreachable,
+}
+
+fn io_error_kind(err: &reqwest::Error) -> Option<std::io::ErrorKind> {
+    let mut source = std::error::Error::source(err);
+    while let Some(e) = source {
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            return Some(io.kind());
+        }
+        source = e.source();
+    }
+    None
+}
+
 /// Health check that doubles as identity discovery: a reachable server's
 /// device.xml carries its UDN.
-fn fetch_uuid(client: &reqwest::blocking::Client, location: &str) -> Option<String> {
-    let body = client.get(location).send().ok()?.text().ok()?;
-    let start = body.find("<UDN>uuid:")? + "<UDN>uuid:".len();
-    let end = body[start..].find("</UDN>")? + start;
-    Some(body[start..end].trim().to_string())
+fn check_health(client: &reqwest::blocking::Client, location: &str) -> Health {
+    match client.get(location).send() {
+        Ok(response) => {
+            let body = response.text().unwrap_or_default();
+            let uuid = body.find("<UDN>uuid:").and_then(|i| {
+                let start = i + "<UDN>uuid:".len();
+                body[start..]
+                    .find("</UDN>")
+                    .map(|e| body[start..start + e].trim().to_string())
+            });
+            match uuid {
+                Some(uuid) => Health::Up(uuid),
+                // Something answered HTTP but it isn't our server.
+                None => Health::DownConfirmed,
+            }
+        }
+        Err(err) => match io_error_kind(&err) {
+            Some(std::io::ErrorKind::ConnectionRefused) => Health::DownConfirmed,
+            _ => Health::Unreachable,
+        },
+    }
 }
 
 /// Answer M-SEARCH while the server is healthy.
@@ -217,22 +255,36 @@ fn main() -> Result<()> {
         std::thread::spawn(move || responder_thread(state, location, interfaces));
     }
 
+    let mut suspended = false;
     loop {
-        match fetch_uuid(&client, &location) {
-            Some(uuid) => {
+        match check_health(&client, &location) {
+            Health::Up(uuid) => {
                 let was = state.lock().unwrap().replace(uuid.clone());
-                if was.as_deref() != Some(&uuid) {
+                if was.as_deref() != Some(&uuid) || suspended {
                     tracing::info!("server healthy (uuid {uuid}); announcing");
                 }
+                suspended = false;
                 notify(&senders, &uuid, &location, true);
                 std::thread::sleep(Duration::from_millis(400));
                 notify(&senders, &uuid, &location, true);
             }
-            None => {
+            Health::DownConfirmed => {
                 if let Some(uuid) = state.lock().unwrap().take() {
-                    tracing::warn!("server unreachable; sending byebye");
+                    tracing::warn!("server down (connection refused); sending byebye");
                     notify(&senders, &uuid, &location, false);
                 }
+                suspended = false;
+            }
+            Health::Unreachable => {
+                // Our path failed; the server may be fine for clients.
+                let was_announcing = state.lock().unwrap().take().is_some();
+                if was_announcing || !suspended {
+                    tracing::warn!(
+                        "server unreachable from here (network path issue — VPN?); \
+                         suspending announcements WITHOUT byebye"
+                    );
+                }
+                suspended = true;
             }
         }
         std::thread::sleep(Duration::from_secs(args.interval_secs.max(15)));
