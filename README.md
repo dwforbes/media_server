@@ -139,6 +139,14 @@ routers/APs mistreat multicast in creative ways. Two escape hatches:
   announcement is also delivered straight to them — no multicast involved. Works for
   clients that are dropping packets; a device whose SSDP stack is fully wedged (some
   Apple TVs until rebooted) needs the second hatch.
+- **A relay beacon on another segment**: when the server's own link onto a network
+  is unreliable (tenuous wifi), run `media-announcer` on any always-on box in that
+  network. It reads the same `media-server.toml` (`advertise_ip` required),
+  health-checks the server by fetching `device.xml` (which also supplies the
+  device UUID announcements must carry), and while healthy sends the standard
+  alive announcements locally and answers M-SEARCH — sending `byebye` once if the
+  server goes down. Discovery multicast then originates where it's reliable; only
+  unicast HTTP crosses the weak link.
 - **Playlists, no discovery at all**: `http://<server>:8200/` is a small index page,
   and `/playlist.m3u` (or `/playlist/movies.m3u`, `/playlist/tv.m3u`,
   `/playlist/music.m3u`) exposes the whole catalog with proper display titles to

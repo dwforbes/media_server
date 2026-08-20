@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/media-announcer",
     "crates/media-db",
     "crates/media-title",
     "crates/media-enrich",

@@ -1,0 +1,21 @@
+# /etc/systemd/system/media-announcer.service — for an always-on box on a
+# network segment the media-server's own multicast doesn't reach reliably.
+# Copy the server's media-server.toml (advertise_ip must be set) to this
+# machine, fix the paths below, then systemctl enable --now.
+[Unit]
+Description=SSDP relay beacon for media-server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=pi
+ExecStart=/home/pi/media_server/target/release/media-announcer --config /home/pi/media_server/media-server.toml
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
