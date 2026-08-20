@@ -207,6 +207,23 @@ impl Tmdb {
         Ok(out)
     }
 
+    /// The IMDb id for one episode.
+    pub fn episode_imdb_id(&self, series_id: i64, season: i64, episode: i64) -> Result<Option<String>> {
+        let json = match self.get(
+            &format!("/tv/{series_id}/season/{season}/episode/{episode}/external_ids"),
+            &[],
+        ) {
+            Ok(j) => j,
+            // Unknown episode: no id rather than a failed run.
+            Err(_) => return Ok(None),
+        };
+        Ok(json
+            .get("imdb_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string))
+    }
+
     /// Download a poster (w500 rendition, ~500x750) to `dest`.
     pub fn download_poster(&self, poster_path: &str, dest: &std::path::Path) -> Result<()> {
         let url = format!("https://image.tmdb.org/t/p/w500{poster_path}");

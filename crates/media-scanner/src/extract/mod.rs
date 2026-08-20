@@ -108,12 +108,15 @@ fn try_extract(
                 .or_else(|| parsed.as_ref().map(|p| p.episode))
                 .unwrap_or(0);
             let plot = nfo.as_ref().and_then(|n| n.plot.clone());
+            let rating = nfo.as_ref().and_then(|n| n.rating);
+            let ep_imdb = nfo.as_ref().and_then(|n| n.imdb_id.clone());
             let title = nfo
                 .and_then(|n| n.title)
                 .or_else(|| parsed.map(|p| p.title))
                 .unwrap_or_else(|| nameparse::clean_name(&stem));
             tv::finalize_episode(
                 conn, file_id, &tech, &series, season, episode, &title, plot.as_deref(),
+                rating, ep_imdb.as_deref(),
             )?;
         }
         MediaKind::Music => {

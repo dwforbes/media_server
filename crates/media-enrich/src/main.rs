@@ -348,10 +348,10 @@ fn main() -> Result<()> {
 
             // A generated episode .nfo without a <plot> predates episode
             // overviews; upgrade it in place (like movie ratings).
-            let (ep_state, _, ep_has_plot, _) = nfo_state(&path.with_extension("nfo"));
+            let (ep_state, _, ep_has_plot, ep_has_imdb) = nfo_state(&path.with_extension("nfo"));
             let write_nfo = match ep_state {
                 NfoState::Missing => true,
-                NfoState::Generated => args.refresh || !ep_has_plot,
+                NfoState::Generated => args.refresh || !ep_has_plot || !ep_has_imdb,
                 NfoState::HandWritten => args.refresh && args.force,
             };
             // Series folder: the file's directory, or its parent when the
@@ -533,6 +533,19 @@ fn main() -> Result<()> {
         println!("IMDb ratings attached: {rated}/{}", pending_nfos.len());
     }
 
+    // Episode .nfo writes are deferred like the movies': imdb ids are
+    // collected first, then one pass over the (cached) ratings dataset
+    // resolves all episode ratings at once.
+    struct PendingEpisode {
+        nfo_path: PathBuf,
+        show: String,
+        season: i64,
+        episode: i64,
+        title: String,
+        plot: String,
+        imdb_id: Option<String>,
+    }
+    let mut pending_episodes: Vec<PendingEpisode> = Vec::new();
     for plan in &series_plans {
         let info = match tmdb.find_series(&plan.name) {
             Ok(Some(info)) => info,
@@ -559,13 +572,19 @@ fn main() -> Result<()> {
                 .get(&ep.episode)
                 .cloned()
                 .unwrap_or_else(|| (format!("Episode {}", ep.episode), String::new()));
-            let nfo_path = ep.path.with_extension("nfo");
-            std::fs::write(
-                &nfo_path,
-                render_episode_nfo(&info.name, ep.season, ep.episode, &title, &overview),
-            )
-            .with_context(|| format!("writing {}", nfo_path.display()))?;
-            nfos_written += 1;
+            let imdb_id = tmdb
+                .episode_imdb_id(info.tmdb_id, ep.season, ep.episode)
+                .unwrap_or_default();
+            std::thread::sleep(Duration::from_millis(args.delay_ms / 3));
+            pending_episodes.push(PendingEpisode {
+                nfo_path: ep.path.with_extension("nfo"),
+                show: info.name.clone(),
+                season: ep.season,
+                episode: ep.episode,
+                title,
+                plot: overview,
+                imdb_id,
+            });
         }
 
         let mut poster_note = String::new();
@@ -586,6 +605,41 @@ fn main() -> Result<()> {
             plan.name,
             info.name,
             plan.episodes.len()
+        );
+    }
+
+    if !pending_episodes.is_empty() {
+        let needed: std::collections::HashSet<String> = pending_episodes
+            .iter()
+            .filter_map(|e| e.imdb_id.clone())
+            .collect();
+        let ep_ratings = if needed.is_empty() || args.no_ratings {
+            Default::default()
+        } else {
+            imdb::ratings_for(&needed, args.ratings_max_age_days).unwrap_or_else(|err| {
+                tracing::warn!("IMDb ratings unavailable ({err:#}); episode nfos written without");
+                Default::default()
+            })
+        };
+        let mut ep_rated = 0usize;
+        for pe in &pending_episodes {
+            let rating = pe.imdb_id.as_ref().and_then(|id| ep_ratings.get(id)).copied();
+            if rating.is_some() {
+                ep_rated += 1;
+            }
+            std::fs::write(
+                &pe.nfo_path,
+                render_episode_nfo(
+                    &pe.show, pe.season, pe.episode, &pe.title, &pe.plot,
+                    rating, pe.imdb_id.as_deref(),
+                ),
+            )
+            .with_context(|| format!("writing {}", pe.nfo_path.display()))?;
+            nfos_written += 1;
+        }
+        println!(
+            "episode IMDb ratings attached: {ep_rated}/{}",
+            pending_episodes.len()
         );
     }
 
@@ -615,9 +669,15 @@ fn render_episode_nfo(
     episode: i64,
     title: &str,
     plot: &str,
+    rating: Option<f64>,
+    imdb_id: Option<&str>,
 ) -> String {
-    // <plot> is always present (possibly empty) so the upgrade check can
-    // tell "no overview on TMDB" apart from "predates the plot feature".
+    // <plot> and the imdb uniqueid are always present (possibly empty) so
+    // the upgrade checks can tell "TMDB has nothing" apart from "predates
+    // the feature".
+    let rating_line = rating
+        .map(|r| format!("  <rating>{r:.1}</rating>\n"))
+        .unwrap_or_default();
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
          <!-- {MARKER} (TMDB) -->\n<episodedetails>\n\
@@ -625,10 +685,12 @@ fn render_episode_nfo(
          \x20 <season>{season}</season>\n\
          \x20 <episode>{episode}</episode>\n\
          \x20 <title>{}</title>\n\
-         \x20 <plot>{}</plot>\n</episodedetails>\n",
+         \x20 <plot>{}</plot>\n{rating_line}\
+         \x20 <uniqueid type=\"imdb\">{}</uniqueid>\n</episodedetails>\n",
         xml_escape(show),
         xml_escape(title),
-        xml_escape(plot)
+        xml_escape(plot),
+        xml_escape(imdb_id.unwrap_or(""))
     )
 }
 

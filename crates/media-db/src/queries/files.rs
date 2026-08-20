@@ -325,7 +325,8 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 t.series, t.season, t.episode, t.title, t.plot,
                 mu.title, mu.artist, mu.album, mu.track_no, mu.year,
                 (SELECT group_concat(g.name, ', ') FROM track_genres tg
-                  JOIN genres g ON g.id = tg.genre_id WHERE tg.file_id = f.id)
+                  JOIN genres g ON g.id = tg.genre_id WHERE tg.file_id = f.id),
+                t.rating, t.imdb_id
          FROM files f
          LEFT JOIN movies m        ON m.file_id  = f.id
          LEFT JOIN tv_episodes t   ON t.file_id  = f.id
@@ -361,9 +362,9 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 added_at_text: r.get(11)?,
                 has_art: r.get(12)?,
                 year: r.get::<_, Option<i64>>(14)?.or(r.get(29)?),
-                rating: r.get(15)?,
+                rating: r.get::<_, Option<f64>>(15)?.or(r.get(31)?),
                 plot: r.get::<_, Option<String>>(16)?.or(r.get(24)?),
-                imdb_id: r.get(17)?,
+                imdb_id: r.get::<_, Option<String>>(17)?.or(r.get(32)?),
                 genre: r.get::<_, Option<String>>(18)?.or(r.get(30)?),
                 director: r.get(19)?,
                 series: r.get(20)?,

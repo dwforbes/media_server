@@ -14,16 +14,19 @@ pub fn finalize_episode(
     episode: i64,
     title: &str,
     plot: Option<&str>,
+    rating: Option<f64>,
+    imdb_id: Option<&str>,
 ) -> Result<()> {
     let tx = conn.transaction()?;
     files::update_tech(&tx, file_id, tech)?;
     tx.execute(
-        "INSERT INTO tv_episodes(file_id, series, season, episode, title, plot)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO tv_episodes(file_id, series, season, episode, title, plot, rating, imdb_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(file_id) DO UPDATE SET
              series = excluded.series, season = excluded.season,
-             episode = excluded.episode, title = excluded.title, plot = excluded.plot",
-        params![file_id, series, season, episode, title, plot],
+             episode = excluded.episode, title = excluded.title, plot = excluded.plot,
+             rating = excluded.rating, imdb_id = excluded.imdb_id",
+        params![file_id, series, season, episode, title, plot, rating, imdb_id],
     )?;
     files::mark_ready(&tx, file_id)?;
     tx.commit()?;
