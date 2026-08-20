@@ -194,7 +194,7 @@ fn embed_sidecar_subtitles(config: &ScannerConfig) {
                 // common skips; the rest mean an .srt exists but something
                 // is off with it — surface those at the default log level.
                 Ok(subtitles::Outcome::Skipped(why)) => {
-                    if why == "not mp4" || why == "already has subtitles" {
+                    if why == "not mp4" || why == "already has text subtitles" {
                         tracing::debug!("{}: subtitles not embedded ({why})", path.display());
                     } else {
                         println!("{}: subtitles not embedded ({why})", path.display());

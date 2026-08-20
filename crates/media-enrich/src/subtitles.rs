@@ -37,11 +37,14 @@ struct Probe {
     duration: f64,
 }
 
+const TEXT_SUB_CODECS: &[&str] =
+    &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text", "subviewer"];
+
 fn probe(ffprobe: &str, path: &Path) -> Result<Probe> {
     let output = Command::new(ffprobe)
         .args([
             "-v", "error",
-            "-show_entries", "stream=codec_type:format=duration",
+            "-show_entries", "stream=codec_name,codec_type:format=duration",
             "-of", "default=nw=1",
         ])
         .arg(path)
@@ -52,17 +55,24 @@ fn probe(ffprobe: &str, path: &Path) -> Result<Probe> {
     }
     let text = String::from_utf8_lossy(&output.stdout);
     let mut p = Probe::default();
+    // Per stream, codec_name precedes codec_type in the output.
+    let mut last_codec = String::new();
     for line in text.lines() {
-        match line.strip_prefix("codec_type=") {
-            Some("video") => p.video += 1,
-            Some("audio") => p.audio += 1,
-            Some("subtitle") => p.subtitle += 1,
-            Some(_) => {} // data/attachment streams: irrelevant to the check
-            None => {
-                if let Some(d) = line.strip_prefix("duration=") {
-                    p.duration = d.parse().unwrap_or(0.0);
+        if let Some(name) = line.strip_prefix("codec_name=") {
+            last_codec = name.to_string();
+        } else if let Some(kind) = line.strip_prefix("codec_type=") {
+            match kind {
+                "video" => p.video += 1,
+                "audio" => p.audio += 1,
+                // Only text subtitles count: a bitmap-only (PGS/VobSub)
+                // file still deserves the .srt embedded.
+                "subtitle" if TEXT_SUB_CODECS.contains(&last_codec.as_str()) => {
+                    p.subtitle += 1
                 }
+                _ => {}
             }
+        } else if let Some(d) = line.strip_prefix("duration=") {
+            p.duration = d.parse().unwrap_or(0.0);
         }
     }
     Ok(p)
@@ -93,7 +103,7 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
 
     let before = probe(ffprobe, media)?;
     if before.subtitle > 0 {
-        return Ok(Outcome::Skipped("already has subtitles"));
+        return Ok(Outcome::Skipped("already has text subtitles"));
     }
     if before.video == 0 {
         return Ok(Outcome::Skipped("no video stream"));
