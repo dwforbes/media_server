@@ -32,6 +32,13 @@ pub struct Config {
     /// clients on lossy links (wifi) discover the server sooner.
     #[serde(default = "default_ssdp_alive_secs")]
     pub ssdp_alive_secs: u64,
+    /// ffmpeg/ffprobe for on-the-fly extraction of embedded subtitle
+    /// tracks (browser playback). Missing binaries just disable that
+    /// fallback; sidecar .srt subtitles keep working.
+    #[serde(default = "default_ffmpeg")]
+    pub ffmpeg_path: String,
+    #[serde(default = "default_ffprobe")]
+    pub ffprobe_path: String,
     /// Clients to send SSDP announcements to directly (unicast), for
     /// devices whose multicast reception is unreliable. Same cadence and
     /// content as the multicast announcements.
@@ -41,6 +48,13 @@ pub struct Config {
 
 fn default_ssdp_alive_secs() -> u64 {
     120
+}
+
+fn default_ffmpeg() -> String {
+    "ffmpeg".into()
+}
+fn default_ffprobe() -> String {
+    "ffprobe".into()
 }
 
 fn default_recent_count() -> usize {

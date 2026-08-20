@@ -16,7 +16,7 @@ quick-xml.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 socket2 = { version = "0.5", features = ["all"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "net", "signal", "sync", "time"] }
 toml.workspace = true
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }

@@ -64,6 +64,16 @@ async fn main() -> Result<()> {
         base_url: base_url.clone(),
         icon,
         recent_count: cfg.recent_count,
+        ffmpeg: cfg.ffmpeg_path.clone(),
+        ffprobe: cfg.ffprobe_path.clone(),
+        vtt_cache: {
+            let dir = db_path
+                .parent()
+                .map(|d| d.join("vtt-cache"))
+                .unwrap_or_else(|| std::path::PathBuf::from("vtt-cache"));
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        },
     });
 
     // Bump SystemUpdateID whenever the scanner commits, so browsing clients

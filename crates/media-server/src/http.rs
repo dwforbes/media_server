@@ -29,6 +29,9 @@ pub struct AppState {
     /// (120px icon bytes, 48px icon bytes, whether user-supplied).
     pub icon: (Vec<u8>, Vec<u8>, bool),
     pub recent_count: usize,
+    pub ffmpeg: String,
+    pub ffprobe: String,
+    pub vtt_cache: std::path::PathBuf,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -299,8 +302,28 @@ fn srt_to_vtt(srt: &str) -> String {
     out
 }
 
-/// The media file's .srt sidecar as WebVTT — browsers ignore embedded
-/// mov_text tracks; <track> + WebVTT is the web's subtitle mechanism.
+fn vtt_response(body: String) -> Response {
+    ([(header::CONTENT_TYPE, "text/vtt; charset=utf-8")], body).into_response()
+}
+
+fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Does the media file carry a text subtitle stream? (Quick demux-header
+/// probe; used to decide whether the player page offers a track.)
+async fn has_embedded_subs(ffprobe: &str, path: &std::path::Path) -> bool {
+    tokio::process::Command::new(ffprobe)
+        .args(["-v", "error", "-select_streams", "s", "-show_entries", "stream=codec_type", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .await
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// Subtitles as WebVTT: the .srt sidecar when present, else the embedded
+/// track extracted with ffmpeg (demux-only) and cached beside the catalog.
 async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let Ok(id) = id.trim_end_matches(".vtt").parse::<i64>() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -312,18 +335,51 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     let Ok(Some(servable)) = servable else {
         return StatusCode::NOT_FOUND.into_response();
     };
+
+    // 1. Sidecar .srt, converted on the fly.
     let srt_path = servable.abs_path.with_extension("srt");
-    let Ok(bytes) = std::fs::read(&srt_path) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let Some(text) = media_db::textenc::decode_subtitle_text(&bytes) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    (
-        [(header::CONTENT_TYPE, "text/vtt; charset=utf-8")],
-        srt_to_vtt(&text),
-    )
-        .into_response()
+    if let Ok(bytes) = std::fs::read(&srt_path) {
+        if let Some(text) = media_db::textenc::decode_subtitle_text(&bytes) {
+            return vtt_response(srt_to_vtt(&text));
+        }
+    }
+
+    // 2. Cached extraction, unless the media file changed since.
+    let cache = state.vtt_cache.join(format!("{id}.vtt"));
+    let media_mtime = file_mtime(&servable.abs_path);
+    if let (Some(cache_time), Some(media_time)) = (file_mtime(&cache), media_mtime) {
+        if cache_time >= media_time {
+            if let Ok(body) = std::fs::read_to_string(&cache) {
+                return vtt_response(body);
+            }
+        }
+    }
+
+    // 3. Extract the embedded track (demux only, no decoding).
+    let output = tokio::process::Command::new(&state.ffmpeg)
+        .args(["-v", "error", "-nostdin", "-i"])
+        .arg(&servable.abs_path)
+        .args(["-map", "0:s:0", "-f", "webvtt", "-"])
+        .output()
+        .await;
+    match output {
+        Ok(out) if out.status.success() && !out.stdout.is_empty() => {
+            let body = String::from_utf8_lossy(&out.stdout).to_string();
+            let _ = std::fs::write(&cache, &body);
+            vtt_response(body)
+        }
+        Ok(out) => {
+            tracing::debug!(
+                "no extractable subtitles for {id}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Err(err) => {
+            tracing::debug!("ffmpeg unavailable for subtitle extraction: {err}");
+            StatusCode::NOT_FOUND.into_response()
+        }
+    }
 }
 
 /// In-browser player: native <video> controls, poster art, and the .srt
@@ -345,7 +401,12 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     } else {
         String::new()
     };
-    let track = if servable.abs_path.with_extension("srt").is_file() {
+    // Sidecar, cached extraction, or embedded track all yield subtitles;
+    // only probe the container when the cheap checks miss.
+    let has_subs = servable.abs_path.with_extension("srt").is_file()
+        || state.vtt_cache.join(format!("{id}.vtt")).is_file()
+        || has_embedded_subs(&state.ffprobe, &servable.abs_path).await;
+    let track = if has_subs {
         format!(
             "<track kind=\"subtitles\" src=\"/subs/{id}.vtt\" \
              srclang=\"en\" label=\"Subtitles\" default>"
