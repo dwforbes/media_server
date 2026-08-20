@@ -44,6 +44,31 @@ pub fn merge_renditions<K: Eq + Hash>(
     out
 }
 
+/// Genre (id, name) pairs for one file — movie or music (one of the join
+/// tables will match; the other contributes nothing).
+pub fn genres_for_file(conn: &Connection, file_id: i64) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT g.id, g.name FROM movie_genres mg JOIN genres g ON g.id = mg.genre_id
+          WHERE mg.file_id = ?1
+         UNION
+         SELECT g.id, g.name FROM track_genres tg JOIN genres g ON g.id = tg.genre_id
+          WHERE tg.file_id = ?1
+         ORDER BY 2",
+    )?;
+    let rows = stmt.query_map([file_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Director (id, name) pairs for one file.
+pub fn directors_for_file(conn: &Connection, file_id: i64) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.id, d.name FROM movie_directors md JOIN directors d ON d.id = md.director_id
+          WHERE md.file_id = ?1 ORDER BY d.name",
+    )?;
+    let rows = stmt.query_map([file_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
 /// Find-or-create a genre by name (case-insensitive), returning its id.
 pub fn ensure_genre(conn: &Connection, name: &str) -> Result<i64> {
     let name = name.trim();

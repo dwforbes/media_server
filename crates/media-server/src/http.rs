@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::Router;
 use media_db::mime::{AUDIO_EXTENSIONS, VIDEO_EXTENSIONS};
-use media_db::queries::files;
+use media_db::queries::{self, files};
 use rusqlite::Connection;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
@@ -469,6 +469,8 @@ fn human_duration(ms: i64) -> String {
 async fn item_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
     let conn = state.db.lock().await;
     let detail = files::detail(&conn, id);
+    let genre_pairs = queries::genres_for_file(&conn, id).unwrap_or_default();
+    let director_pairs = queries::directors_for_file(&conn, id).unwrap_or_default();
     drop(conn);
     let detail = match detail {
         Ok(Some(d)) => d,
@@ -521,10 +523,31 @@ async fn item_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         )),
         (None, None) => {}
     }
-    if let Some(genre) = &detail.genre {
+    // Genre and director labels link into their browse categories.
+    if !genre_pairs.is_empty() {
+        let prefix = match detail.kind {
+            media_db::MediaKind::Music => "mu:genre",
+            _ => "mv:genre",
+        };
+        let links: Vec<String> = genre_pairs
+            .iter()
+            .map(|(gid, name)| {
+                format!("<a href=\"/browse/{prefix}:{gid}\">{}</a>", xml_escape(name))
+            })
+            .collect();
+        facts.push(("Genre", links.join(", ")));
+    } else if let Some(genre) = &detail.genre {
         facts.push(("Genre", xml_escape(genre)));
     }
-    if let Some(director) = &detail.director {
+    if !director_pairs.is_empty() {
+        let links: Vec<String> = director_pairs
+            .iter()
+            .map(|(did, name)| {
+                format!("<a href=\"/browse/mv:director:{did}\">{}</a>", xml_escape(name))
+            })
+            .collect();
+        facts.push(("Director", links.join(", ")));
+    } else if let Some(director) = &detail.director {
         facts.push(("Director", xml_escape(director)));
     }
     if let Some(ms) = detail.duration_ms {
