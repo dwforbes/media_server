@@ -139,16 +139,6 @@ impl Tmdb {
         }))
     }
 
-    /// The IMDb id ("tt0083658") for a TMDB movie, used to join against the
-    /// IMDb ratings dataset.
-    pub fn imdb_id(&self, movie_id: i64) -> Result<Option<String>> {
-        let json = self.get(&format!("/movie/{movie_id}/external_ids"), &[])?;
-        Ok(json
-            .get("imdb_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string))
-    }
 
     /// Best TV-series match by name.
     pub fn find_series(&self, name: &str) -> Result<Option<SeriesInfo>> {
