@@ -173,6 +173,7 @@ pub fn browse_children(
         Movies => vec![
             container(&MoviesAll, oid, "All Movies"),
             container(&MoviesRecent, oid, "Recently Added"),
+            container(&MoviesUhd, oid, "4K"),
             container(&MoviesByYear, oid, "By Year"),
             container(&MoviesByDecade, oid, "By Decade"),
             container(&MoviesByGenre, oid, "By Genre"),
@@ -182,6 +183,7 @@ pub fn browse_children(
         ],
         MoviesAll => items(oid, movies::all_movies(conn)?),
         MoviesRecent => items(oid, movies::recent(conn, recent_count)?),
+        MoviesUhd => items(oid, movies::uhd(conn)?),
         MoviesByYear => movies::years(conn)?
             .into_iter()
             .map(|y| container(&MoviesYear(y), oid, y.to_string()))
@@ -268,6 +270,7 @@ pub fn browse_children(
         Tv => {
             let mut out = vec![
                 container(&TvRecent, oid, "Recently Added"),
+                container(&TvUhd, oid, "4K"),
                 container(&TvFolders, oid, "Folders"),
             ];
             for (series, art) in tv::series_list(conn)? {
@@ -277,6 +280,16 @@ pub fn browse_children(
                 ));
             }
             out
+        }
+        TvUhd => {
+            let eps = tv::uhd(conn)?
+                .into_iter()
+                .map(|mut ep| {
+                    ep.title = recent_tv_title(&ep);
+                    ep
+                })
+                .collect();
+            items(oid, eps)
         }
         TvRecent => {
             let eps = tv::recent(conn, recent_count)?
@@ -374,6 +387,8 @@ pub fn browse_metadata(conn: &Connection, oid: &ObjectId) -> Result<Entry> {
         Movies => container(oid, &Root, "Movies"),
         MoviesAll => container(oid, &Movies, "All Movies"),
         MoviesRecent => container(oid, &Movies, "Recently Added"),
+        MoviesUhd => container(oid, &Movies, "4K"),
+        TvUhd => container(oid, &Tv, "4K"),
         MusicRecent => container(oid, &Music, "Recently Added"),
         TvRecent => container(oid, &Tv, "Recently Added"),
         MoviesByYear => container(oid, &Movies, "By Year"),

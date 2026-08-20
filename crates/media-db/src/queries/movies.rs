@@ -110,6 +110,17 @@ pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<BrowseItem>> {
     Ok(merged)
 }
 
+/// Movies above 1080p (width > 1920 or height > 1080), alphabetical.
+pub fn uhd(conn: &Connection) -> Result<Vec<BrowseItem>> {
+    let sql = format!(
+        "{MOVIE_SELECT} AND (f.width > 1920 OR f.height > 1080)
+         ORDER BY m.sort_title COLLATE NOCASE"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], movie_from_row)?;
+    Ok(merge_movies(rows.collect::<Result<Vec<_>, _>>()?))
+}
+
 pub fn years(conn: &Connection) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT m.year FROM movies m JOIN files f ON f.id = m.file_id
