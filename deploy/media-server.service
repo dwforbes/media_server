@@ -6,6 +6,10 @@
 #   3. Pre-create the catalog directory (mkdir -p ~/.local/state/mediaserver):
 #      ReadWritePaths targets must exist when the unit starts, or the
 #      sandbox fails with status=226/NAMESPACE.
+#   4. ADDING A MEDIA ROOT LATER? Update RequiresMountsFor here AND (scanner
+#      unit) add the new mount to ReadWritePaths — ProtectSystem=strict makes
+#      everything else read-only, so enrichment writes fail with EROFS
+#      ("Read-only file system") on the new volume until it is listed.
 [Unit]
 Description=UPnP media server
 Wants=network-online.target
