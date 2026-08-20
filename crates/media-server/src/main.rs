@@ -88,6 +88,7 @@ async fn main() -> Result<()> {
     ));
     tokio::spawn(ssdp::alive_loop(
         ssdp_senders.clone(),
+        cfg.ssdp_unicast_clients.clone(),
         uuid.clone(),
         location.clone(),
         cfg.ssdp_alive_secs,
@@ -118,7 +119,7 @@ async fn main() -> Result<()> {
         })
         .await?;
 
-    ssdp::byebye(&ssdp_senders, &uuid, &location).await;
+    ssdp::byebye(&ssdp_senders, &cfg.ssdp_unicast_clients, &uuid, &location).await;
     Ok(())
 }
 

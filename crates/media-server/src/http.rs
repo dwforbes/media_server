@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::Router;
 use media_db::mime::{AUDIO_EXTENSIONS, VIDEO_EXTENSIONS};
-use media_db::queries::files;
+use media_db::queries::{files, movies, music, tv};
 use rusqlite::Connection;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
@@ -44,6 +44,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/art/{id}", get(serve_art))
         .route("/icon/120.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
         .route("/icon/48.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.1.clone()) }))
+        .route("/", get(index_page))
+        .route("/playlist.m3u", get(|s: State<Arc<AppState>>| playlist(s, Path("all".into()))))
+        .route("/playlist/{section}", get(playlist))
         .with_state(state)
 }
 
@@ -62,6 +65,94 @@ async fn device_xml(State(state): State<Arc<AppState>>) -> Response {
         &state.base_url,
         state.icon.2,
     ))
+}
+
+/// Discovery-free fallback: the catalog as M3U, playable by anything that
+/// can open a URL — no SSDP involved.
+async fn playlist(State(state): State<Arc<AppState>>, Path(section): Path<String>) -> Response {
+    let section = section.trim_end_matches(".m3u").to_string();
+    let conn = state.db.lock().await;
+    let mut entries: Vec<media_db::BrowseItem> = Vec::new();
+    let result = (|| -> anyhow::Result<()> {
+        if section == "movies" || section == "all" {
+            for mut m in movies::all_movies(&conn)? {
+                if let Some(year) = m.year {
+                    m.title = format!("{} ({year})", m.title);
+                }
+                entries.push(m);
+            }
+        }
+        if section == "tv" || section == "all" {
+            for mut e in tv::all_episodes(&conn)? {
+                e.title = tree::recent_tv_title(&e);
+                entries.push(e);
+            }
+        }
+        if section == "music" || section == "all" {
+            for mut t in music::all_tracks(&conn)? {
+                t.title = tree::recent_track_title(&t);
+                entries.push(t);
+            }
+        }
+        Ok(())
+    })();
+    drop(conn);
+    if let Err(err) = result {
+        tracing::warn!("playlist {section}: {err:#}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if !matches!(section.as_str(), "all" | "movies" | "tv" | "music") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let mut out = String::from("#EXTM3U\n");
+    for item in &entries {
+        let secs = item.duration_ms.map(|ms| ms / 1000).unwrap_or(-1);
+        let title = item.title.replace(['\n', '\r'], " ");
+        out.push_str(&format!(
+            "#EXTINF:{secs},{title}\n{}/media/{}\n",
+            state.base_url, item.file_id
+        ));
+    }
+    (
+        [(header::CONTENT_TYPE, "audio/x-mpegurl; charset=utf-8")],
+        out,
+    )
+        .into_response()
+}
+
+/// Minimal index so the base URL is self-explanatory in a browser.
+async fn index_page(State(state): State<Arc<AppState>>) -> Response {
+    let conn = state.db.lock().await;
+    let counts: [(String, i64); 3] = ["movies", "tv", "music"].map(|kind| {
+        let n = conn
+            .query_row(
+                "SELECT count(*) FROM files WHERE kind = ?1 AND status = 'ready'",
+                [kind],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        (kind.to_string(), n)
+    });
+    drop(conn);
+    let name = xml_escape(&state.friendly_name);
+    let rows: String = counts
+        .iter()
+        .map(|(kind, n)| {
+            format!(
+                "<li><a href=\"/playlist/{kind}.m3u\">{kind}.m3u</a> — {n} items</li>"
+            )
+        })
+        .collect();
+    let html = format!(
+        "<!doctype html><meta charset=utf-8><title>{name}</title>\
+         <body style=\"font-family:sans-serif;max-width:40em;margin:2em auto\">\
+         <h1>{name}</h1>\
+         <p>UPnP/DLNA media server. Clients normally discover it automatically; \
+         anything that can open a URL can also use these playlists directly:</p>\
+         <ul><li><a href=\"/playlist.m3u\">playlist.m3u</a> — everything</li>{rows}</ul>\
+         <p>Device description: <a href=\"/device.xml\">device.xml</a></p>"
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
 fn icon_response(bytes: Vec<u8>) -> Response {

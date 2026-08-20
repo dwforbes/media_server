@@ -85,6 +85,17 @@ fn track_from_row(row: &Row) -> rusqlite::Result<BrowseItem> {
     Ok(item)
 }
 
+/// Every ready track, ordered artist/album/track (playlist export).
+pub fn all_tracks(conn: &Connection) -> Result<Vec<BrowseItem>> {
+    let sql = format!(
+        "{TRACK_SELECT} ORDER BY {DISPLAY_ARTIST} COLLATE NOCASE,
+         COALESCE(mu.album, 'Unknown Album') COLLATE NOCASE, mu.disc_no, mu.track_no"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], track_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// The most recently catalogued tracks, newest first.
 pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<BrowseItem>> {
     let sql = format!("{TRACK_SELECT} ORDER BY f.added_at DESC, f.id DESC LIMIT ?1");

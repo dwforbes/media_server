@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -109,6 +109,7 @@ pub async fn respond_loop(socket: Arc<UdpSocket>, uuid: String, location: String
 
 async fn notify(
     senders: &[(Ipv4Addr, UdpSocket)],
+    unicast_clients: &[IpAddr],
     uuid: &str,
     location: &str,
     alive: bool,
@@ -123,6 +124,16 @@ async fn notify(
             if let Err(err) = socket.send_to(msg.as_bytes(), addr).await {
                 tracing::debug!("SSDP notify on {iface} failed: {err}");
             }
+            // Personally-delivered copies for clients whose multicast
+            // reception is unreliable: unicast to their SSDP port. Sent
+            // from every interface socket; the one on the client's
+            // network reaches it, the rest are routed or dropped.
+            for client in unicast_clients {
+                let dest = SocketAddr::new(*client, 1900);
+                if let Err(err) = socket.send_to(msg.as_bytes(), dest).await {
+                    tracing::debug!("unicast SSDP to {dest} failed: {err}");
+                }
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -134,6 +145,7 @@ async fn notify(
 /// when one drops.
 pub async fn alive_loop(
     senders: Arc<Vec<(Ipv4Addr, UdpSocket)>>,
+    unicast_clients: Vec<IpAddr>,
     uuid: String,
     location: String,
     every_secs: u64,
@@ -141,12 +153,17 @@ pub async fn alive_loop(
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(every_secs.max(30)));
     loop {
         interval.tick().await; // first tick fires immediately (startup burst)
-        notify(&senders, &uuid, &location, true).await;
+        notify(&senders, &unicast_clients, &uuid, &location, true).await;
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        notify(&senders, &uuid, &location, true).await;
+        notify(&senders, &unicast_clients, &uuid, &location, true).await;
     }
 }
 
-pub async fn byebye(senders: &[(Ipv4Addr, UdpSocket)], uuid: &str, location: &str) {
-    notify(senders, uuid, location, false).await;
+pub async fn byebye(
+    senders: &[(Ipv4Addr, UdpSocket)],
+    unicast_clients: &[IpAddr],
+    uuid: &str,
+    location: &str,
+) {
+    notify(senders, unicast_clients, uuid, location, false).await;
 }

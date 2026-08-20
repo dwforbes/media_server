@@ -53,6 +53,16 @@ fn episode_from_row(row: &Row) -> rusqlite::Result<BrowseItem> {
     Ok(item)
 }
 
+/// Every ready episode, ordered series/season/episode (playlist export).
+pub fn all_episodes(conn: &Connection) -> Result<Vec<BrowseItem>> {
+    let sql = format!(
+        "{EPISODE_SELECT} ORDER BY t.series COLLATE NOCASE, t.season, t.episode"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], episode_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// The most recently catalogued episodes, newest first (no rendition
 /// merging: a REPACK arriving is itself a recent addition).
 pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<BrowseItem>> {

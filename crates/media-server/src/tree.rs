@@ -131,7 +131,7 @@ fn season_title(season: i64) -> String {
 /// A recently-added movie keeps its title (the All Movies name is clear on
 /// its own); TV and music entries get a fully-qualified name since a bare
 /// episode or track title means little out of context.
-fn recent_tv_title(ep: &media_db::BrowseItem) -> String {
+pub fn recent_tv_title(ep: &media_db::BrowseItem) -> String {
     let series = ep.series.as_deref().unwrap_or("Unknown Series");
     match (ep.season, ep.episode) {
         (Some(s), Some(e)) => format!("{series} S{s:02}E{e:02} - {}", ep.title),
@@ -139,7 +139,7 @@ fn recent_tv_title(ep: &media_db::BrowseItem) -> String {
     }
 }
 
-fn recent_track_title(track: &media_db::BrowseItem) -> String {
+pub fn recent_track_title(track: &media_db::BrowseItem) -> String {
     let artist = track.artist.as_deref().unwrap_or("Unknown Artist");
     match &track.album {
         Some(album) => format!("{artist} - {album} - {}", track.title),

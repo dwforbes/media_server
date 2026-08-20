@@ -32,6 +32,11 @@ pub struct Config {
     /// clients on lossy links (wifi) discover the server sooner.
     #[serde(default = "default_ssdp_alive_secs")]
     pub ssdp_alive_secs: u64,
+    /// Clients to send SSDP announcements to directly (unicast), for
+    /// devices whose multicast reception is unreliable. Same cadence and
+    /// content as the multicast announcements.
+    #[serde(default)]
+    pub ssdp_unicast_clients: Vec<std::net::IpAddr>,
 }
 
 fn default_ssdp_alive_secs() -> u64 {
