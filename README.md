@@ -20,9 +20,12 @@ while the two apps build, deploy, and restart independently.
 crates/media-db        shared library: schema, migrations, models, queries
 crates/media-scanner   the watcher/extractor daemon
 crates/media-server    the UPnP server
-crates/media-enrich    optional: writes TMDB-sourced .nfo sidecars (see below)
+crates/media-enrich    optional: TMDB/IMDb enrichment (.nfo sidecars, posters, ...)
+crates/media-title     inspect/neutralize embedded container titles (see below)
+crates/media-announcer SSDP relay beacon for other network segments (see below)
 media-scanner.example.toml   example configs — copy to media-scanner.toml /
 media-server.example.toml    media-server.toml (gitignored) and edit
+deploy/                systemd units for scanner, server, and announcer
 ```
 
 ## Build & run
@@ -139,14 +142,8 @@ routers/APs mistreat multicast in creative ways. Two escape hatches:
   announcement is also delivered straight to them — no multicast involved. Works for
   clients that are dropping packets; a device whose SSDP stack is fully wedged (some
   Apple TVs until rebooted) needs the second hatch.
-- **A relay beacon on another segment**: when the server's own link onto a network
-  is unreliable (tenuous wifi), run `media-announcer` on any always-on box in that
-  network. It reads the same `media-server.toml` (`advertise_ip` required),
-  health-checks the server by fetching `device.xml` (which also supplies the
-  device UUID announcements must carry), and while healthy sends the standard
-  alive announcements locally and answers M-SEARCH — sending `byebye` once if the
-  server goes down. Discovery multicast then originates where it's reliable; only
-  unicast HTTP crosses the weak link.
+- **A relay beacon on another segment**: run `media-announcer` on an always-on box
+  in that network — see "Remote announcers" below.
 - **Playlists, no discovery at all**: `http://<server>:8200/` is a small index page,
   and `/playlist.m3u` (or `/playlist/movies.m3u`, `/playlist/tv.m3u`,
   `/playlist/music.m3u`) exposes the whole catalog with proper display titles to
@@ -158,6 +155,46 @@ routers/APs mistreat multicast in creative ways. Two escape hatches:
   spans its seasons). Every item links to a **detail page** (`/item/<id>`) showing
   the poster, plot, IMDb rating, genres, director, duration, resolution, codecs,
   container, file size, and when it was added.
+
+### Remote announcers (media-announcer)
+
+Discovery and serving are deliberately bifurcated: the **server** announces only on
+the interfaces it should actually serve from (`ssdp_addrs`), while **announcers** —
+small relay daemons on always-on hosts in other network segments — carry discovery
+where the server's own multicast doesn't reach reliably.
+
+The motivating topology: the server wired on one network (its `advertise_ip`, the
+canonical address every URL carries), with clients on an inner NAT'd network that can
+reach it through their router. Rather than giving the server a (tenuous) wifi leg
+onto the inner network, an announcer on any wired inner-network box relays discovery.
+Note that a server interface on a client network is not just a discovery matter:
+a directly-connected route makes *reply traffic* (the actual media) egress via that
+interface — so "serve only over the wired link" means the server host should have no
+address on the client network at all, with announcers covering discovery there.
+
+`media-announcer` reads the same `media-server.toml` (`advertise_ip` required):
+
+```sh
+media-announcer --config media-server.toml    # optional: --interval-secs 120
+```
+
+Each interval it health-checks the server by fetching `device.xml` — which also
+supplies the device UUID, so announcements always carry the server's true identity —
+and while healthy it multicasts the standard alive set on the local networks and
+answers M-SEARCH queries (so clients opening their UPnP view get an instant local
+response). If the server disappears it sends one `byebye` and falls silent until the
+server returns; it can never advertise a dead server. Multiple announcers are
+harmless — clients deduplicate by device UUID.
+
+Deployment: `deploy/media-announcer.service` for Linux (systemd). On macOS, run it
+as a **root LaunchDaemon** (`/Library/LaunchDaemons/`) with the binary and config
+copied to the internal disk (e.g. `/usr/local/bin`, `/etc/mediaserver/`): user-session
+LaunchAgents are blocked by macOS Local Network privacy (multicast fails with a
+misleading "No route to host"), system processes cannot read external volumes, and
+the binary should be ad-hoc signed with a stable identifier
+(`codesign -s - -i com.mediaserver.announcer --force <binary>`) — re-sign after
+rebuilds. The announcer needs no privileges, no state, and no database — just the
+config and the network.
 
 ## How the pieces cooperate
 
