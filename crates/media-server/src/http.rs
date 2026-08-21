@@ -643,32 +643,47 @@ async fn item_page(
     let play_links = if detail.kind == media_db::MediaKind::Music {
         format!("<p><a href=\"{}/media/{id}\" style=\"font-size:1.1em\">▶ Play</a></p>", state.base_url)
     } else {
-        // Firefox neither range-streams non-WebM Matroska (it downloads the
-        // whole file linearly) nor, on most platforms, decodes HEVC — warn
-        // rather than let it silently pull gigabytes.
-        let is_firefox = headers
+        // Known browser blind spots, verified the hard way: Firefox neither
+        // range-streams non-WebM Matroska (it downloads the whole file
+        // linearly) nor, on most platforms, decodes HEVC; Safari does HEVC
+        // fine (VideoToolbox) but cannot open the Matroska container at
+        // all. Warn rather than let anyone pull gigabytes for nothing.
+        let user_agent = headers
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|ua| ua.contains("Firefox/") && !ua.contains("Seamonkey"));
-        let risky_container = detail.mime == "video/x-matroska";
-        let risky_codec = matches!(
+            .unwrap_or("");
+        let is_firefox = user_agent.contains("Firefox/") && !user_agent.contains("Seamonkey");
+        let is_safari = user_agent.contains("Safari/")
+            && !user_agent.contains("Chrome/")
+            && !user_agent.contains("Chromium/")
+            && !user_agent.contains("CriOS/")
+            && !user_agent.contains("Edg/");
+        let is_mkv = detail.mime == "video/x-matroska";
+        let is_hevc = matches!(
             detail.video_codec.as_deref(),
             Some("hevc") | Some("h265") | Some("x265")
         );
-        let warning = if is_firefox && (risky_container || risky_codec) {
-            let what = match (risky_container, risky_codec) {
+        let problem = if is_firefox && (is_mkv || is_hevc) {
+            let what = match (is_mkv, is_hevc) {
                 (true, true) => "an MKV with HEVC video",
                 (true, false) => "an MKV file",
                 _ => "HEVC video",
             };
-            format!(
-                "<p style=\"color:#c00;font-size:.85em;max-width:38em\">⚠ This is {what}, \
-                 which Firefox likely cannot play — it may download the entire file \
-                 without ever starting. Use the direct stream link in VLC instead.</p>"
-            )
+            Some((what, "Firefox"))
+        } else if is_safari && is_mkv {
+            Some(("an MKV file", "Safari"))
         } else {
-            String::new()
+            None
         };
+        let warning = problem
+            .map(|(what, browser)| {
+                format!(
+                    "<p style=\"color:#c00;font-size:.85em;max-width:38em\">⚠ This is {what}, \
+                     which {browser} likely cannot play — it may download the entire file \
+                     without ever starting. Use the direct stream link in VLC instead.</p>"
+                )
+            })
+            .unwrap_or_default();
         format!(
             "<p><a href=\"/play/{id}\" style=\"font-size:1.1em\">▶ Play in browser</a> \
              &nbsp; <small><a href=\"{}/media/{id}\">direct stream</a></small></p>{warning}",
