@@ -511,7 +511,11 @@ fn human_duration(ms: i64) -> String {
 }
 
 /// Detail page: everything the catalog knows about one item.
-async fn item_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+async fn item_page(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
     let conn = state.db.lock().await;
     let detail = files::detail(&conn, id);
     let genre_pairs = queries::genres_for_file(&conn, id).unwrap_or_default();
@@ -639,9 +643,35 @@ async fn item_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     let play_links = if detail.kind == media_db::MediaKind::Music {
         format!("<p><a href=\"{}/media/{id}\" style=\"font-size:1.1em\">▶ Play</a></p>", state.base_url)
     } else {
+        // Firefox neither range-streams non-WebM Matroska (it downloads the
+        // whole file linearly) nor, on most platforms, decodes HEVC — warn
+        // rather than let it silently pull gigabytes.
+        let is_firefox = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ua| ua.contains("Firefox/") && !ua.contains("Seamonkey"));
+        let risky_container = detail.mime == "video/x-matroska";
+        let risky_codec = matches!(
+            detail.video_codec.as_deref(),
+            Some("hevc") | Some("h265") | Some("x265")
+        );
+        let warning = if is_firefox && (risky_container || risky_codec) {
+            let what = match (risky_container, risky_codec) {
+                (true, true) => "an MKV with HEVC video",
+                (true, false) => "an MKV file",
+                _ => "HEVC video",
+            };
+            format!(
+                "<p style=\"color:#c00;font-size:.85em;max-width:38em\">⚠ This is {what}, \
+                 which Firefox likely cannot play — it may download the entire file \
+                 without ever starting. Use the direct stream link in VLC instead.</p>"
+            )
+        } else {
+            String::new()
+        };
         format!(
             "<p><a href=\"/play/{id}\" style=\"font-size:1.1em\">▶ Play in browser</a> \
-             &nbsp; <small><a href=\"{}/media/{id}\">direct stream</a></small></p>",
+             &nbsp; <small><a href=\"{}/media/{id}\">direct stream</a></small></p>{warning}",
             state.base_url
         )
     };
