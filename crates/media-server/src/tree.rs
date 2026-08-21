@@ -178,7 +178,7 @@ pub fn browse_children(
             container(&MoviesByDecade, oid, "By Decade"),
             container(&MoviesByGenre, oid, "By Genre"),
             container(&MoviesByDirector, oid, "By Director"),
-            container(&MoviesByFranchise, oid, "Franchises"),
+            container(&MoviesByFranchise, oid, "By Franchise"),
             container(&MoviesByRating, oid, "By Rating"),
             container(&MoviesFolders, oid, "Folders"),
         ],
@@ -413,7 +413,7 @@ pub fn browse_metadata(conn: &Connection, oid: &ObjectId) -> Result<Entry> {
                 conn.query_row("SELECT name FROM directors WHERE id = ?1", [d], |r| r.get(0))?;
             container_class(oid, &MoviesByDirector, name, CLASS_PERSON)
         }
-        MoviesByFranchise => container(oid, &Movies, "Franchises"),
+        MoviesByFranchise => container(oid, &Movies, "By Franchise"),
         MoviesFranchise(name) => container(oid, &MoviesByFranchise, name.clone()),
         MoviesByRating => container(oid, &Movies, "By Rating"),
         MoviesRating(bucket) => {

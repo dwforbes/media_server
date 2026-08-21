@@ -199,13 +199,30 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
         return StatusCode::NOT_FOUND.into_response();
     };
     let conn = state.db.lock().await;
-    let title = tree::browse_metadata(&conn, &node)
+    let (title, parent_id) = tree::browse_metadata(&conn, &node)
         .ok()
         .map(|entry| match entry {
-            tree::Entry::Container { title, .. } => title,
-            tree::Entry::Item { item, .. } => item.title,
+            tree::Entry::Container { title, parent, .. } => (title, Some(parent)),
+            tree::Entry::Item { item, .. } => (item.title, None),
         })
-        .unwrap_or_else(|| "Browse".to_string());
+        .unwrap_or_else(|| ("Browse".to_string(), None));
+    // "Back to <parent>" one level up; the root points at itself, so skip.
+    let back_link = parent_id
+        .filter(|p| *p != oid)
+        .and_then(|p| {
+            let parent_node = ObjectId::parse(&p)?;
+            let parent_title = match tree::browse_metadata(&conn, &parent_node).ok()? {
+                tree::Entry::Container { title, .. } => title,
+                tree::Entry::Item { item, .. } => item.title,
+            };
+            let label = if parent_node == ObjectId::Root {
+                "Back to top".to_string()
+            } else {
+                format!("Back to {}", xml_escape(&parent_title))
+            };
+            Some(format!("<p><a href=\"/browse/{p}\">← {label}</a></p>"))
+        })
+        .unwrap_or_default();
     let children = tree::browse_children(&conn, &node, state.recent_count);
     drop(conn);
     let children = match children {
@@ -242,7 +259,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     let html = format!(
         "<!doctype html><meta charset=utf-8><title>{}</title>\
          <body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
-         <p><a href=\"/browse\">⌂ top</a></p><h1>{}</h1>\
+         <p><a href=\"/browse\">⌂ top</a></p><h1>{}</h1>{back_link}\
          <p><a href=\"/playlist/id/{oid}.m3u\">Playlist of everything below this point</a></p>\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>",
         xml_escape(&title),

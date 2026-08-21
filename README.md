@@ -59,10 +59,10 @@ it, videos are still catalogued from their names — just without technical attr
 ## What clients see
 
 ```
-Movies    → All Movies / Recently Added / By Year / By Decade / By Genre /
-            By Director / By Rating / Folders
+Movies    → All Movies / Recently Added / 4K / By Year / By Decade / By Genre /
+            By Director / By Franchise / By Rating / Folders
 Music     → Recently Added / Artists / Albums / Genres / Folders
-TV Shows  → Recently Added / Series → Season → Episodes, plus Folders
+TV Shows  → Recently Added / 4K / Series → Season → Episodes, plus Folders
 ```
 
 Metadata is local-only: filename parsing (`Heat (1995).mkv`, `Show S01E02 Title.mkv`),
