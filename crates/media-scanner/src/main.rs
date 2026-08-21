@@ -309,11 +309,14 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         return Ok(false);
     };
 
-    // Settle check: a file still being copied grows between two stats.
+    // Settle checks: a file still being copied grows between two stats, and
+    // — the stronger signal, since network copies stall longer than any
+    // stat window — carries a fresh mtime. The debouncer fires the final
+    // event only after settle_ms of quiet, so a completed copy passes.
     let Some((size, _)) = reconcile::stat(path) else { return Ok(false) };
     std::thread::sleep(Duration::from_millis(500));
     let Some((size2, mtime)) = reconcile::stat(path) else { return Ok(false) };
-    if size != size2 {
+    if size != size2 || reconcile::too_fresh(mtime, cfg.settle_ms.min(2000)) {
         tracing::debug!("{} still changing; leaving for next event", path.display());
         return Ok(false);
     }
