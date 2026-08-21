@@ -446,18 +446,47 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     } else {
         String::new()
     };
-    // Sidecar, cached extraction, or embedded track all yield subtitles;
-    // only probe the container when the cheap checks miss.
-    let has_subs = servable.abs_path.with_extension("srt").is_file()
-        || state.vtt_cache.join(format!("{id}.vtt")).is_file()
-        || text_sub_stream(&state.ffprobe, &servable.abs_path).await.is_some();
-    let track = if has_subs {
-        format!(
-            "<track kind=\"subtitles\" src=\"/subs/{id}.vtt\" \
-             srclang=\"en\" label=\"Subtitles\" default>"
+    // Sidecar and cached subtitles are instant: a plain server-rendered
+    // <track>. Extraction-needed subtitles (embedded track, no sidecar, no
+    // cache yet) can take a minute of ffmpeg demuxing on a big file — so
+    // the video starts immediately and a few lines of script fetch the
+    // track asynchronously with a visible status, attaching it when ready.
+    let instant_subs = servable.abs_path.with_extension("srt").is_file()
+        || state.vtt_cache.join(format!("{id}.vtt")).is_file();
+    let (track, subs_async) = if instant_subs {
+        (
+            format!(
+                "<track kind=\"subtitles\" src=\"/subs/{id}.vtt\" \
+                 srclang=\"en\" label=\"Subtitles\" default>"
+            ),
+            String::new(),
+        )
+    } else if text_sub_stream(&state.ffprobe, &servable.abs_path).await.is_some() {
+        (
+            String::new(),
+            format!(
+                "<p id=\"subs\" style=\"color:#888;font-size:.85em\">⏳ Extracting \
+                 subtitles from the file — the video can play meanwhile; captions \
+                 appear when ready (may take a minute for large files)…</p>\
+                 <script>\
+                 fetch('/subs/{id}.vtt').then(function(r) {{\
+                   if (!r.ok) throw 0; return r.blob();\
+                 }}).then(function(b) {{\
+                   var t = document.createElement('track');\
+                   t.kind = 'subtitles'; t.label = 'Subtitles'; t.srclang = 'en';\
+                   t.src = URL.createObjectURL(b); t.default = true;\
+                   var v = document.querySelector('video');\
+                   v.appendChild(t); t.track.mode = 'showing';\
+                   document.getElementById('subs').textContent = 'Subtitles ready.';\
+                 }}).catch(function() {{\
+                   document.getElementById('subs').textContent = \
+                     'Subtitles could not be extracted.';\
+                 }});\
+                 </script>"
+            ),
         )
     } else {
-        String::new()
+        (String::new(), String::new())
     };
     let html = format!(
         "<!doctype html><meta charset=utf-8><title>{heading}</title>\
@@ -468,7 +497,7 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
          <video controls autoplay playsinline{poster} \
           style=\"width:100%;max-height:80vh;background:#000\">\
          <source src=\"{}/media/{id}\" type=\"{}\">{track}\
-         Your browser cannot play this format.</video>",
+         Your browser cannot play this format.</video>{subs_async}",
         state.base_url,
         xml_escape(&servable.mime)
     );
