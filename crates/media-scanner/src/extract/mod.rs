@@ -195,19 +195,39 @@ fn ancestor_meta_paths(abs: &Path, root: &Path) -> Vec<std::path::PathBuf> {
     out // nearest first
 }
 
-/// The nearest music.toml above a track, parsed.
+/// The merged music.toml chain above a track: each field resolves to the
+/// nearest ancestor that sets it, so a top-level file can declare
+/// collection-wide values (artist, track_number_prefix) while deeper files
+/// override only what differs (album).
 pub fn nearest_music_meta(abs: &Path, root: &Path) -> Option<DirMusicMeta> {
+    let mut merged: Option<DirMusicMeta> = None;
     for candidate in ancestor_meta_paths(abs, root) {
-        if let Ok(text) = std::fs::read_to_string(&candidate) {
-            match toml::from_str(&text) {
-                Ok(meta) => return Some(meta),
-                Err(err) => {
-                    tracing::warn!("ignoring malformed {}: {err}", candidate.display());
-                }
+        let Ok(text) = std::fs::read_to_string(&candidate) else { continue };
+        let parsed: DirMusicMeta = match toml::from_str(&text) {
+            Ok(meta) => meta,
+            Err(err) => {
+                tracing::warn!("ignoring malformed {}: {err}", candidate.display());
+                continue;
             }
+        };
+        let m = merged.get_or_insert_with(DirMusicMeta::default);
+        if m.artist.is_none() {
+            m.artist = parsed.artist;
+        }
+        if m.album_artist.is_none() {
+            m.album_artist = parsed.album_artist;
+        }
+        if m.album.is_none() {
+            m.album = parsed.album;
+        }
+        if m.genre.is_none() {
+            m.genre = parsed.genre;
+        }
+        if m.track_number_prefix.is_none() {
+            m.track_number_prefix = parsed.track_number_prefix;
         }
     }
-    None
+    merged
 }
 
 /// Newest mtime among ancestor music.toml files (reconcile staleness).

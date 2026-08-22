@@ -89,9 +89,11 @@ artist = "Headspace"
 #                               # ("30 Minutes"), not track numbers
 ```
 
-Set fields apply to **every track beneath that directory** (nearest file wins),
-overriding tags and path fallback; absent fields resolve as usual. Edits are picked
-up live by the watcher, or at the next reconcile.
+Set fields apply to **every track beneath that directory**, overriding tags and
+path fallback; absent fields resolve as usual. Files **inherit field-wise**: each
+field takes the nearest ancestor that sets it, so a top-level music.toml can declare
+the artist and parsing rules once while deeper files override only the album. Edits
+are picked up live by the watcher, or at the next reconcile.
 
 **Multiple qualities of the same item** (same movie title + year, or the same
 episode number) are merged into a single entry carrying one `<res>` per file,
