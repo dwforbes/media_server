@@ -304,6 +304,12 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         refresh_art_siblings(conn, cfg, root, &rel)?;
         return Ok(false);
     }
+    if root.kind == media_db::MediaKind::Music
+        && path.file_name().and_then(|n| n.to_str()) == Some(extract::MUSIC_META_FILE)
+    {
+        refresh_music_meta(conn, cfg, root, &rel)?;
+        return Ok(false);
+    }
 
     let Some(mime) = reconcile::media_mime(root, path) else {
         return Ok(false);
@@ -409,6 +415,25 @@ fn refresh_art_siblings(conn: &mut Connection, cfg: &Config, root: &Root, rel: &
         tracing::info!("artwork changed; re-extracting {}/{rel2}", root.path);
         extract::extract_file(conn, &cfg.ffprobe_path, root, &rel2, kf.id)?;
     }
+    Ok(())
+}
+
+/// A directory music.toml changed: re-extract every catalogued track at
+/// or below its directory (overrides apply recursively).
+fn refresh_music_meta(conn: &mut Connection, cfg: &Config, root: &Root, toml_rel: &str) -> Result<()> {
+    let dir_prefix = match toml_rel.rsplit_once('/') {
+        Some((d, _)) => format!("{d}/"),
+        None => String::new(),
+    };
+    let known = files::known_files(conn, root.id)?;
+    let mut n = 0usize;
+    for (rel, kf) in known {
+        if kf.status == "ready" && rel.starts_with(&dir_prefix) {
+            extract::extract_file(conn, &cfg.ffprobe_path, root, &rel, kf.id)?;
+            n += 1;
+        }
+    }
+    tracing::info!("music.toml changed; re-extracted {n} tracks under {}/{dir_prefix}", root.path);
     Ok(())
 }
 

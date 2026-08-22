@@ -108,6 +108,13 @@ pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Resu
                     // A sidecar (.nfo or artwork) appeared, vanished, or
                     // changed since extraction.
                     to_extract.push((kf.id, rel));
+                } else if root.kind == media_db::MediaKind::Music
+                    && extract::music_meta_mtime(entry.path(), root_path)
+                        .is_some_and(|t| t > kf.updated_at)
+                {
+                    // A directory music.toml changed after this track was
+                    // extracted.
+                    to_extract.push((kf.id, rel));
                 }
             }
             None => {

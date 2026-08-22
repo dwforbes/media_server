@@ -122,7 +122,21 @@ fn try_extract(
             )?;
         }
         MediaKind::Music => {
-            let (tech, meta, embedded_art) = audio::extract(&abs, &stem, &parent_dirs)?;
+            let (tech, mut meta, embedded_art) = audio::extract(&abs, &stem, &parent_dirs)?;
+            if let Some(over) = nearest_music_meta(&abs, Path::new(&root.path)) {
+                if over.artist.is_some() {
+                    meta.artist = over.artist;
+                }
+                if over.album_artist.is_some() {
+                    meta.album_artist = over.album_artist;
+                }
+                if over.album.is_some() {
+                    meta.album = over.album;
+                }
+                if let Some(genre) = over.genre {
+                    meta.genres = audio::split_genres(&genre);
+                }
+            }
             music::finalize_track(conn, file_id, &tech, &meta)?;
             if embedded_art {
                 embedded = true;
@@ -134,6 +148,64 @@ fn try_extract(
     files::record_art(conn, file_id, art.as_deref())?;
     files::record_nfo_mtime(conn, file_id, nfo_mtime(&abs))?;
     Ok(())
+}
+
+/// Directory-level music metadata overrides: a music.toml anywhere above a
+/// track (within its root) applies to everything beneath, nearest file
+/// wins. Fields present override tags and path fallback; absent fields
+/// resolve as usual.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirMusicMeta {
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+}
+
+pub const MUSIC_META_FILE: &str = "music.toml";
+
+fn ancestor_meta_paths(abs: &Path, root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut dir = abs.parent();
+    while let Some(d) = dir {
+        if !d.starts_with(root) {
+            break;
+        }
+        out.push(d.join(MUSIC_META_FILE));
+        dir = d.parent();
+    }
+    out // nearest first
+}
+
+/// The nearest music.toml above a track, parsed.
+pub fn nearest_music_meta(abs: &Path, root: &Path) -> Option<DirMusicMeta> {
+    for candidate in ancestor_meta_paths(abs, root) {
+        if let Ok(text) = std::fs::read_to_string(&candidate) {
+            match toml::from_str(&text) {
+                Ok(meta) => return Some(meta),
+                Err(err) => {
+                    tracing::warn!("ignoring malformed {}: {err}", candidate.display());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Newest mtime among ancestor music.toml files (reconcile staleness).
+pub fn music_meta_mtime(abs: &Path, root: &Path) -> Option<i64> {
+    ancestor_meta_paths(abs, root)
+        .iter()
+        .filter_map(|p| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs() as i64)
+        })
+        .max()
 }
 
 /// Sidecar image names recognized as art for a whole directory.
