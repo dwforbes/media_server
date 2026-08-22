@@ -85,6 +85,8 @@ artist = "Headspace"
 # album_artist = "..."   # optional
 # album = "..."          # optional — omit to keep per-folder albums
 # genre = "Meditation"   # optional
+# track_number_prefix = false   # leading digits are part of the title
+#                               # ("30 Minutes"), not track numbers
 ```
 
 Set fields apply to **every track beneath that directory** (nearest file wins),

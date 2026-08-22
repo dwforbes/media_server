@@ -124,6 +124,18 @@ fn try_extract(
         MediaKind::Music => {
             let (tech, mut meta, embedded_art) = audio::extract(&abs, &stem, &parent_dirs)?;
             if let Some(over) = nearest_music_meta(&abs, Path::new(&root.path)) {
+                if over.track_number_prefix == Some(false) {
+                    // Undo the number-prefix strip, but only when the title
+                    // actually came from the path fallback (tags win).
+                    let (_, _, fb_track, fb_title) =
+                        nameparse::music_from_path(&stem, &parent_dirs);
+                    if meta.title == fb_title {
+                        meta.title = nameparse::clean_name(&stem);
+                        if meta.track_no == fb_track {
+                            meta.track_no = None;
+                        }
+                    }
+                }
                 if over.artist.is_some() {
                     meta.artist = over.artist;
                 }
@@ -161,6 +173,11 @@ pub struct DirMusicMeta {
     pub album_artist: Option<String>,
     pub album: Option<String>,
     pub genre: Option<String>,
+    /// Set false when leading digits are part of the title ("30 Minutes"
+    /// meditation tracks), not track numbers — the fallback title keeps
+    /// them and no track number is inferred. Tag-supplied titles are
+    /// unaffected.
+    pub track_number_prefix: Option<bool>,
 }
 
 pub const MUSIC_META_FILE: &str = "music.toml";
