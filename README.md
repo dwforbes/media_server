@@ -76,6 +76,21 @@ mtime, and untouched by later re-extraction. TV and music entries are fully qual
 ("The Wire S01E03 - The Buys", "Artist - Album - Track") since a bare title means
 little out of context.
 
+**Directory-level music overrides**: tagless audio (courseware, audiobooks,
+rips) falls back to path guessing, which can shred one collection into many junk
+"artists". Drop a `music.toml` anywhere in a music root:
+
+```toml
+artist = "Headspace"
+# album_artist = "..."   # optional
+# album = "..."          # optional — omit to keep per-folder albums
+# genre = "Meditation"   # optional
+```
+
+Set fields apply to **every track beneath that directory** (nearest file wins),
+overriding tags and path fallback; absent fields resolve as usual. Edits are picked
+up live by the watcher, or at the next reconcile.
+
 **Multiple qualities of the same item** (same movie title + year, or the same
 episode number) are merged into a single entry carrying one `<res>` per file,
 best-first — naive clients that only read the first `<res>` stream the best copy,
