@@ -204,7 +204,9 @@ fn matroska_titles(file: &mut File, file_len: u64) -> Result<Vec<EbmlElement>> {
                     if grand.data_len == u64::MAX {
                         bail!("unexpected unknown-size element at offset {inner}");
                     }
-                    if grand.id == TITLE {
+                    // A Title claiming to extend past EOF is malformed; never
+                    // trust its size for allocation or in-place rewriting.
+                    if grand.id == TITLE && grand.end() <= file_len {
                         titles.push(grand);
                     }
                     inner = grand.end();
@@ -242,7 +244,15 @@ fn void_element(file: &mut File, element: &EbmlElement) -> Result<()> {
     header.extend(encode_vint(element.data_len, new_size_len)?);
     file.seek(SeekFrom::Start(element.offset))?;
     file.write_all(&header)?;
-    file.write_all(&vec![0u8; element.data_len as usize])?;
+    // Zero the old title bytes in bounded chunks — never allocate the
+    // element's declared size (a crafted file could claim a huge one).
+    let zeros = [0u8; 8192];
+    let mut remaining = element.data_len;
+    while remaining > 0 {
+        let n = remaining.min(zeros.len() as u64) as usize;
+        file.write_all(&zeros[..n])?;
+        remaining -= n as u64;
+    }
     Ok(())
 }
 
