@@ -965,9 +965,17 @@ async fn serve_art(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
             bytes,
         )
             .into_response(),
+        // The catalog says this item HAS art, so a read failure now is
+        // transient (spun-down drive, EIO, a file mid-replacement) — not
+        // "no such art". 404 is authoritative and clients cache it, which
+        // turns a momentary blip into a permanently missing poster.
         Ok(Err(err)) => {
-            tracing::debug!("art {id} unavailable: {err:#}");
-            StatusCode::NOT_FOUND.into_response()
+            tracing::warn!("art {id} temporarily unavailable: {err:#}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CACHE_CONTROL, "no-store")],
+            )
+                .into_response()
         }
         Err(err) => {
             tracing::warn!("art task failed: {err}");
