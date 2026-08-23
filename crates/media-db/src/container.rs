@@ -17,6 +17,22 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
+/// Subtitle-ish MP4 handler types. 'text' is deliberately excluded: it is
+/// also how chapter tracks are marked, and silently dropping chapters is
+/// not what anyone means by "strip subtitles".
+const SUBTITLE_HANDLERS: &[&[u8; 4]] = &[b"sbtl", b"subp", b"clcp"];
+
+/// What a file's container says about subtitle tracks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubtitleStatus {
+    /// Not an MP4: Matroska subtitle removal would orphan cluster data, so
+    /// it needs a real remux rather than a header patch.
+    Unsupported,
+    None,
+    /// Handler types found (for `strip_subtitles`, those removed).
+    Tracks(Vec<String>),
+}
+
 /// What a file's container says about titles.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TitleStatus {
@@ -260,6 +276,86 @@ fn void_element(file: &mut File, element: &EbmlElement) -> Result<()> {
 enum Container {
     Mp4,
     Matroska,
+}
+
+/// Handler type of a trak (moov/trak/mdia/hdlr body offset 8..12).
+fn trak_handler(file: &mut File, trak: &Atom) -> Result<Option<[u8; 4]>> {
+    let (lo, hi) = trak.body();
+    let Some((hlo, hhi)) = descend(file, &[b"mdia", b"hdlr"], lo, hi)? else {
+        return Ok(None);
+    };
+    if hhi < hlo + 12 {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(hlo + 8))?;
+    let mut kind = [0u8; 4];
+    file.read_exact(&mut kind)?;
+    Ok(Some(kind))
+}
+
+/// Subtitle traks inside moov, with their handler types.
+fn mp4_subtitle_traks(file: &mut File, len: u64) -> Result<Vec<(Atom, String)>> {
+    let Some((mlo, mhi)) = descend(file, &[b"moov"], 0, len)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for trak in atoms_in(file, mlo, mhi)?
+        .into_iter()
+        .filter(|a| &a.kind == b"trak")
+    {
+        if let Some(handler) = trak_handler(file, &trak)? {
+            if SUBTITLE_HANDLERS.iter().any(|h| **h == handler) {
+                out.push((trak, String::from_utf8_lossy(&handler).to_string()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Report subtitle tracks without modifying the file.
+pub fn subtitle_tracks(path: &Path) -> Result<SubtitleStatus> {
+    let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let len = file.metadata()?.len();
+    if !matches!(detect(&mut file)?, Container::Mp4) {
+        return Ok(SubtitleStatus::Unsupported);
+    }
+    match mp4_subtitle_traks(&mut file, len) {
+        Ok(traks) if traks.is_empty() => Ok(SubtitleStatus::None),
+        Ok(traks) => Ok(SubtitleStatus::Tracks(
+            traks.into_iter().map(|(_, h)| h).collect(),
+        )),
+        Err(_) => Ok(SubtitleStatus::Unsupported),
+    }
+}
+
+/// Remove subtitle tracks in place by renaming their `trak` boxes to
+/// `free` — the same four-byte trick used for titles, so it is instant on
+/// any file size. The track's sample data stays in mdat as dead weight
+/// (subtitle tracks are tiny), but nothing references it any more.
+pub fn strip_subtitles(path: &Path) -> Result<SubtitleStatus> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("opening {} for writing", path.display()))?;
+    let len = file.metadata()?.len();
+    if !matches!(detect(&mut file)?, Container::Mp4) {
+        return Ok(SubtitleStatus::Unsupported);
+    }
+    let traks = match mp4_subtitle_traks(&mut file, len) {
+        Ok(t) => t,
+        Err(_) => return Ok(SubtitleStatus::Unsupported),
+    };
+    if traks.is_empty() {
+        return Ok(SubtitleStatus::None);
+    }
+    let mut removed = Vec::new();
+    for (trak, handler) in traks {
+        file.seek(SeekFrom::Start(trak.offset + 4))?;
+        file.write_all(b"free")?;
+        removed.push(handler);
+    }
+    Ok(SubtitleStatus::Tracks(removed))
 }
 
 fn detect(file: &mut File) -> Result<Container> {

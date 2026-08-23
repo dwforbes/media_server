@@ -228,7 +228,7 @@ config and the network.
   `mu:album:<b64>:<b64>`, `dir:<root>:<b64 path>`, `it:<file id>`) that maps directly to
   a query — no in-memory tree to invalidate.
 
-### media-title: fixing scene-titled containers
+### media-title: fixing embedded container junk
 
 Some releases embed the scene filename as the container title, which players like
 VLC prefer over the server-supplied name once playback starts. `media-title`
@@ -236,9 +236,16 @@ inspects and neutralizes that in place — a header-only patch, no re-muxing: MP
 title atoms are renamed to `free` (the standard padding atom); MKV/WebM Title
 elements are rewritten as Void. Format is detected by magic bytes, not extension.
 
+It also removes **embedded subtitle tracks** from MP4s the same way (the subtitle
+`trak` box is renamed to `free`), which is how you undo a wrongly-matched `.srt`
+that got embedded by enrichment: strip it, fix the sidecar, and the next enrich run
+embeds the corrected one. Matroska subtitle removal would orphan cluster data, so
+there it prints the `ffmpeg` remux command instead of guessing.
+
 ```sh
-media-title file.mp4 episode.mkv     # show embedded titles
-media-title --strip *.mp4 *.mkv      # neutralize them (titleless files untouched)
+media-title file.mp4 episode.mkv     # show embedded titles and subtitle tracks
+media-title --strip *.mp4 *.mkv      # neutralize titles (titleless files untouched)
+media-title --strip-subs file.mp4    # remove embedded subtitle tracks
 
 # audit a whole library:
 find /mnt/media -type f \( -iname "*.mp4" -o -iname "*.mkv" \) -print0 \

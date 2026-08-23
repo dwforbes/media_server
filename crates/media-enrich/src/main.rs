@@ -129,7 +129,7 @@ fn nfo_state(nfo_path: &Path) -> (NfoState, bool, bool, bool, bool) {
 /// container titles. Read-only inspection first, so untitled files (the
 /// vast majority) are never opened for writing.
 fn strip_embedded_titles(config: &ScannerConfig) {
-    use media_db::container_title::{self, TitleStatus};
+    use media_db::container::{self, TitleStatus};
     let mut stripped = 0usize;
     for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
         if !root.path.is_dir() {
@@ -143,8 +143,8 @@ fn strip_embedded_titles(config: &ScannerConfig) {
             .filter(|e| e.file_type().is_file() && is_video(e.path()))
         {
             let path = entry.path();
-            match container_title::inspect(path) {
-                Ok(TitleStatus::Titles(_)) => match container_title::strip(path) {
+            match container::inspect(path) {
+                Ok(TitleStatus::Titles(_)) => match container::strip(path) {
                     Ok(removed) => {
                         for text in removed {
                             println!("stripped embedded title {text:?} from {}", path.display());
