@@ -116,6 +116,13 @@ fn items(parent: &ObjectId, list: Vec<BrowseItem>) -> Vec<Entry> {
         .collect()
 }
 
+/// Wrap already-chosen items as DIDL entries under a given parent, with
+/// no view-specific decoration (search results carry their own qualified
+/// titles and have no natural container).
+pub fn entries_for(parent: &ObjectId, list: Vec<BrowseItem>) -> Vec<Entry> {
+    list.into_iter().map(|i| item(parent, i)).collect()
+}
+
 fn root_title(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }

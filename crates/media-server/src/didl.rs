@@ -126,7 +126,7 @@ fn render_container(
     base_url: &str,
 ) {
     out.push_str(&format!(
-        r#"<container id="{}" parentID="{}" restricted="1" searchable="0">"#,
+        r#"<container id="{}" parentID="{}" restricted="1" searchable="1">"#,
         xml_escape(id),
         xml_escape(parent)
     ));

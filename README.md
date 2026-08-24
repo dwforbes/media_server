@@ -70,6 +70,15 @@ embedded tags (ID3/Vorbis/FLAC/MP4 via lofty), and Kodi-style `.nfo` sidecars
 (`<movie><title><year><genre><director>`, `<episodedetails>`), which override
 name-parsed values.
 
+**Search** is available from every browse page and scoped to the container you are
+in *and everything below it* — search within a genre, a series, a decade, or from the
+top for the whole library. Terms are matched case-insensitively (all terms must
+match) against title, series, artist, album, genre, director, and year, and results
+can be taken as a playlist. The same engine backs UPnP **ContentDirectory Search**,
+so capable clients (BubbleUPnP, many TVs) can search the server directly:
+`SearchCriteria` clauses with `contains` become terms, `upnp:class` constraints
+filter audio vs video, `*` matches everything, and paging is honoured.
+
 **Recently Added** lists the newest catalogued items per type (`recent_count` in
 `media-server.toml`, default 25), by the time the file entered the catalog — not its
 mtime, and untouched by later re-extraction. TV and music entries are fully qualified
@@ -273,7 +282,7 @@ single atomic rename. Opt-in; needs `ffmpeg` on the PATH (`ffmpeg_path` otherwis
 
 ## Not implemented (v1)
 
-- ContentDirectory `Search` (returns UPnP error 602) and GENA eventing (clients poll).
+- GENA eventing (clients poll instead).
 - DLNA.ORG_PN media profiles — protocolInfo is the permissive generic form, which VLC,
   BubbleUPnP, and most TVs accept.
 - Transcoding, playlists.

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
@@ -54,6 +54,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/browse", get(|s: State<Arc<AppState>>| browse_page(s, Path("0".into()))))
         .route("/browse/{oid}", get(browse_page))
         .route("/item/{id}", get(item_page))
+        .route("/search", get(search_page))
+        .route("/playlist/search", get(search_playlist))
         .route("/play/{id}", get(play_page))
         .route("/subs/{id}", get(serve_subs))
         .with_state(state)
@@ -74,6 +76,147 @@ async fn device_xml(State(state): State<Arc<AppState>>) -> Response {
         &state.base_url,
         state.icon.2,
     ))
+}
+
+/// Cap on search results, so a one-letter query can't build an unbounded
+/// page or DIDL document.
+const SEARCH_LIMIT: usize = 500;
+
+#[derive(serde::Deserialize)]
+struct SearchQuery {
+    #[serde(default)]
+    q: String,
+    /// ObjectID of the container to search within ("0" = everything).
+    #[serde(rename = "in", default)]
+    scope: String,
+}
+
+/// Which media kinds a UPnP upnp:class constraint admits.
+#[derive(Clone, Copy, PartialEq)]
+enum ClassFilter {
+    Any,
+    Video,
+    Audio,
+    /// A class we hold nothing of (images, container-only searches).
+    Nothing,
+}
+
+fn class_allows(filter: ClassFilter, kind: media_db::MediaKind) -> bool {
+    match filter {
+        ClassFilter::Any => true,
+        ClassFilter::Video => kind != media_db::MediaKind::Music,
+        ClassFilter::Audio => kind == media_db::MediaKind::Music,
+        ClassFilter::Nothing => false,
+    }
+}
+
+/// Everything a search term is matched against.
+fn search_haystack(item: &media_db::BrowseItem) -> String {
+    let mut hay = item.title.to_lowercase();
+    for extra in [
+        &item.series,
+        &item.artist,
+        &item.album,
+        &item.genre,
+        &item.director,
+    ] {
+        if let Some(value) = extra {
+            hay.push(' ');
+            hay.push_str(&value.to_lowercase());
+        }
+    }
+    if let Some(year) = item.year {
+        hay.push(' ');
+        hay.push_str(&year.to_string());
+    }
+    hay
+}
+
+/// Items anywhere under `scope` matching every term (AND, case-insensitive
+/// substrings). Reuses the playlist flatten, so any node of the virtual
+/// tree — a genre, a series, a decade, the root — can be a search scope.
+fn search_scope(
+    conn: &Connection,
+    scope: &ObjectId,
+    terms: &[String],
+    class: ClassFilter,
+    recent_count: usize,
+) -> anyhow::Result<Vec<media_db::BrowseItem>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut all = Vec::new();
+    flatten_items(conn, scope, recent_count, 5, &mut seen, &mut all)?;
+    let mut hits: Vec<media_db::BrowseItem> = all
+        .into_iter()
+        .filter(|i| class_allows(class, i.kind))
+        .filter(|i| {
+            let hay = search_haystack(i);
+            terms.iter().all(|t| hay.contains(t.as_str()))
+        })
+        .map(|mut i| {
+            i.title = playlist_title(&i);
+            i
+        })
+        .collect();
+    hits.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    hits.truncate(SEARCH_LIMIT);
+    Ok(hits)
+}
+
+fn query_terms(q: &str) -> Vec<String> {
+    q.split_whitespace().map(|t| t.to_lowercase()).collect()
+}
+
+/// Extract terms and a class constraint from a ContentDirectory
+/// SearchCriteria expression. The full grammar is a boolean expression
+/// language; clients in practice send `dc:title contains "x"` clauses
+/// optionally ANDed with an `upnp:class` constraint. Quoted operands
+/// become search terms, upnp:class operands become the class filter, and
+/// anything else is ignored — widening results rather than failing.
+fn parse_search_criteria(criteria: &str) -> (Vec<String>, ClassFilter) {
+    let text = criteria.trim();
+    if text.is_empty() || text == "*" {
+        return (Vec::new(), ClassFilter::Any);
+    }
+    let mut terms = Vec::new();
+    let mut class = ClassFilter::Any;
+    let mut cursor = 0usize;
+    let mut last_end = 0usize;
+    while let Some(rel) = text[cursor..].find('"') {
+        let start = cursor + rel;
+        let Some(end_rel) = text[start + 1..].find('"') else { break };
+        let end = start + 1 + end_rel;
+        let literal = &text[start + 1..end];
+        let preceding = &text[last_end..start];
+        if preceding.contains("upnp:class") {
+            class = if literal.contains("audioItem") {
+                ClassFilter::Audio
+            } else if literal.contains("videoItem") {
+                ClassFilter::Video
+            } else if literal.contains("imageItem") || literal.contains("container") {
+                ClassFilter::Nothing
+            } else {
+                ClassFilter::Any
+            };
+        } else if !literal.is_empty() && literal != "*" {
+            terms.push(literal.to_lowercase());
+        }
+        last_end = end + 1;
+        cursor = end + 1;
+    }
+    (terms, class)
+}
+
+/// The search box shown on browse pages, scoped to the current container.
+fn search_form(scope_oid: &str, current: &str) -> String {
+    format!(
+        "<form action=\"/search\" method=\"get\" style=\"margin:.6em 0\">\
+         <input type=\"hidden\" name=\"in\" value=\"{}\">\
+         <input name=\"q\" value=\"{}\" placeholder=\"Search here and below…\" \
+          style=\"padding:.35em;width:16em\"> \
+         <button type=\"submit\">Search</button></form>",
+        xml_escape(scope_oid),
+        xml_escape(current)
+    )
 }
 
 /// Recursively collect the playable items under a tree node, deduplicated
@@ -111,6 +254,14 @@ fn flatten_items(
 fn playlist_title(item: &media_db::BrowseItem) -> String {
     match item.kind {
         media_db::MediaKind::Tv => {
+            // Items collected from Recently Added arrive already qualified
+            // ("Series SxxEyy - Title"); qualifying again would repeat the
+            // series. Detect that and leave them alone.
+            if let Some(series) = &item.series {
+                if item.title.starts_with(series.as_str()) {
+                    return item.title.clone();
+                }
+            }
             // Season-view items arrive pre-decorated as "NN - Title";
             // drop that so the qualified form doesn't number twice.
             let mut episode = item.clone();
@@ -121,7 +272,14 @@ fn playlist_title(item: &media_db::BrowseItem) -> String {
             }
             tree::recent_tv_title(&episode)
         }
-        media_db::MediaKind::Music => tree::recent_track_title(item),
+        media_db::MediaKind::Music => {
+            if let Some(artist) = &item.artist {
+                if item.title.starts_with(artist.as_str()) {
+                    return item.title.clone();
+                }
+            }
+            tree::recent_track_title(item)
+        }
         media_db::MediaKind::Movies => match item.year {
             Some(year) if !item.title.ends_with(&format!("({year})")) => {
                 format!("{} ({year})", item.title)
@@ -192,6 +350,124 @@ async fn playlist(State(state): State<Arc<AppState>>, Path(section): Path<String
     }
 }
 
+/// Search results page, scoped to a container and everything below it.
+async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQuery>) -> Response {
+    let scope_id = if q.scope.is_empty() { "0".to_string() } else { q.scope.clone() };
+    let Some(scope) = ObjectId::parse(&scope_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let terms = query_terms(&q.q);
+    let conn = state.db.lock().await;
+    let scope_title = tree::browse_metadata(&conn, &scope)
+        .ok()
+        .map(|e| match e {
+            tree::Entry::Container { title, .. } => title,
+            tree::Entry::Item { item, .. } => item.title,
+        })
+        .unwrap_or_else(|| "Media".to_string());
+    let hits = if terms.is_empty() {
+        Ok(Vec::new())
+    } else {
+        search_scope(&conn, &scope, &terms, ClassFilter::Any, state.recent_count)
+    };
+    drop(conn);
+    let hits = match hits {
+        Ok(h) => h,
+        Err(err) => {
+            tracing::warn!("search {:?} in {scope_id}: {err:#}", q.q);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut rows = String::new();
+    for item in &hits {
+        let chip = if item.kind == media_db::MediaKind::Music {
+            String::new()
+        } else {
+            uhd_chip(is_uhd(item.width, item.height))
+        };
+        rows.push_str(&format!(
+            "<li>{chip}<a href=\"/item/{0}\">{1}</a> \
+             <small><a href=\"{2}/media/{0}\">[▶ play]</a></small></li>",
+            item.file_id,
+            xml_escape(&item.title),
+            state.base_url
+        ));
+    }
+    let summary = if terms.is_empty() {
+        "Enter a search term.".to_string()
+    } else if hits.is_empty() {
+        format!("No matches in {}.", xml_escape(&scope_title))
+    } else {
+        let capped = if hits.len() == SEARCH_LIMIT {
+            " (showing the first 500)"
+        } else {
+            ""
+        };
+        format!(
+            "{} match{} in {}{capped} — \
+             <a href=\"/playlist/search?q={}&in={}\">playlist of these results</a>",
+            hits.len(),
+            if hits.len() == 1 { "" } else { "es" },
+            xml_escape(&scope_title),
+            urlencode(&q.q),
+            urlencode(&scope_id)
+        )
+    };
+    let html = format!(
+        "<!doctype html><meta charset=utf-8><title>Search</title>\
+         <body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
+         <p><a href=\"/browse\">⌂ top</a></p><h1>Search</h1>\
+         <p><a href=\"/browse/{}\">← Back to {}</a></p>{}\
+         <p>{summary}</p>\
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>",
+        xml_escape(&scope_id),
+        xml_escape(&scope_title),
+        search_form(&scope_id, &q.q)
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+/// The same search results as an M3U.
+async fn search_playlist(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SearchQuery>,
+) -> Response {
+    let scope_id = if q.scope.is_empty() { "0".to_string() } else { q.scope.clone() };
+    let Some(scope) = ObjectId::parse(&scope_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let terms = query_terms(&q.q);
+    if terms.is_empty() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let conn = state.db.lock().await;
+    let hits = search_scope(&conn, &scope, &terms, ClassFilter::Any, state.recent_count);
+    drop(conn);
+    match hits {
+        Ok(entries) => render_m3u(&state, &entries),
+        Err(err) => {
+            tracing::warn!("search playlist: {err:#}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Minimal percent-encoding for values we put into our own links.
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// HTML mirror of the virtual tree: every container is browsable and
 /// offers its playlist; items link to their streams.
 async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>) -> Response {
@@ -232,6 +508,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
             return StatusCode::NOT_FOUND.into_response();
         }
     };
+    let search_box = search_form(&oid, "");
     let mut rows = String::new();
     for entry in children {
         match entry {
@@ -259,7 +536,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     let html = format!(
         "<!doctype html><meta charset=utf-8><title>{}</title>\
          <body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
-         <p><a href=\"/browse\">⌂ top</a></p><h1>{}</h1>{back_link}\
+         <p><a href=\"/browse\">⌂ top</a></p><h1>{}</h1>{back_link}{search_box}\
          <p><a href=\"/playlist/id/{oid}.m3u\">Playlist of everything below this point</a></p>\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>",
         xml_escape(&title),
@@ -283,6 +560,7 @@ async fn index_page(State(state): State<Arc<AppState>>) -> Response {
     });
     drop(conn);
     let name = xml_escape(&state.friendly_name);
+    let search_box = search_form("0", "");
     let rows: String = counts
         .iter()
         .map(|(kind, n)| {
@@ -297,6 +575,7 @@ async fn index_page(State(state): State<Arc<AppState>>) -> Response {
          <h1>{name}</h1>\
          <p>UPnP/DLNA media server. Clients normally discover it automatically; \
          anything that can open a URL can also use these playlists directly:</p>\
+         {search_box}\
          <ul><li><a href=\"/playlist.m3u\">playlist.m3u</a> — everything</li>{rows}</ul>\
          <p><a href=\"/browse\">Browse the virtual library</a> — every folder \
          (by genre, decade, rating, series/season, artist/album) offers its own playlist.</p>\
@@ -793,14 +1072,17 @@ async fn cds_control(
         "GetSearchCapabilities" => xml_response(soap::envelope(
             CDS_SERVICE,
             "GetSearchCapabilities",
-            &[("SearchCaps", String::new())],
+            &[(
+                "SearchCaps",
+                "dc:title,upnp:class,upnp:artist,upnp:album,upnp:genre".to_string(),
+            )],
         )),
         "GetSortCapabilities" => xml_response(soap::envelope(
             CDS_SERVICE,
             "GetSortCapabilities",
             &[("SortCaps", String::new())],
         )),
-        "Search" => soap_fault(602, "Search is not implemented"),
+        "Search" => search_action(&state, &body, update_id).await,
         other => {
             tracing::debug!("unsupported CDS action {other:?}");
             soap_fault(401, "Invalid Action")
@@ -860,6 +1142,58 @@ async fn browse(state: &AppState, body: &str, update_id: u32) -> Response {
             ("Result", xml_escape(&didl_xml)),
             ("NumberReturned", number_returned.to_string()),
             ("TotalMatches", total_matches.to_string()),
+            ("UpdateID", update_id.to_string()),
+        ],
+    ))
+}
+
+/// ContentDirectory Search: the same scoped search the web UI uses,
+/// rendered as DIDL. Clients search within a container id, so the scope
+/// is any node of the virtual tree.
+async fn search_action(state: &AppState, body: &str, update_id: u32) -> Response {
+    let container_id = soap::param(body, "ContainerID").unwrap_or_else(|| "0".into());
+    let criteria = soap::param(body, "SearchCriteria").unwrap_or_default();
+    let starting_index: usize = soap::param(body, "StartingIndex")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let requested_count: usize = soap::param(body, "RequestedCount")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let Some(scope) = ObjectId::parse(&container_id) else {
+        return soap_fault(701, "No such object");
+    };
+    let (terms, class) = parse_search_criteria(&criteria);
+
+    let conn = state.db.lock().await;
+    let found = search_scope(&conn, &scope, &terms, class, state.recent_count);
+    drop(conn);
+    let found = match found {
+        Ok(f) => f,
+        Err(err) => {
+            tracing::warn!("Search {criteria:?} in {container_id}: {err:#}");
+            return soap_fault(720, "Search failed");
+        }
+    };
+
+    let total = found.len();
+    let end = if requested_count == 0 {
+        total
+    } else {
+        (starting_index + requested_count).min(total)
+    };
+    let start = starting_index.min(total);
+    let page: Vec<media_db::BrowseItem> = found[start..end.max(start)].to_vec();
+    let returned = page.len();
+    let didl_xml = didl::render(&tree::entries_for(&scope, page), &state.base_url);
+
+    xml_response(soap::envelope(
+        CDS_SERVICE,
+        "Search",
+        &[
+            ("Result", xml_escape(&didl_xml)),
+            ("NumberReturned", returned.to_string()),
+            ("TotalMatches", total.to_string()),
             ("UpdateID", update_id.to_string()),
         ],
     ))
