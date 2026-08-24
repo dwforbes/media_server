@@ -736,6 +736,34 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     }
 }
 
+/// Resume support: the playback position rides in the URL fragment, so a
+/// paused (or scrubbed) player yields a shareable/bookmarkable link that
+/// picks up where it left off. Fragments never reach the server, so this
+/// has to be client side.
+const RESUME_SCRIPT: &str = r#"<script>
+(function () {
+  var v = document.querySelector('video');
+  if (!v) return;
+  function stamp() {
+    var t = Math.floor(v.currentTime || 0);
+    history.replaceState(null, '', location.pathname + (t > 0 ? '#' + t + 's' : ''));
+  }
+  v.addEventListener('pause', stamp);
+  v.addEventListener('seeked', stamp);
+  var start = parseFloat((location.hash || '').replace(/[^0-9.]/g, ''));
+  if (!(start > 0)) return;
+  function seek() { try { v.currentTime = start; } catch (e) {} }
+  if (v.readyState >= 1) seek();
+  else v.addEventListener('loadedmetadata', seek, { once: true });
+  var note = document.getElementById('resume');
+  if (note) {
+    var m = Math.floor(start / 60), sec = Math.floor(start % 60);
+    note.innerHTML = 'Resuming at ' + m + ':' + (sec < 10 ? '0' : '') + sec +
+      ' — <a href="' + location.pathname + '">start from the beginning</a>';
+  }
+})();
+</script>"#;
+
 /// In-browser player: native <video> controls, poster art, and the .srt
 /// sidecar as a selectable subtitle track.
 async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
@@ -806,7 +834,9 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
          <video controls autoplay playsinline{poster} \
           style=\"width:100%;max-height:80vh;background:#000\">\
          <source src=\"{}/media/{id}\" type=\"{}\">{track}\
-         Your browser cannot play this format.</video>{subs_async}",
+         Your browser cannot play this format.</video>\
+         <p id=\"resume\" style=\"color:#9c9;font-size:.9em\"></p>\
+         {subs_async}{RESUME_SCRIPT}",
         state.base_url,
         xml_escape(&servable.mime)
     );

@@ -263,6 +263,12 @@ find /mnt/media -type f \( -iname "*.mp4" -o -iname "*.mkv" \) -print0 \
 
 The running scanner re-extracts touched files automatically (a harmless no-op).
 
+The in-browser player (`/play/{id}`, linked from every video detail page) stamps the
+playback position into the URL fragment when you pause or scrub — `…/play/596#128s` —
+so the address bar is always a resumable, shareable link; opening such a URL seeks
+there once metadata loads and offers a "start from the beginning" link. Fragments are
+never sent to the server, so this is purely client side and nothing is stored.
+
 The same stripping runs automatically as part of enrichment when `strip_titles = true`
 is set in the scanner config's `[enrich]` section (or with `media-enrich
 --strip-titles`), so newly added releases are cleaned without a manual step. It is
