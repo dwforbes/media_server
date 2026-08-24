@@ -84,7 +84,10 @@ const SEARCH_LIMIT: usize = 500;
 
 #[derive(serde::Deserialize)]
 struct SearchQuery {
-    #[serde(default)]
+    /// Named "mq", not "q": browsers key saved form history by field name,
+    /// and "q" is the web's universal search-box name, so the dropdown
+    /// filled with queries typed into other sites entirely.
+    #[serde(rename = "mq", default)]
     q: String,
     /// ObjectID of the container to search within ("0" = everything).
     #[serde(rename = "in", default)]
@@ -211,7 +214,8 @@ fn search_form(scope_oid: &str, current: &str) -> String {
     format!(
         "<form action=\"/search\" method=\"get\" style=\"margin:.6em 0\">\
          <input type=\"hidden\" name=\"in\" value=\"{}\">\
-         <input name=\"q\" value=\"{}\" placeholder=\"Search here and below…\" \
+         <input name=\"mq\" value=\"{}\" autocomplete=\"off\" \
+          placeholder=\"Search here and below…\" \
           style=\"padding:.35em;width:16em\"> \
          <button type=\"submit\">Search</button></form>",
         xml_escape(scope_oid),
@@ -219,9 +223,33 @@ fn search_form(scope_oid: &str, current: &str) -> String {
     )
 }
 
+/// Whether a child is worth walking when flattening its parent. A section
+/// exposes the same items through many views — All Movies, Recently Added,
+/// By Year, By Decade, By Genre, By Director, By Franchise, By Rating,
+/// Folders — so walking all of them visits every movie six to nine times
+/// and discards all but the first. One exhaustive view per section covers
+/// the same items at a fraction of the cost. Every other node's children
+/// are already disjoint, so they are walked as-is.
+///
+/// Note this also drops alternate renditions (a second copy of a movie is
+/// merged away in All Movies but listed separately under Folders), which
+/// is what you want here: one entry per work, not per file.
+fn covering_child(parent: &ObjectId, child: &ObjectId) -> bool {
+    use ObjectId::*;
+    match (parent, child) {
+        (Movies, MoviesAll) => true,
+        (Movies, _) => false,
+        (Music, MusicAlbums) => true,
+        (Music, _) => false,
+        (Tv, TvSeries(_)) => true,
+        (Tv, _) => false,
+        _ => true,
+    }
+}
+
 /// Recursively collect the playable items under a tree node, deduplicated
-/// by file id (a movie reachable via All, By Year, and By Genre appears
-/// once, at its first-seen position).
+/// by file id (an item reachable through several views appears once, at
+/// its first-seen position).
 fn flatten_items(
     conn: &Connection,
     oid: &ObjectId,
@@ -240,7 +268,9 @@ fn flatten_items(
             tree::Entry::Container { id, .. } => {
                 if depth > 0 {
                     if let Some(child) = ObjectId::parse(&id) {
-                        flatten_items(conn, &child, recent_count, depth - 1, seen, out)?;
+                        if covering_child(oid, &child) {
+                            flatten_items(conn, &child, recent_count, depth - 1, seen, out)?;
+                        }
                     }
                 }
             }
@@ -406,7 +436,7 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
         };
         format!(
             "{} match{} in {}{capped} — \
-             <a href=\"/playlist/search?q={}&in={}\">playlist of these results</a>",
+             <a href=\"/playlist/search?mq={}&in={}\">playlist of these results</a>",
             hits.len(),
             if hits.len() == 1 { "" } else { "es" },
             xml_escape(&scope_title),
