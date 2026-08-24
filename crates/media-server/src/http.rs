@@ -744,15 +744,29 @@ const RESUME_SCRIPT: &str = r#"<script>
 (function () {
   var v = document.querySelector('video');
   if (!v) return;
+  // timeupdate fires ~4x/second; flooring to whole seconds throttles the
+  // stamping to once per second, which also keeps us far below browsers'
+  // history-API rate limits. replaceState mutates the current session
+  // entry rather than adding one, so history never grows.
+  var last = -1;
+  var honoured = true;   // false while an incoming #position is pending
   function stamp() {
+    if (!honoured) return;   // never overwrite a URL we have not acted on yet
     var t = Math.floor(v.currentTime || 0);
+    if (t === last) return;
+    last = t;
     history.replaceState(null, '', location.pathname + (t > 0 ? '#' + t + 's' : ''));
   }
+  v.addEventListener('timeupdate', stamp);
   v.addEventListener('pause', stamp);
   v.addEventListener('seeked', stamp);
   var start = parseFloat((location.hash || '').replace(/[^0-9.]/g, ''));
   if (!(start > 0)) return;
-  function seek() { try { v.currentTime = start; } catch (e) {} }
+  honoured = false;
+  function seek() {
+    try { v.currentTime = start; } catch (e) {}
+    honoured = true;
+  }
   if (v.readyState >= 1) seek();
   else v.addEventListener('loadedmetadata', seek, { once: true });
   var note = document.getElementById('resume');
