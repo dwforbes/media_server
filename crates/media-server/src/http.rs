@@ -794,6 +794,45 @@ const RESUME_SCRIPT: &str = r#"<script>
 })();
 </script>"#;
 
+/// "Series — Season N, Episode M" with the series and season linked into
+/// their browse pages, so an episode reached via search (or a bookmark)
+/// is one click from its siblings rather than a trip back to the root.
+fn tv_context_html(series: &str, season: i64, episode: i64) -> String {
+    format!(
+        "<a href=\"/browse/{}\">{}</a> — <a href=\"/browse/{}\">Season {season}</a>, Episode {episode}",
+        ObjectId::TvSeries(series.to_string()).to_id(),
+        xml_escape(series),
+        ObjectId::TvSeason { series: series.to_string(), season }.to_id(),
+    )
+}
+
+/// "Artist — Album" (optionally ", track N") with the artist and album
+/// linked into their browse pages. The browse tree keys on the album
+/// artist when one is set, so the links use that even though the text
+/// shows the track's own artist (the two differ on compilations).
+fn music_context_html(detail: &media_db::queries::files::ItemDetail, with_track: bool) -> String {
+    let Some(artist) = detail.artist.as_deref() else {
+        return String::new();
+    };
+    let key_artist = detail.album_artist.as_deref().unwrap_or(artist).to_string();
+    let mut out = format!(
+        "<a href=\"/browse/{}\">{}</a>",
+        ObjectId::MusicArtist(key_artist.clone()).to_id(),
+        xml_escape(artist)
+    );
+    if let Some(album) = detail.album.as_deref() {
+        out.push_str(&format!(
+            " — <a href=\"/browse/{}\">{}</a>",
+            ObjectId::MusicAlbum { artist: key_artist, album: album.to_string() }.to_id(),
+            xml_escape(album)
+        ));
+        if let (true, Some(n)) = (with_track, detail.track_no) {
+            out.push_str(&format!(", track {n}"));
+        }
+    }
+    out
+}
+
 /// In-browser player: native <video> controls, poster art, and the .srt
 /// sidecar as a selectable subtitle track.
 async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
@@ -811,17 +850,10 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     // Which season/episode (or artist/album) this is — the thing you
     // otherwise had to click back to the detail page to remember.
     let context = match (&detail.series, detail.season, detail.episode) {
-        (Some(series), Some(season), Some(episode)) => format!(
-            "{} — Season {season}, Episode {episode}",
-            xml_escape(series)
-        ),
-        _ => match (&detail.artist, &detail.album) {
-            (Some(artist), Some(album)) => {
-                format!("{} — {}", xml_escape(artist), xml_escape(album))
-            }
-            (Some(artist), None) => xml_escape(artist),
-            _ => String::new(),
-        },
+        (Some(series), Some(season), Some(episode)) => {
+            tv_context_html(series, season, episode)
+        }
+        _ => music_context_html(&detail, false),
     };
     let context_line = if context.is_empty() {
         String::new()
@@ -1000,20 +1032,10 @@ async fn item_page(
         heading.push_str(" <span style=\"font-size:.45em;border:1.5px solid #666;\
             border-radius:4px;padding:.05em .35em;color:#555;vertical-align:middle\">4K</span>");
     }
-    let mut subtitle = String::new();
-    if let (Some(series), Some(season), Some(episode)) =
-        (&detail.series, detail.season, detail.episode)
-    {
-        subtitle = format!("{} — Season {season}, Episode {episode}", xml_escape(series));
-    } else if let Some(artist) = &detail.artist {
-        subtitle = xml_escape(artist);
-        if let Some(album) = &detail.album {
-            subtitle.push_str(&format!(" — {}", xml_escape(album)));
-            if let Some(n) = detail.track_no {
-                subtitle.push_str(&format!(", track {n}"));
-            }
-        }
-    }
+    let subtitle = match (&detail.series, detail.season, detail.episode) {
+        (Some(series), Some(season), Some(episode)) => tv_context_html(series, season, episode),
+        _ => music_context_html(&detail, true),
+    };
 
     let mut facts: Vec<(&str, String)> = Vec::new();
     let imdb = detail

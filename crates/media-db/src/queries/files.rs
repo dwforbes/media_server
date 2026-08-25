@@ -311,6 +311,10 @@ pub struct ItemDetail {
     pub episode: Option<i64>,
     pub imdb_id: Option<String>,
     pub collection: Option<String>,
+    /// The tag-level album artist, when set. The browse tree files tracks
+    /// under COALESCE(album_artist, artist), so links back into it must
+    /// key on this rather than the per-track artist.
+    pub album_artist: Option<String>,
 }
 
 pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
@@ -327,7 +331,7 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 mu.title, mu.artist, mu.album, mu.track_no, mu.year,
                 (SELECT group_concat(g.name, ', ') FROM track_genres tg
                   JOIN genres g ON g.id = tg.genre_id WHERE tg.file_id = f.id),
-                t.rating, t.imdb_id, m.collection
+                t.rating, t.imdb_id, m.collection, mu.album_artist
          FROM files f
          LEFT JOIN movies m        ON m.file_id  = f.id
          LEFT JOIN tv_episodes t   ON t.file_id  = f.id
@@ -375,6 +379,7 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 artist: r.get(26)?,
                 album: r.get(27)?,
                 track_no: r.get(28)?,
+                album_artist: r.get(34)?,
             })
         },
     )

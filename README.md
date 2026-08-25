@@ -263,8 +263,10 @@ find /mnt/media -type f \( -iname "*.mp4" -o -iname "*.mkv" \) -print0 \
 
 The running scanner re-extracts touched files automatically (a harmless no-op).
 
-The player page names what you are watching — an episode shows
-"Series — Season N, Episode M" under its title, a track shows artist and album — and
+The detail and player pages name what you are watching — an episode shows
+"Series — Season N, Episode M" under its title, with the series and season linked to
+their browse pages, a track shows artist and album linked likewise (so anything found
+via search is one click from its siblings) — and
 hovering (or tab-focusing) the "← details" link reveals a card with the poster, plot,
 IMDb rating, genres, director, duration, resolution, codec and size, so you rarely
 need to navigate back for context. The in-browser player (`/play/{id}`, linked from
