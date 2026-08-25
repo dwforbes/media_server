@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::Router;
 use media_db::mime::{AUDIO_EXTENSIONS, VIDEO_EXTENSIONS};
-use media_db::queries::{self, files};
+use media_db::queries::{self, files, music, tv};
 use rusqlite::Connection;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
@@ -833,6 +833,99 @@ fn music_context_html(detail: &media_db::queries::files::ItemDetail, with_track:
     out
 }
 
+/// The episode (or track) before and after this one, in the order the
+/// season (album) browse page lists them. Renditions of one episode are
+/// merged there, so a lower-quality copy still finds its place. Movies
+/// have no natural neighbours and get (None, None).
+fn neighbours(
+    conn: &rusqlite::Connection,
+    detail: &files::ItemDetail,
+) -> (Option<media_db::BrowseItem>, Option<media_db::BrowseItem>) {
+    let siblings = match (detail.kind, &detail.series, detail.season) {
+        (media_db::MediaKind::Tv, Some(series), Some(season)) => {
+            tv::episodes(conn, series, season)
+        }
+        (media_db::MediaKind::Music, _, _) => {
+            // Same keys the browse tree uses: album artist first, and the
+            // "Unknown" placeholders for untagged files.
+            let artist = detail
+                .album_artist
+                .as_deref()
+                .or(detail.artist.as_deref())
+                .unwrap_or("Unknown Artist");
+            let album = detail.album.as_deref().unwrap_or("Unknown Album");
+            music::tracks_for_album(conn, artist, album)
+        }
+        _ => return (None, None),
+    };
+    let Ok(mut siblings) = siblings else {
+        return (None, None);
+    };
+    let Some(index) = siblings.iter().position(|item| {
+        item.file_id == detail.file_id
+            || item.renditions.iter().any(|r| r.file_id == detail.file_id)
+    }) else {
+        return (None, None);
+    };
+    let next = if index + 1 < siblings.len() {
+        Some(siblings.remove(index + 1))
+    } else {
+        None
+    };
+    let prev = if index > 0 {
+        Some(siblings.swap_remove(index - 1))
+    } else {
+        None
+    };
+    (prev, next)
+}
+
+/// "« Prior episode: Title" on the left, "Next episode: Title »" on the
+/// right, spanning the same width as the details above.
+fn neighbour_nav_html(
+    kind: media_db::MediaKind,
+    prev: Option<&media_db::BrowseItem>,
+    next: Option<&media_db::BrowseItem>,
+) -> String {
+    if prev.is_none() && next.is_none() {
+        return String::new();
+    }
+    let noun = match kind {
+        media_db::MediaKind::Music => "song",
+        _ => "episode",
+    };
+    let label = |item: &media_db::BrowseItem| match (kind, item.episode, item.track_no) {
+        (media_db::MediaKind::Tv, Some(n), _) => format!("{n:02} - {}", xml_escape(&item.title)),
+        (media_db::MediaKind::Music, _, Some(n)) => format!("{n}. {}", xml_escape(&item.title)),
+        _ => xml_escape(&item.title),
+    };
+    let prev_html = prev
+        .map(|item| {
+            format!(
+                "<a href=\"/item/{}\">« Prior {noun}: {}</a>",
+                item.file_id,
+                label(item)
+            )
+        })
+        .unwrap_or_default();
+    let next_html = next
+        .map(|item| {
+            format!(
+                "<a href=\"/item/{}\">Next {noun}: {} »</a>",
+                item.file_id,
+                label(item)
+            )
+        })
+        .unwrap_or_default();
+    // Empty spans keep a lone "next" on the right and a lone "prior" on
+    // the left; clear:both drops the row below the floated poster.
+    format!(
+        "<p style=\"clear:both;display:flex;justify-content:space-between;gap:2em;\
+         margin-top:1.5em;padding-top:.8em;border-top:1px solid #ddd\">\
+         <span>{prev_html}</span><span style=\"text-align:right\">{next_html}</span></p>"
+    )
+}
+
 /// In-browser player: native <video> controls, poster art, and the .srt
 /// sidecar as a selectable subtitle track.
 async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
@@ -1014,7 +1107,6 @@ async fn item_page(
     let detail = files::detail(&conn, id);
     let genre_pairs = queries::genres_for_file(&conn, id).unwrap_or_default();
     let director_pairs = queries::directors_for_file(&conn, id).unwrap_or_default();
-    drop(conn);
     let detail = match detail {
         Ok(Some(d)) => d,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
@@ -1023,6 +1115,9 @@ async fn item_page(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+    let (prev, next) = neighbours(&conn, &detail);
+    drop(conn);
+    let nav = neighbour_nav_html(detail.kind, prev.as_ref(), next.as_ref());
 
     let mut heading = xml_escape(&detail.title);
     if let Some(year) = detail.year {
@@ -1199,7 +1294,7 @@ async fn item_page(
          <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
          <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading}</h1>\
          {subtitle_html}{plot}{play_links}\
-         <table style=\"border-collapse:collapse\">{rows}</table>"
+         <table style=\"border-collapse:collapse\">{rows}</table>{nav}"
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
