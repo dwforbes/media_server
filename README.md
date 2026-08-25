@@ -270,7 +270,8 @@ via search is one click from its siblings), and the detail page ends with
 "« Prior episode" / "Next episode »" links (songs likewise) that step through the
 season or album in browse order — and
 hovering (or tab-focusing) the "← details" link reveals a card with the poster, plot,
-IMDb rating, genres, director, duration, resolution, codec and size, so you rarely
+IMDb rating (linked to the IMDb entry when known), genres, director, duration,
+resolution, codec and size, so you rarely
 need to navigate back for context. The in-browser player (`/play/{id}`, linked from
 every video detail page) stamps the
 playback position into the URL fragment once a second while playing (and on pause or

@@ -754,6 +754,13 @@ const PLAYER_STYLE: &str = r#"<style>
 .infowrap .card img { float: right; width: 6em; margin: 0 0 .6em .9em; border-radius: 4px; }
 .infowrap .card .facts { color: #9a9a9a; margin-top: .5em; }
 .infowrap .card .plot { margin-top: .5em; }
+/* Dark surfaces (the player page, the card on either page): browser
+   default link colours — navy visited links especially — vanish on
+   near-black, so pin every link state to a light blue. */
+body.player a:link, body.player a:visited,
+.infowrap .card a:link, .infowrap .card a:visited { color: #9cf; }
+body.player a:hover, body.player a:active,
+.infowrap .card a:hover, .infowrap .card a:active { color: #cef; }
 </style>"#;
 
 const RESUME_SCRIPT: &str = r#"<script>
@@ -975,8 +982,16 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         card.push_str(&format!("<div class=\"plot\">{}</div>", xml_escape(&trimmed)));
     }
     let mut facts: Vec<String> = Vec::new();
-    if let Some(rating) = detail.rating {
-        facts.push(format!("IMDb {rating:.1}"));
+    // The rating links to the IMDb entry when we know it — the episode's
+    // own tconst for TV, the film's for movies.
+    let imdb = detail.imdb_id.as_deref().filter(|id| id.starts_with("tt"));
+    match (detail.rating, imdb) {
+        (Some(rating), Some(id)) => facts.push(format!(
+            "<a href=\"https://www.imdb.com/title/{id}/\">IMDb {rating:.1}</a>"
+        )),
+        (Some(rating), None) => facts.push(format!("IMDb {rating:.1}")),
+        (None, Some(id)) => facts.push(format!("<a href=\"https://www.imdb.com/title/{id}/\">IMDb</a>")),
+        (None, None) => {}
     }
     if let Some(genre) = &detail.genre {
         facts.push(xml_escape(genre));
@@ -1045,9 +1060,9 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     };
     let html = format!(
         "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
-         <body style=\"font-family:sans-serif;max-width:60em;margin:1.5em auto;\
+         <body class=\"player\" style=\"font-family:sans-serif;max-width:60em;margin:1.5em auto;\
          background:#111;color:#ddd\">\
-         <p><span class=\"infowrap\"><a href=\"/item/{id}\" style=\"color:#9cf\">← details</a>\
+         <p><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
          <span class=\"card\">{card}</span></span></p>\
          <h2 style=\"margin-bottom:.1em\">{heading}</h2>{context_line}\
          <video controls autoplay playsinline{poster} \
