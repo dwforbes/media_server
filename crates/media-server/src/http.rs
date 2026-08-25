@@ -740,6 +740,22 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
 /// paused (or scrubbed) player yields a shareable/bookmarkable link that
 /// picks up where it left off. Fragments never reach the server, so this
 /// has to be client side.
+/// Hover/focus card on the player page. Pure CSS: no script, and
+/// :focus-within means keyboard users get it too. Touch devices can't
+/// hover, which is why the season/episode context is also rendered
+/// inline — the card is enrichment, not the only route to the facts.
+const PLAYER_STYLE: &str = r#"<style>
+.infowrap { position: relative; display: inline-block; }
+.infowrap .card { display: none; position: absolute; left: 0; top: 1.7em; z-index: 10;
+  width: 32em; max-width: 90vw; padding: .9em 1em; background: #1c1c1c; color: #ddd;
+  border: 1px solid #444; border-radius: 6px; box-shadow: 0 8px 22px rgba(0,0,0,.55);
+  font-size: .85em; line-height: 1.5; text-align: left; }
+.infowrap:hover .card, .infowrap:focus-within .card { display: block; }
+.infowrap .card img { float: right; width: 6em; margin: 0 0 .6em .9em; border-radius: 4px; }
+.infowrap .card .facts { color: #9a9a9a; margin-top: .5em; }
+.infowrap .card .plot { margin-top: .5em; }
+</style>"#;
+
 const RESUME_SCRIPT: &str = r#"<script>
 (function () {
   var v = document.querySelector('video');
@@ -792,6 +808,69 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     if let Some(year) = detail.year {
         heading.push_str(&format!(" ({year})"));
     }
+    // Which season/episode (or artist/album) this is — the thing you
+    // otherwise had to click back to the detail page to remember.
+    let context = match (&detail.series, detail.season, detail.episode) {
+        (Some(series), Some(season), Some(episode)) => format!(
+            "{} — Season {season}, Episode {episode}",
+            xml_escape(series)
+        ),
+        _ => match (&detail.artist, &detail.album) {
+            (Some(artist), Some(album)) => {
+                format!("{} — {}", xml_escape(artist), xml_escape(album))
+            }
+            (Some(artist), None) => xml_escape(artist),
+            _ => String::new(),
+        },
+    };
+    let context_line = if context.is_empty() {
+        String::new()
+    } else {
+        format!("<p style=\"color:#aaa;margin:.2em 0 .8em\">{context}</p>")
+    };
+
+    // Everything the detail page knows, in a hover card on the back link.
+    let mut card = String::new();
+    if detail.has_art {
+        card.push_str(&format!("<img src=\"/art/{id}\" alt=\"\">"));
+    }
+    card.push_str(&format!("<strong>{heading}</strong>"));
+    if !context.is_empty() {
+        card.push_str(&format!("<br>{context}"));
+    }
+    if let Some(plot) = detail.plot.as_deref().filter(|p| !p.trim().is_empty()) {
+        // Keep the card a card: truncate long synopses on a word boundary.
+        let trimmed = if plot.chars().count() > 400 {
+            let cut: String = plot.chars().take(400).collect();
+            let cut = cut.rsplit_once(' ').map(|(head, _)| head.to_string()).unwrap_or(cut);
+            format!("{cut}…")
+        } else {
+            plot.to_string()
+        };
+        card.push_str(&format!("<div class=\"plot\">{}</div>", xml_escape(&trimmed)));
+    }
+    let mut facts: Vec<String> = Vec::new();
+    if let Some(rating) = detail.rating {
+        facts.push(format!("IMDb {rating:.1}"));
+    }
+    if let Some(genre) = &detail.genre {
+        facts.push(xml_escape(genre));
+    }
+    if let Some(director) = &detail.director {
+        facts.push(format!("dir. {}", xml_escape(director)));
+    }
+    if let Some(ms) = detail.duration_ms {
+        facts.push(human_duration(ms));
+    }
+    if let (Some(w), Some(h)) = (detail.width, detail.height) {
+        facts.push(format!("{w}×{h}{}", if is_uhd(detail.width, detail.height) { " (4K)" } else { "" }));
+    }
+    if let Some(codec) = &detail.video_codec {
+        facts.push(xml_escape(codec));
+    }
+    facts.push(human_size(detail.size));
+    card.push_str(&format!("<div class=\"facts\">{}</div>", facts.join(" · ")));
+
     let poster = if detail.has_art {
         format!(" poster=\"/art/{id}\"")
     } else {
@@ -840,11 +919,12 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         (String::new(), String::new())
     };
     let html = format!(
-        "<!doctype html><meta charset=utf-8><title>{heading}</title>\
+        "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
          <body style=\"font-family:sans-serif;max-width:60em;margin:1.5em auto;\
          background:#111;color:#ddd\">\
-         <p><a href=\"/item/{id}\" style=\"color:#9cf\">← details</a></p>\
-         <h2>{heading}</h2>\
+         <p><span class=\"infowrap\"><a href=\"/item/{id}\" style=\"color:#9cf\">← details</a>\
+         <span class=\"card\">{card}</span></span></p>\
+         <h2 style=\"margin-bottom:.1em\">{heading}</h2>{context_line}\
          <video controls autoplay playsinline{poster} \
           style=\"width:100%;max-height:80vh;background:#000\">\
          <source src=\"{}/media/{id}\" type=\"{}\">{track}\
@@ -1093,7 +1173,7 @@ async fn item_page(
         })
         .collect();
     let html = format!(
-        "<!doctype html><meta charset=utf-8><title>{heading}</title>\
+        "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
          <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
          <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading}</h1>\
          {subtitle_html}{plot}{play_links}\

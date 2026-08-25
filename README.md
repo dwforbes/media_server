@@ -263,7 +263,12 @@ find /mnt/media -type f \( -iname "*.mp4" -o -iname "*.mkv" \) -print0 \
 
 The running scanner re-extracts touched files automatically (a harmless no-op).
 
-The in-browser player (`/play/{id}`, linked from every video detail page) stamps the
+The player page names what you are watching — an episode shows
+"Series — Season N, Episode M" under its title, a track shows artist and album — and
+hovering (or tab-focusing) the "← details" link reveals a card with the poster, plot,
+IMDb rating, genres, director, duration, resolution, codec and size, so you rarely
+need to navigate back for context. The in-browser player (`/play/{id}`, linked from
+every video detail page) stamps the
 playback position into the URL fragment once a second while playing (and on pause or
 scrub) — `…/play/596#128s` — so the address bar is always a resumable, shareable link; opening such a URL seeks
 there once metadata loads and offers a "start from the beginning" link. Fragments are
