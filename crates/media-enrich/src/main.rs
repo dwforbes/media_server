@@ -248,6 +248,44 @@ fn strip_embedded_titles(config: &ScannerConfig) {
     }
 }
 
+/// Is this one of our own temp outputs (`.{stem}.remux-tmp*.mp4`,
+/// `.{stem}.subtitles-tmp*.mp4/.srt`)?
+fn is_enrich_temp(name: &str) -> bool {
+    name.starts_with('.') && (name.contains(".remux-tmp") || name.contains(".subtitles-tmp"))
+}
+
+/// Remove every temp output left under the video roots by earlier runs
+/// (killed mid-mux, or the pre-lock era's colliding runs). Only called
+/// with the run lock held, so none of them can still be in use.
+fn remove_stale_temps(config: &ScannerConfig) {
+    let mut removed = 0usize;
+    for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
+        if !root.path.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&root.path)
+            .follow_links(false)
+            .into_iter()
+            // Hidden files are what we're after; hidden directories
+            // (.Trash-*, .Spotlight-V100) are not ours to rummage in.
+            .filter_entry(|e| e.file_type().is_file() || !e.file_name().to_string_lossy().starts_with('.'))
+            .flatten()
+            .filter(|e| e.file_type().is_file() && is_enrich_temp(&e.file_name().to_string_lossy()))
+        {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => {
+                    println!("removed stale temp file {}", entry.path().display());
+                    removed += 1;
+                }
+                Err(err) => eprintln!("{}: could not remove stale temp file: {err}", entry.path().display()),
+            }
+        }
+    }
+    if removed > 0 {
+        println!("stale temp files removed: {removed}");
+    }
+}
+
 /// Remux every eligible .mkv under the video roots to .mp4. Dry run:
 /// probe and report only.
 fn remux_mkv_files(config: &ScannerConfig, dry_run: bool) {
@@ -394,6 +432,10 @@ fn main() -> Result<()> {
             &config.db_path.clone().unwrap_or_else(media_db::open::default_db_path),
         )?)
     };
+
+    if _run_lock.is_some() {
+        remove_stale_temps(&config);
+    }
 
     let do_strip = args.strip_titles || config.enrich.strip_titles;
     let do_subs = args.embed_subtitles || config.enrich.embed_subtitles;
