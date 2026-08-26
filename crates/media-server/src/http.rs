@@ -525,6 +525,13 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
         })
         .unwrap_or_default();
     let children = tree::browse_children(&conn, &node, state.recent_count);
+    // A series page also gets the season × episode ratings grid.
+    let grid = match &node {
+        ObjectId::TvSeries(series) => tv::series_episodes(&conn, series)
+            .map(|episodes| episode_grid_html(&episodes))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
     drop(conn);
     let children = match children {
         Ok(c) => c,
@@ -550,7 +557,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
          <body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
          <p><a href=\"/browse\">⌂ top</a></p><h1>{}</h1>{back_link}{search_box}\
          <p><a href=\"/playlist/id/{oid}.m3u\">Playlist of everything below this point</a></p>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>",
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}",
         xml_escape(&title),
         xml_escape(&title)
     );
@@ -1128,26 +1135,90 @@ fn listing_row(item: &media_db::BrowseItem, base_url: &str) -> String {
     )
 }
 
-/// The IMDb rating as a small coloured box: green from 7.5, yellow from
-/// 5.5, red below. Empty when the item has no rating.
-fn rating_chip(rating: Option<f64>) -> String {
-    let Some(rating) = rating else {
-        return String::new();
-    };
-    // (background, text): white text on green/red, dark on yellow.
-    let (background, colour) = if rating >= 7.5 {
+/// (background, text) for a rating: green from 7.5, yellow from 5.5, red
+/// below — white text on green/red, dark on yellow.
+fn rating_colours(rating: f64) -> (&'static str, &'static str) {
+    if rating >= 7.5 {
         ("#2e7d32", "#fff")
     } else if rating >= 5.5 {
         ("#fbc02d", "#222")
     } else {
         ("#c62828", "#fff")
+    }
+}
+
+/// The IMDb rating as a small coloured box at the right edge of a listing
+/// row. Empty when the item has no rating.
+fn rating_chip(rating: Option<f64>) -> String {
+    let Some(rating) = rating else {
+        return String::new();
     };
+    let (background, colour) = rating_colours(rating);
     format!(
         "<span title=\"IMDb rating\" style=\"margin-left:auto;flex-shrink:0;\
          font-size:.75em;font-weight:bold;color:{colour};background:{background};\
          border-radius:3px;padding:.1em .45em;min-width:2.4em;\
          text-align:center\">{rating:.1}</span>"
     )
+}
+
+/// Season × episode grid of rating boxes for a series page: seasons down,
+/// episode numbers across, each box linking to the episode's page. Grey
+/// "–" for episodes without a rating; blank where a number is missing.
+/// Empty when nothing is numbered.
+fn episode_grid_html(episodes: &[media_db::BrowseItem]) -> String {
+    let numbered: Vec<&media_db::BrowseItem> = episodes
+        .iter()
+        .filter(|e| e.season.is_some() && e.episode.is_some_and(|n| n > 0))
+        .collect();
+    let Some(max_episode) = numbered.iter().filter_map(|e| e.episode).max() else {
+        return String::new();
+    };
+    let mut seasons: Vec<i64> = numbered.iter().filter_map(|e| e.season).collect();
+    seasons.sort_unstable();
+    seasons.dedup();
+
+    let label = "color:#666;font-size:.75em;font-weight:normal;text-align:center;padding:0 .2em";
+    let mut html = String::from(
+        "<h2 style=\"font-size:1em;margin-top:1.5em\">Episode ratings</h2>\
+         <div style=\"overflow-x:auto\"><table style=\"border-collapse:separate;\
+         border-spacing:3px;font-size:.85em\"><tr><th></th>",
+    );
+    for n in 1..=max_episode {
+        html.push_str(&format!("<th style=\"{label}\">{n}</th>"));
+    }
+    html.push_str("</tr>");
+    for season in seasons {
+        html.push_str(&format!("<tr><th style=\"{label}\">S{season}</th>"));
+        for n in 1..=max_episode {
+            let cell = numbered
+                .iter()
+                .find(|e| e.season == Some(season) && e.episode == Some(n));
+            match cell {
+                Some(e) => {
+                    let (background, colour, text) = match e.rating {
+                        Some(r) => {
+                            let (bg, fg) = rating_colours(r);
+                            (bg, fg, format!("{r:.1}"))
+                        }
+                        None => ("#ddd", "#555", "–".to_string()),
+                    };
+                    html.push_str(&format!(
+                        "<td><a href=\"/item/{}\" title=\"S{season:02}E{n:02} · {}\" \
+                         style=\"display:block;min-width:2.6em;padding:.15em .2em;\
+                         text-align:center;font-weight:bold;text-decoration:none;\
+                         border-radius:3px;color:{colour};background:{background}\">{text}</a></td>",
+                        e.file_id,
+                        xml_escape(&e.title)
+                    ));
+                }
+                None => html.push_str("<td></td>"),
+            }
+        }
+        html.push_str("</tr>");
+    }
+    html.push_str("</table></div>");
+    html
 }
 
 /// A small "4K" chip; hidden-but-space-reserving for non-4K rows so

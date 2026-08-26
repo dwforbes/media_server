@@ -114,6 +114,20 @@ pub fn seasons(conn: &Connection, series: &str) -> Result<Vec<i64>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Every episode of a series across all seasons, ordered season/episode,
+/// renditions merged per (season, episode) — the series overview grid.
+pub fn series_episodes(conn: &Connection, series: &str) -> Result<Vec<BrowseItem>> {
+    let sql = format!(
+        "{EPISODE_SELECT} AND t.series = ?1 COLLATE NOCASE ORDER BY t.season, t.episode"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![series], episode_from_row)?;
+    Ok(merge_renditions(
+        rows.collect::<Result<Vec<_>, _>>()?,
+        |e| (e.season, e.episode.unwrap_or(-e.file_id)),
+    ))
+}
+
 pub fn episodes(conn: &Connection, series: &str, season: i64) -> Result<Vec<BrowseItem>> {
     let sql = format!(
         "{EPISODE_SELECT} AND t.series = ?1 COLLATE NOCASE AND t.season = ?2 ORDER BY t.episode"
