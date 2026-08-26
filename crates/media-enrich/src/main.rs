@@ -1,4 +1,5 @@
 mod imdb;
+mod remux;
 mod subtitles;
 mod tmdb;
 
@@ -49,6 +50,10 @@ struct Args {
     /// embed_subtitles = true in the config's [enrich] section).
     #[arg(long)]
     embed_subtitles: bool,
+    /// Remux MKV files to MP4 (stream copy; AC-3/E-AC-3 audio gains a stereo
+    /// AAC twin). Also enabled by remux_mkv = true in the [enrich] section.
+    #[arg(long)]
+    remux_mkv: bool,
     /// Re-download the cached IMDb ratings dataset when older than this.
     #[arg(long, default_value_t = 7)]
     ratings_max_age_days: u64,
@@ -84,6 +89,11 @@ struct EnrichSection {
     /// after verification). Opt-in.
     #[serde(default)]
     embed_subtitles: bool,
+    /// Remux MKV files to MP4 for browser playback (stream copy, plus a
+    /// stereo AAC twin ahead of any AC-3/E-AC-3 track; replaces the file
+    /// after verification and removes the .mkv). Opt-in.
+    #[serde(default)]
+    remux_mkv: bool,
     #[serde(default = "default_ffmpeg")]
     ffmpeg_path: String,
     #[serde(flatten)]
@@ -205,6 +215,69 @@ fn strip_embedded_titles(config: &ScannerConfig) {
     }
 }
 
+/// Remux every eligible .mkv under the video roots to .mp4. Dry run:
+/// probe and report only.
+fn remux_mkv_files(config: &ScannerConfig, dry_run: bool) {
+    let mut remuxed = 0usize;
+    let mut planned = 0usize;
+    let mut skipped: Vec<(PathBuf, String)> = Vec::new();
+    for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
+        if !root.path.is_dir() {
+            continue;
+        }
+        let mut paths: Vec<PathBuf> = WalkDir::new(&root.path)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mkv")))
+            .collect();
+        paths.sort();
+        for path in paths {
+            match remux::remux_if_applicable(&config.enrich.ffmpeg_path, &config.ffprobe_path, &path, dry_run) {
+                Ok(remux::Outcome::WouldRemux(plan)) => {
+                    planned += 1;
+                    println!("would remux: {}{}", path.display(), describe_plan(&plan));
+                }
+                Ok(remux::Outcome::Remuxed(plan)) => {
+                    remuxed += 1;
+                    println!("remuxed to mp4: {}{}", path.display(), describe_plan(&plan));
+                }
+                Ok(remux::Outcome::Skipped(why)) => skipped.push((path, why)),
+                Err(err) => eprintln!("{}: remux failed: {err:#}", path.display()),
+            }
+        }
+    }
+    if !skipped.is_empty() {
+        println!("mkv kept as-is ({}):", skipped.len());
+        for (path, why) in &skipped {
+            println!("  {} — {why}", path.display());
+        }
+    }
+    if dry_run {
+        if planned > 0 {
+            println!("(dry run) mkv files that would be remuxed: {planned}");
+        }
+    } else if remuxed > 0 {
+        println!("mkv files remuxed to mp4: {remuxed}");
+    }
+}
+
+fn describe_plan(plan: &remux::Plan) -> String {
+    let mut out = String::new();
+    match plan.twins() {
+        0 => {}
+        1 => out.push_str(" (+ stereo AAC twin for the AC-3/E-AC-3 track)"),
+        n => out.push_str(&format!(" (+ stereo AAC twins for {n} AC-3/E-AC-3 tracks)")),
+    }
+    for note in &plan.notes {
+        out.push_str(&format!(" [{note}]"));
+    }
+    out
+}
+
 /// Embed same-name .srt sidecars into MP4 files lacking a subtitle stream.
 fn embed_sidecar_subtitles(config: &ScannerConfig) {
     let mut embedded = 0usize;
@@ -282,7 +355,12 @@ fn main() -> Result<()> {
 
     let do_strip = args.strip_titles || config.enrich.strip_titles;
     let do_subs = args.embed_subtitles || config.enrich.embed_subtitles;
+    let do_remux = args.remux_mkv || config.enrich.remux_mkv;
     if args.dry_run {
+        // Remux planning is probe-only, so the dry run can show it in full.
+        if do_remux {
+            remux_mkv_files(&config, true);
+        }
         if do_strip {
             println!("(dry run: embedded-title stripping skipped)");
         }
@@ -290,8 +368,11 @@ fn main() -> Result<()> {
             println!("(dry run: subtitle embedding skipped)");
         }
     } else {
-        // Subtitles first: muxing produces a fresh container, and the title
-        // pass should see the final file.
+        // Remux first so subtitle embedding sees the resulting MP4s, and
+        // subtitles before titles so the title pass sees the final file.
+        if do_remux {
+            remux_mkv_files(&config, false);
+        }
         if do_subs {
             embed_sidecar_subtitles(&config);
         }

@@ -315,6 +315,30 @@ replacement), so it is conservative: mux to a temp file in the same directory, v
 the result with ffprobe (stream count, subtitle present, duration unchanged), then a
 single atomic rename. Opt-in; needs `ffmpeg` on the PATH (`ffmpeg_path` otherwise).
 
+### Remuxing MKV to MP4
+
+Matroska is fine for TVs and VLC but not for browsers: Firefox won't range-stream it
+and Safari won't open it, even when the streams inside are plain H.264/HEVC + AAC.
+With `remux_mkv = true` in the `[enrich]` section (or `media-enrich --remux-mkv`),
+enrichment rewrites eligible `.mkv` files as `.mp4` with the video and audio streams
+copied bit-for-bit — the equivalent of `ffmpeg -i in.mkv -map 0 -c copy -c:s mov_text
+-tag:v hvc1 -movflags +faststart out.mp4`. One thing is added: an AC-3 / E-AC-3 track
+(which Chrome and Firefox cannot decode in any container) gains a **stereo AAC twin
+inserted ahead of it as the default track**, so browsers play the file while receivers
+and TVs still find the original Dolby Digital track behind it.
+
+Only clean candidates are converted; everything else is listed as "kept as-is" with
+the reason: video other than H.264/HEVC/AV1, audio MP4 can't carry natively (DTS,
+TrueHD, FLAC, PCM, Vorbis), bitmap subtitles (PGS/VobSub have no MP4 form), Dolby
+Vision, or a same-name `.mp4` already present. Text subtitles become `mov_text` (ASS
+styling is flattened); attachments such as fonts and cover art are dropped; chapters
+and language tags carry over. The file is written beside the original, verified with
+ffprobe (stream counts, duration), given the original's mtime, renamed into place, and
+only then is the `.mkv` removed — sidecars (`.nfo`, `-poster.jpg`, `.srt`) share the
+stem and stay valid, and the catalog carries the original's added-at date across the
+change so Recently Added doesn't fill with conversions. `--dry-run` shows the full plan
+(it only probes). Opt-in; needs `ffmpeg` (`ffmpeg_path`) and `ffprobe`.
+
 ## Not implemented (v1)
 
 - GENA eventing (clients poll instead).

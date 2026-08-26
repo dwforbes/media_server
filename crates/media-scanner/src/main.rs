@@ -280,6 +280,11 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
     }
 
     if !path.exists() {
+        // A remux replaces x.mkv with x.mp4; the .mp4's row (if the create
+        // event landed first) should keep the original's added_at.
+        if reconcile::media_mime(root, path).is_some() {
+            files::bequeath_added_at(conn, root.id, &rel)?;
+        }
         let n = files::delete_by_prefix(conn, root.id, &rel)?;
         if n > 0 {
             tracing::info!("removed {n} catalog entries under {}/{}", root.path, rel);

@@ -50,7 +50,12 @@ pub struct EnrichConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub embed_subtitles: bool,
-    /// Read by media-enrich: ffmpeg binary for subtitle embedding.
+    /// Read by media-enrich: remux MKV files to MP4. Accepted here; the
+    /// scanner does not act on it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub remux_mkv: bool,
+    /// Read by media-enrich: ffmpeg binary for subtitle embedding and remuxing.
     #[serde(default)]
     #[allow(dead_code)]
     pub ffmpeg_path: Option<String>,

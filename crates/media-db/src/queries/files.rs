@@ -121,6 +121,7 @@ pub fn upsert_pending(
     kind: MediaKind,
     mime: &str,
 ) -> Result<i64> {
+    let existed = lookup(conn, root_id, rel_path)?.is_some();
     // added_at is set on insert only; the conflict branch leaves it alone.
     conn.execute(
         "INSERT INTO files(root_id, rel_path, size, mtime, kind, mime, status, updated_at, added_at)
@@ -135,7 +136,79 @@ pub fn upsert_pending(
         params![root_id, rel_path],
         |r| r.get(0),
     )?;
+    if !existed {
+        inherit_added_at(conn, root_id, rel_path, id)?;
+    }
     Ok(id)
+}
+
+/// `path/stem.ext` -> `path/stem`, if there is an extension.
+fn strip_extension(rel_path: &str) -> Option<&str> {
+    let name_start = rel_path.rfind('/').map_or(0, |i| i + 1);
+    let dot = rel_path[name_start..].rfind('.')?;
+    (dot > 0).then(|| &rel_path[..name_start + dot])
+}
+
+/// Catalogued siblings of `rel_path` with the same stem and a different
+/// extension: `Heat (1995).mkv` beside `Heat (1995).mp4`. That is what a
+/// container change (a remux) looks like from the catalog's side.
+fn same_stem_siblings(conn: &Connection, root_id: i64, rel_path: &str) -> Result<Vec<(i64, i64)>> {
+    let Some(stem) = strip_extension(rel_path) else { return Ok(Vec::new()) };
+    let like = format!(
+        "{}.%",
+        stem.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    );
+    let mut stmt = conn.prepare(
+        "SELECT id, rel_path, added_at FROM files
+         WHERE root_id = ?1 AND rel_path LIKE ?2 ESCAPE '\\' AND rel_path != ?3",
+    )?;
+    let rows = stmt.query_map(params![root_id, like, rel_path], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, sibling, added_at) = row?;
+        if strip_extension(&sibling) == Some(stem) {
+            out.push((id, added_at));
+        }
+    }
+    Ok(out)
+}
+
+/// A file that replaces a same-stem sibling (remuxed .mkv -> .mp4) is not
+/// new to the library: it takes the sibling's added_at so Recently Added
+/// does not fill with conversions.
+fn inherit_added_at(conn: &Connection, root_id: i64, rel_path: &str, id: i64) -> Result<()> {
+    if let Some(earliest) = same_stem_siblings(conn, root_id, rel_path)?
+        .into_iter()
+        .map(|(_, added_at)| added_at)
+        .min()
+    {
+        conn.execute(
+            "UPDATE files SET added_at = min(added_at, ?2) WHERE id = ?1",
+            params![id, earliest],
+        )?;
+    }
+    Ok(())
+}
+
+/// The vanished file at `rel_path` is being removed from the catalog: if
+/// a same-stem sibling is catalogued, hand it the vanished file's added_at
+/// first (covers the create-before-delete event order of a remux).
+pub fn bequeath_added_at(conn: &Connection, root_id: i64, rel_path: &str) -> Result<()> {
+    let Some((_, _, _, _)) = lookup(conn, root_id, rel_path)? else { return Ok(()) };
+    let added_at: i64 = conn.query_row(
+        "SELECT added_at FROM files WHERE root_id = ?1 AND rel_path = ?2",
+        params![root_id, rel_path],
+        |r| r.get(0),
+    )?;
+    for (sibling_id, _) in same_stem_siblings(conn, root_id, rel_path)? {
+        conn.execute(
+            "UPDATE files SET added_at = min(added_at, ?2) WHERE id = ?1",
+            params![sibling_id, added_at],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn delete_file(conn: &Connection, id: i64) -> Result<()> {
@@ -508,5 +581,52 @@ pub fn browse_item(conn: &Connection, file_id: i64) -> Result<Option<BrowseItem>
     match rows.next() {
         Some(item) => Ok(Some(item?)),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_extension_handles_dotted_names_and_dirs() {
+        assert_eq!(strip_extension("Movies/The.Mummy.2026.mkv"), Some("Movies/The.Mummy.2026"));
+        assert_eq!(strip_extension("Heat (1995).mp4"), Some("Heat (1995)"));
+        assert_eq!(strip_extension("dir.with.dots/noext"), None);
+        assert_eq!(strip_extension(".hidden"), None);
+    }
+
+    #[test]
+    fn a_remuxed_file_keeps_the_original_added_at() {
+        let dir = std::env::temp_dir().join(format!("media-db-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = crate::open::open_rw(&dir.join("t.db")).unwrap();
+        let roots = sync_roots(&conn, &[("/m".to_string(), MediaKind::Movies)]).unwrap();
+        let root = roots[0].id;
+        let old = upsert_pending(&conn, root, "Heat (1995).mkv", 1, 1, MediaKind::Movies, "video/x-matroska").unwrap();
+        conn.execute("UPDATE files SET added_at = 1000 WHERE id = ?1", [old]).unwrap();
+        // Unrelated file with a longer name that also starts with the stem.
+        upsert_pending(&conn, root, "Heat (1995) Extras.mkv", 1, 1, MediaKind::Movies, "video/x-matroska").unwrap();
+
+        // Create-before-delete (event order): the new row inherits on insert.
+        let new = upsert_pending(&conn, root, "Heat (1995).mp4", 2, 2, MediaKind::Movies, "video/mp4").unwrap();
+        let added: i64 = conn.query_row("SELECT added_at FROM files WHERE id = ?1", [new], |r| r.get(0)).unwrap();
+        assert_eq!(added, 1000);
+        let extras: i64 = conn
+            .query_row("SELECT added_at FROM files WHERE rel_path = 'Heat (1995) Extras.mkv'", [], |r| r.get(0))
+            .unwrap();
+        assert!(extras > 1000, "unrelated sibling untouched");
+
+        // Delete-before-create: bequeath then delete, the later insert
+        // finds nothing but keeps what it was given.
+        conn.execute("UPDATE files SET added_at = 500 WHERE id = ?1", [old]).unwrap();
+        bequeath_added_at(&conn, root, "Heat (1995).mkv").unwrap();
+        let added: i64 = conn.query_row("SELECT added_at FROM files WHERE id = ?1", [new], |r| r.get(0)).unwrap();
+        assert_eq!(added, 500);
+        delete_file(&conn, old).unwrap();
+        // Re-upserting the existing row never resets added_at.
+        upsert_pending(&conn, root, "Heat (1995).mp4", 3, 3, MediaKind::Movies, "video/mp4").unwrap();
+        let added: i64 = conn.query_row("SELECT added_at FROM files WHERE id = ?1", [new], |r| r.get(0)).unwrap();
+        assert_eq!(added, 500);
     }
 }
