@@ -100,29 +100,71 @@ struct RootConfig {
     kind: String,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum NfoState {
     Missing,
     Generated,
     HandWritten,
 }
 
-/// (state, has <rating>, has <plot>, has imdb uniqueid, has <set>).
-fn nfo_state(nfo_path: &Path) -> (NfoState, bool, bool, bool, bool) {
-    match std::fs::read_to_string(nfo_path) {
-        Err(_) => (NfoState::Missing, false, false, false, false),
-        Ok(text) => {
-            let has_rating = text.contains("<rating>");
-            let has_plot = text.contains("<plot>");
-            let has_imdb = text.contains("type=\"imdb\"");
-            let has_set = text.contains("<set");
-            if text.contains(MARKER) {
-                (NfoState::Generated, has_rating, has_plot, has_imdb, has_set)
-            } else {
-                (NfoState::HandWritten, has_rating, has_plot, has_imdb, has_set)
-            }
-        }
+/// What an existing sidecar tells us before any lookup.
+struct NfoProbe {
+    state: NfoState,
+    has_rating: bool,
+    has_plot: bool,
+    has_imdb: bool,
+    has_set: bool,
+    has_title: bool,
+    /// `<uniqueid type="tmdb">` — the identity, when the sidecar names one.
+    tmdb_id: Option<i64>,
+}
+
+impl NfoProbe {
+    /// A hand-written sidecar that carries only a TMDB id and no title:
+    /// the user's way of saying "this film, fill in the rest".
+    fn is_pin(&self) -> bool {
+        self.state == NfoState::HandWritten && self.tmdb_id.is_some() && !self.has_title
     }
+}
+
+fn nfo_state(nfo_path: &Path) -> NfoProbe {
+    let text = std::fs::read_to_string(nfo_path).unwrap_or_default();
+    let state = if text.is_empty() {
+        NfoState::Missing
+    } else if text.contains(MARKER) {
+        NfoState::Generated
+    } else {
+        NfoState::HandWritten
+    };
+    NfoProbe {
+        state,
+        has_rating: text.contains("<rating>"),
+        has_plot: text.contains("<plot>"),
+        has_imdb: text.contains("type=\"imdb\""),
+        has_set: text.contains("<set"),
+        has_title: text.contains("<title>") || text.contains("<title "),
+        tmdb_id: tmdb_uniqueid(&text),
+    }
+}
+
+/// The numeric value of `<uniqueid type="tmdb" ...>NNN</uniqueid>`, if
+/// present. Attribute order and quoting vary between writers (Kodi, tinyMediaManager,
+/// a text editor), so this scans rather than parses.
+fn tmdb_uniqueid(text: &str) -> Option<i64> {
+    let mut rest = text;
+    while let Some(start) = rest.find("<uniqueid") {
+        let tag = &rest[start..];
+        let close = tag.find('>')?;
+        let attrs = &tag[..close];
+        let body = &tag[close + 1..];
+        let end = body.find('<').unwrap_or(body.len());
+        let value = body[..end].trim();
+        if (attrs.contains("type=\"tmdb\"") || attrs.contains("type='tmdb'")) && !value.is_empty() {
+            return value.parse().ok();
+        }
+        rest = &tag[close + 1..];
+    }
+    None
 }
 
 /// Walk every video file in movie/tv roots and neutralize embedded
@@ -264,10 +306,13 @@ fn main() -> Result<()> {
         path: PathBuf,
         write_nfo: bool,
         write_poster: bool,
+        /// Identity fixed by the existing sidecar's TMDB id: no search.
+        tmdb_id: Option<i64>,
     }
     let mut tasks: Vec<Task> = Vec::new();
     let mut up_to_date = 0usize;
     let mut skipped_handwritten = 0usize;
+    let mut pinned = 0usize;
     for root in config.roots.iter().filter(|r| r.kind == "movies") {
         if !root.path.is_dir() {
             tracing::warn!("movies root {} not accessible; skipping", root.path.display());
@@ -281,14 +326,23 @@ fn main() -> Result<()> {
             .filter(|e| e.file_type().is_file() && is_video(e.path()))
         {
             let path = entry.into_path();
-            let (state, has_rating, _, has_imdb, has_set) =
-                nfo_state(&path.with_extension("nfo"));
+            let probe = nfo_state(&path.with_extension("nfo"));
+            let state = probe.state;
             let write_nfo = match state {
                 NfoState::Missing => true,
                 // A generated .nfo missing a later-added field (rating,
                 // imdb uniqueid, set) upgrades in place.
                 NfoState::Generated => {
-                    args.refresh || (!has_rating && !args.no_ratings) || !has_imdb || !has_set
+                    args.refresh
+                        || (!probe.has_rating && !args.no_ratings)
+                        || !probe.has_imdb
+                        || !probe.has_set
+                }
+                // A pin is a request to fill in the sidecar; any other
+                // hand-written .nfo is the user's and stays.
+                NfoState::HandWritten if probe.is_pin() => {
+                    pinned += 1;
+                    true
                 }
                 NfoState::HandWritten => {
                     if args.refresh && !args.force {
@@ -301,7 +355,7 @@ fn main() -> Result<()> {
                 && (!poster_path_for(&path).exists()
                     || (args.refresh && state == NfoState::Generated));
             if write_nfo || write_poster {
-                tasks.push(Task { path, write_nfo, write_poster });
+                tasks.push(Task { path, write_nfo, write_poster, tmdb_id: probe.tmdb_id });
             } else if state != NfoState::HandWritten || args.force {
                 up_to_date += 1;
             }
@@ -350,7 +404,8 @@ fn main() -> Result<()> {
 
             // A generated episode .nfo without a <plot> predates episode
             // overviews; upgrade it in place (like movie ratings).
-            let (ep_state, _, ep_has_plot, ep_has_imdb, _) = nfo_state(&path.with_extension("nfo"));
+            let probe = nfo_state(&path.with_extension("nfo"));
+            let (ep_state, ep_has_plot, ep_has_imdb) = (probe.state, probe.has_plot, probe.has_imdb);
             let write_nfo = match ep_state {
                 NfoState::Missing => true,
                 NfoState::Generated => args.refresh || !ep_has_plot || !ep_has_imdb,
@@ -399,7 +454,7 @@ fn main() -> Result<()> {
     }
 
     println!(
-        "movies: {} to enrich, {} up to date, {} hand-written .nfo (kept{})",
+        "movies: {} to enrich ({pinned} pinned by TMDB id), {} up to date, {} hand-written .nfo (kept{})",
         tasks.len(),
         up_to_date,
         skipped_handwritten,
@@ -424,11 +479,17 @@ fn main() -> Result<()> {
                 (true, false) => "nfo",
                 _ => "poster",
             };
-            println!(
-                "would enrich [{parts}]: {} -> \"{title}\"{}",
-                task.path.display(),
-                year.map(|y| format!(" ({y})")).unwrap_or_default()
-            );
+            match task.tmdb_id {
+                Some(id) => println!(
+                    "would enrich [{parts}]: {} -> TMDB id {id}",
+                    task.path.display()
+                ),
+                None => println!(
+                    "would enrich [{parts}]: {} -> \"{title}\"{}",
+                    task.path.display(),
+                    year.map(|y| format!(" ({y})")).unwrap_or_default()
+                ),
+            }
         }
         for plan in &series_plans {
             println!(
@@ -470,7 +531,13 @@ fn main() -> Result<()> {
     for (index, task) in tasks.iter().enumerate() {
         let stem = task.path.file_stem().unwrap_or_default().to_string_lossy();
         let (title, year) = nameparse::movie(&stem);
-        match tmdb.find_movie(&title, year) {
+        // A sidecar that names a TMDB id (a user's pin, or our own earlier
+        // match) settles the identity; searching is only for new files.
+        let lookup = match task.tmdb_id {
+            Some(id) => tmdb.movie_by_id(id),
+            None => tmdb.find_movie(&title, year),
+        };
+        match lookup {
             Ok(Some(info)) => {
                 if task.write_nfo {
                     let imdb_id = info.imdb_id.clone();
@@ -497,17 +564,32 @@ fn main() -> Result<()> {
                     }
                 }
                 println!(
-                    "[{}/{}] {} -> {} ({}) [{}]{poster_note}",
+                    "[{}/{}] {} -> {} ({}) [{}]{}{poster_note}",
                     index + 1,
                     tasks.len(),
                     stem,
                     info.title,
                     info.year.map(|y| y.to_string()).unwrap_or_else(|| "?".into()),
-                    info.genres.join(", ")
+                    info.genres.join(", "),
+                    if task.tmdb_id.is_some() { " (by id)" } else { "" }
                 );
             }
             Ok(None) => {
-                println!("[{}/{}] {} -> no TMDB match", index + 1, tasks.len(), stem);
+                match task.tmdb_id {
+                    Some(id) => println!(
+                        "[{}/{}] {} -> TMDB has no movie with id {id} (check the pin)",
+                        index + 1,
+                        tasks.len(),
+                        stem
+                    ),
+                    None => println!(
+                        "[{}/{}] {} -> no TMDB match for \"{title}\"{}",
+                        index + 1,
+                        tasks.len(),
+                        stem,
+                        year.map(|y| format!(" ({y})")).unwrap_or_default()
+                    ),
+                }
                 not_found.push(task.path.display().to_string());
             }
             // A hard API failure (bad key, network down) aborts; per-title
@@ -670,7 +752,10 @@ fn main() -> Result<()> {
         not_found.len()
     );
     if !not_found.is_empty() {
-        println!("no match (rename or hand-write an .nfo):");
+        println!(
+            "no match — rename, hand-write an .nfo, or pin the TMDB entry by saving\n\
+             <movie><uniqueid type=\"tmdb\">ID</uniqueid></movie> as <stem>.nfo:"
+        );
         for path in not_found {
             println!("  {path}");
         }
@@ -752,4 +837,59 @@ fn render_nfo(info: &tmdb::MovieInfo, rating: Option<f64>, imdb_id: Option<&str>
         info.tmdb_id
     ));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tmdb_uniqueid_reads_the_pin_form_and_kodi_forms() {
+        assert_eq!(
+            tmdb_uniqueid("<movie><uniqueid type=\"tmdb\">1304313</uniqueid></movie>"),
+            Some(1304313)
+        );
+        // Our own generated form: attribute order and a default flag.
+        assert_eq!(
+            tmdb_uniqueid("  <uniqueid type=\"imdb\">tt0120616</uniqueid>\n  <uniqueid type=\"tmdb\" default=\"true\">564</uniqueid>\n"),
+            Some(564)
+        );
+        assert_eq!(tmdb_uniqueid("<uniqueid default=\"true\" type='tmdb'> 42 </uniqueid>"), Some(42));
+        // Only imdb, or an empty tmdb element: no identity.
+        assert_eq!(tmdb_uniqueid("<uniqueid type=\"imdb\">tt0120616</uniqueid>"), None);
+        assert_eq!(tmdb_uniqueid("<uniqueid type=\"tmdb\"></uniqueid>"), None);
+        assert_eq!(tmdb_uniqueid("<movie><title>x</title></movie>"), None);
+    }
+
+    fn probe(text: &str) -> NfoProbe {
+        let dir = std::env::temp_dir().join(format!("media-enrich-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.nfo", text.len()));
+        std::fs::write(&path, text).unwrap();
+        let probe = nfo_state(&path);
+        std::fs::remove_file(&path).ok();
+        probe
+    }
+
+    #[test]
+    fn pin_is_a_hand_written_sidecar_with_only_an_id() {
+        let pin = probe("<movie><uniqueid type=\"tmdb\">1304313</uniqueid></movie>");
+        assert_eq!(pin.state, NfoState::HandWritten);
+        assert!(pin.is_pin());
+        assert_eq!(pin.tmdb_id, Some(1304313));
+
+        // A full hand-written sidecar that happens to carry the id is the
+        // user's own and must not be rewritten.
+        let full = probe("<movie><title>The Mummy</title><uniqueid type=\"tmdb\">1304313</uniqueid></movie>");
+        assert!(!full.is_pin());
+        assert_eq!(full.tmdb_id, Some(1304313));
+
+        // Our generated sidecar: not a pin, but its id is the identity.
+        let generated = probe(&format!("<!-- {MARKER} (TMDB) -->\n<movie><title>The Mummy</title><uniqueid type=\"tmdb\" default=\"true\">564</uniqueid></movie>"));
+        assert_eq!(generated.state, NfoState::Generated);
+        assert!(!generated.is_pin());
+        assert_eq!(generated.tmdb_id, Some(564));
+
+        assert_eq!(probe("").state, NfoState::Missing);
+    }
 }

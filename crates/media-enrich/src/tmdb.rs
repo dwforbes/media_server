@@ -47,6 +47,15 @@ impl Tmdb {
     }
 
     fn get(&self, path: &str, params: &[(&str, &str)]) -> Result<Value> {
+        match self.get_opt(path, params)? {
+            Some(json) => Ok(json),
+            None => bail!("TMDB {path} returned 404 Not Found"),
+        }
+    }
+
+    /// Like get, but a 404 is Ok(None) — the id-addressed endpoints use
+    /// it to tell "no such movie" apart from a real failure.
+    fn get_opt(&self, path: &str, params: &[(&str, &str)]) -> Result<Option<Value>> {
         let mut request = self.client.get(format!("{BASE}{path}")).query(params);
         if self.bearer {
             request = request.bearer_auth(&self.key);
@@ -58,10 +67,13 @@ impl Tmdb {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             bail!("TMDB rejected the API key (401) — check TMDB_API_KEY");
         }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         if !status.is_success() {
             bail!("TMDB {path} returned {status}");
         }
-        response.json().context("parsing TMDB response")
+        response.json().map(Some).context("parsing TMDB response")
     }
 
     /// Best match for (title, year). Search precision matters: TMDB's
@@ -69,27 +81,40 @@ impl Tmdb {
     /// rank a sibling film first — Deathly Hallows Part 1, with 2011 home
     /// releases, outranked Part 2 for year=2011. So: strict
     /// primary_release_year first, loose year as fallback (filename years
-    /// are sometimes regional), then no year. One details call (credits
-    /// and external ids appended) supplies genres, directors, imdb id,
-    /// and collection membership together.
+    /// are sometimes regional). A filename year is never dropped: a
+    /// year-less search for a remake's title returns the original (The
+    /// Mummy 2026 -> The Mummy 1999), and a wrong identity is worse than
+    /// none — an unmatched file is listed at the end and can be pinned.
     pub fn find_movie(&mut self, title: &str, year: Option<i64>) -> Result<Option<MovieInfo>> {
-        let mut result = None;
-        if let Some(y) = year {
-            result = self.search(title, Some(("primary_release_year", y)))?;
-            if result.is_none() {
-                result = self.search(title, Some(("year", y)))?;
-            }
-        }
-        if result.is_none() {
-            result = self.search(title, None)?;
-        }
+        let result = match year {
+            Some(y) => match self.search(title, Some(("primary_release_year", y)))? {
+                Some(hit) => Some(hit),
+                None => self.search(title, Some(("year", y)))?,
+            },
+            None => self.search(title, None)?,
+        };
         let Some(hit) = result else { return Ok(None) };
         let tmdb_id = hit.get("id").and_then(Value::as_i64).context("result missing id")?;
+        self.movie_details(tmdb_id, title)
+    }
 
-        let details = self.get(
+    /// A movie by its TMDB id — for sidecars that pin the identity.
+    /// None when TMDB has no such id (a typo in the pin).
+    pub fn movie_by_id(&self, tmdb_id: i64) -> Result<Option<MovieInfo>> {
+        self.movie_details(tmdb_id, "")
+    }
+
+    /// One details call (credits and external ids appended) supplies
+    /// genres, directors, imdb id, and collection membership together.
+    fn movie_details(&self, tmdb_id: i64, fallback_title: &str) -> Result<Option<MovieInfo>> {
+        let title = fallback_title;
+        let Some(details) = self.get_opt(
             &format!("/movie/{tmdb_id}"),
             &[("append_to_response", "credits,external_ids")],
-        )?;
+        )?
+        else {
+            return Ok(None);
+        };
         let genres = details
             .get("genres")
             .and_then(|g| g.as_array())

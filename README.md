@@ -157,6 +157,25 @@ unless you add `--force`. It reads the scanner's config (`--config`) to find the
 roots. Sidecar changes are noticed by the running scanner immediately (watch events),
 or at the next reconcile pass otherwise — the catalog tracks each sidecar's mtime.
 
+**Identity is by TMDB id once known.** A sidecar carrying
+`<uniqueid type="tmdb">ID</uniqueid>` (every generated one does) is refreshed by that
+id — never re-searched — so a match cannot drift between runs. A filename's year is
+never dropped from the search either: `The.Mummy.2026.mp4` with no 2026 hit is reported
+as unmatched rather than becoming *The Mummy* (1999).
+
+**Correcting a misidentified movie**: find the right entry on themoviedb.org (the id is
+in its URL, e.g. `…/movie/1304313-lee-cronin-s-the-mummy`), delete the wrong
+`<stem>-poster.jpg`, and save a one-line pin as `<stem>.nfo`:
+
+```xml
+<movie><uniqueid type="tmdb">1304313</uniqueid></movie>
+```
+
+The next run (automatic, or `media-enrich`) fetches that film by id and replaces the
+pin with a full sidecar and poster. A hand-written `.nfo` that has a `<title>` is not
+a pin: it is yours and stays as written (its tmdb id is still honoured under
+`--refresh --force`).
+
 Test with VLC (View → Playlist → Universal Plug'n'Play) or BubbleUPnP. The server
 announces itself over SSDP (every `ssdp_alive_secs`, default 120s, each announcement
 sent twice — multicast is lossy, wifi especially) and sends `ssdp:byebye` on shutdown.
