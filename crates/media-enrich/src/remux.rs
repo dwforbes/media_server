@@ -260,6 +260,23 @@ pub enum Outcome {
     Remuxed(Plan),
 }
 
+/// A fresh temp path beside the media file: `.{stem}.{tag}-{pid}.mp4`,
+/// dot-prefixed so the scanner ignores it and pid-suffixed so no other
+/// process can ever write to the same name. Leftovers from earlier runs
+/// (`.{stem}.{tag}*`, e.g. after a crash) are removed first — with the run
+/// lock held nothing else can be using them.
+pub(crate) fn temp_beside(dir: &Path, stem: &str, tag: &str) -> PathBuf {
+    let stale_prefix = format!(".{stem}.{tag}");
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&stale_prefix) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    dir.join(format!(".{stem}.{tag}-{}.mp4", std::process::id()))
+}
+
 fn is_mkv(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -286,8 +303,7 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
 
     let dir = media.parent().unwrap_or_else(|| Path::new("."));
     let stem = media.file_stem().unwrap_or_default().to_string_lossy();
-    let temp: PathBuf = dir.join(format!(".{stem}.remux-tmp.mp4"));
-    let _ = std::fs::remove_file(&temp);
+    let temp = temp_beside(dir, &stem, "remux-tmp");
     let status = Command::new(ffmpeg)
         .args(ffmpeg_args(&plan, media, &temp))
         .status()
@@ -302,7 +318,13 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
 
     // Verify before touching the original: every video stream, every audio
     // stream plus its twins, every text subtitle, duration unchanged.
-    let after = probe(ffprobe, &temp)?;
+    let after = match probe(ffprobe, &temp) {
+        Ok(after) => after,
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(err.context("verifying the remuxed file; original untouched"));
+        }
+    };
     let count = |kind: StreamKind| after.streams.iter().filter(|s| s.kind == kind).count();
     let want_audio = plan.audio.len() + plan.twins();
     let sane = count(StreamKind::Video) == plan.video.len()

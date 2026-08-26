@@ -113,10 +113,9 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
     // rename), with a name the scanner ignores (leading dot).
     let dir = media.parent().unwrap_or_else(|| Path::new("."));
     let stem = media.file_stem().unwrap_or_default().to_string_lossy();
-    let temp: PathBuf = dir.join(format!(".{stem}.subtitles-tmp.mp4"));
-    let _ = std::fs::remove_file(&temp);
+    let temp = crate::remux::temp_beside(dir, &stem, "subtitles-tmp");
     let srt_input: PathBuf = if needs_conversion {
-        let converted = dir.join(format!(".{stem}.subtitles-tmp.srt"));
+        let converted = temp.with_extension("srt");
         std::fs::write(&converted, &srt_text)
             .with_context(|| format!("writing {}", converted.display()))?;
         converted
@@ -156,7 +155,13 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
     // Verify before replacing anything: every video/audio stream preserved,
     // a subtitle present, duration unchanged. Data/attachment streams are
     // ignored on both sides — faithful copies of odd containers carry them.
-    let after = probe(ffprobe, &temp)?;
+    let after = match probe(ffprobe, &temp) {
+        Ok(after) => after,
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(err.context("verifying the muxed file; original untouched"));
+        }
+    };
     let sane = after.subtitle >= 1
         && after.video == before.video
         && after.audio == before.audio

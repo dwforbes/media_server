@@ -65,6 +65,9 @@ struct Args {
 #[derive(Deserialize)]
 struct ScannerConfig {
     roots: Vec<RootConfig>,
+    /// Catalog location (shared with the scanner); the run lock lives
+    /// beside it.
+    db_path: Option<PathBuf>,
     #[serde(default = "default_ffprobe")]
     ffprobe_path: String,
     #[serde(default)]
@@ -73,6 +76,36 @@ struct ScannerConfig {
 
 fn default_ffprobe() -> String {
     "ffprobe".into()
+}
+
+/// One media-enrich at a time. Two runs at once — the scanner's auto-run
+/// alongside a manual one — would remux/embed the same files together,
+/// each unlinking the other's temp output and wasting a full remux. The
+/// lock file sits beside the catalog (already writable under the scanner
+/// unit's sandbox) and is released by the OS when the process exits, so a
+/// crash never leaves it stuck. The returned handle must stay alive for
+/// the whole run.
+fn acquire_run_lock(db_path: &Path) -> Result<std::fs::File> {
+    let path = db_path.with_file_name("enrich.lock");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => bail!(
+            "another media-enrich run is in progress (holding {}); exiting",
+            path.display()
+        ),
+        Err(std::fs::TryLockError::Error(err)) => {
+            Err(err).with_context(|| format!("locking {}", path.display()))
+        }
+    }
 }
 
 /// The scanner's [enrich] section; only strip_titles concerns this tool,
@@ -352,6 +385,15 @@ fn main() -> Result<()> {
             .with_context(|| format!("reading {}", args.config.display()))?,
     )
     .with_context(|| format!("parsing {}", args.config.display()))?;
+
+    // Dry runs only probe, so they may overlap a real run.
+    let _run_lock = if args.dry_run {
+        None
+    } else {
+        Some(acquire_run_lock(
+            &config.db_path.clone().unwrap_or_else(media_db::open::default_db_path),
+        )?)
+    };
 
     let do_strip = args.strip_titles || config.enrich.strip_titles;
     let do_subs = args.embed_subtitles || config.enrich.embed_subtitles;
