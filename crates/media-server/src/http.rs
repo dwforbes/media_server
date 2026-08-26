@@ -736,10 +736,6 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     }
 }
 
-/// Resume support: the playback position rides in the URL fragment, so a
-/// paused (or scrubbed) player yields a shareable/bookmarkable link that
-/// picks up where it left off. Fragments never reach the server, so this
-/// has to be client side.
 /// Hover/focus card on the player page. Pure CSS: no script, and
 /// :focus-within means keyboard users get it too. Touch devices can't
 /// hover, which is why the season/episode context is also rendered
@@ -763,6 +759,10 @@ body.player a:hover, body.player a:active,
 .infowrap .card a:hover, .infowrap .card a:active { color: #cef; }
 </style>"#;
 
+/// Resume support: the playback position rides in the URL fragment, so a
+/// paused (or scrubbed) player yields a shareable/bookmarkable link that
+/// picks up where it left off. Fragments never reach the server, so this
+/// has to be client side. Also the keyboard: ← / → skip 10 seconds.
 const RESUME_SCRIPT: &str = r#"<script>
 (function () {
   var v = document.querySelector('video');
@@ -783,6 +783,21 @@ const RESUME_SCRIPT: &str = r#"<script>
   v.addEventListener('timeupdate', stamp);
   v.addEventListener('pause', stamp);
   v.addEventListener('seeked', stamp);
+  // Arrow keys skip 10 s. Registered on the capture phase and stopping
+  // propagation so the native controls (which seek by their own step
+  // when the <video> is focused) never see the key — otherwise the two
+  // seeks would stack. Modified keys and text fields are left alone.
+  document.addEventListener('keydown', function (e) {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    var step = e.key === 'ArrowLeft' ? -10 : e.key === 'ArrowRight' ? 10 : 0;
+    if (!step) return;
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var end = isFinite(v.duration) ? v.duration : Infinity;
+    try { v.currentTime = Math.max(0, Math.min(end, (v.currentTime || 0) + step)); } catch (err) {}
+  }, true);
   var start = parseFloat((location.hash || '').replace(/[^0-9.]/g, ''));
   if (!(start > 0)) return;
   honoured = false;
@@ -1070,6 +1085,7 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
          <source src=\"{}/media/{id}\" type=\"{}\">{track}\
          Your browser cannot play this format.</video>\
          <p id=\"resume\" style=\"color:#9c9;font-size:.9em\"></p>\
+         <p style=\"color:#666;font-size:.8em\">← / → skip 10 seconds</p>\
          {subs_async}{RESUME_SCRIPT}",
         state.base_url,
         xml_escape(&servable.mime)
