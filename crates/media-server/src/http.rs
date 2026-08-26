@@ -32,6 +32,12 @@ pub struct AppState {
     pub ffmpeg: String,
     pub ffprobe: String,
     pub vtt_cache: std::path::PathBuf,
+    /// Subtitle extractions in progress, by file id. The first request
+    /// spawns one detached ffmpeg and parks a receiver here; every later
+    /// request for the same file awaits that receiver instead of starting
+    /// another ffmpeg. The entry is removed (after the cache file lands)
+    /// just before the sender is dropped, which is what wakes the waiters.
+    pub subs_inflight: std::sync::Mutex<std::collections::HashMap<i64, tokio::sync::watch::Receiver<()>>>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -705,33 +711,75 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
         }
     }
 
-    // 3. Extract the best text track (demux only, no decoding). Files with
-    // only bitmap tracks (PGS/VobSub) have nothing extractable.
-    let Some(ordinal) = text_sub_stream(&state.ffprobe, &servable.abs_path).await else {
-        return StatusCode::NOT_FOUND.into_response();
+    // 3. Extract (or join an extraction already running for this file),
+    // then serve whatever it left in the cache.
+    let mut rx = {
+        let mut inflight = state.subs_inflight.lock().unwrap_or_else(|e| e.into_inner());
+        match inflight.get(&id) {
+            Some(rx) => rx.clone(),
+            None => {
+                let (tx, rx) = tokio::sync::watch::channel(());
+                inflight.insert(id, rx.clone());
+                let state = state.clone();
+                let path = servable.abs_path.clone();
+                let cache = cache.clone();
+                // Detached from the request: a client that navigates away
+                // mid-extraction (closing the connection) must not kill the
+                // ffmpeg that everyone else is waiting on.
+                tokio::spawn(async move {
+                    extract_subs(&state, id, &path, &cache).await;
+                    state
+                        .subs_inflight
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id);
+                    drop(tx);
+                });
+                rx
+            }
+        }
+    };
+    // Err once the sender is dropped, i.e. the extraction finished.
+    let _ = rx.changed().await;
+    match std::fs::read_to_string(&cache) {
+        Ok(body) => vtt_response(body),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Extract the best text track (demux only, no decoding) to `cache`,
+/// written via a temp file and rename so a concurrent reader never sees a
+/// partial file. Files with only bitmap tracks (PGS/VobSub) have nothing
+/// extractable and leave no cache file.
+async fn extract_subs(state: &AppState, id: i64, path: &std::path::Path, cache: &std::path::Path) {
+    let Some(ordinal) = text_sub_stream(&state.ffprobe, path).await else {
+        tracing::debug!("no text subtitle track in {id}");
+        return;
     };
     let output = tokio::process::Command::new(&state.ffmpeg)
         .args(["-v", "error", "-nostdin", "-i"])
-        .arg(&servable.abs_path)
+        .arg(path)
         .args(["-map", &format!("0:s:{ordinal}"), "-f", "webvtt", "-"])
         .output()
         .await;
     match output {
         Ok(out) if out.status.success() && !out.stdout.is_empty() => {
-            let body = String::from_utf8_lossy(&out.stdout).to_string();
-            let _ = std::fs::write(&cache, &body);
-            vtt_response(body)
+            let tmp = cache.with_extension("vtt.part");
+            let written = std::fs::write(&tmp, &out.stdout)
+                .and_then(|_| std::fs::rename(&tmp, cache));
+            if let Err(err) = written {
+                tracing::warn!("could not write subtitle cache for {id}: {err}");
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
         Ok(out) => {
             tracing::debug!(
                 "no extractable subtitles for {id}: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             );
-            StatusCode::NOT_FOUND.into_response()
         }
         Err(err) => {
             tracing::debug!("ffmpeg unavailable for subtitle extraction: {err}");
-            StatusCode::NOT_FOUND.into_response()
         }
     }
 }
@@ -1046,7 +1094,13 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
             ),
             String::new(),
         )
-    } else if text_sub_stream(&state.ffprobe, &servable.abs_path).await.is_some() {
+    } else if state
+        .subs_inflight
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&id)
+        || text_sub_stream(&state.ffprobe, &servable.abs_path).await.is_some()
+    {
         (
             String::new(),
             format!(

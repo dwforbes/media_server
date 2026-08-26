@@ -74,6 +74,7 @@ async fn main() -> Result<()> {
             let _ = std::fs::create_dir_all(&dir);
             dir
         },
+        subs_inflight: Default::default(),
     });
 
     // Bump SystemUpdateID whenever the scanner commits, so browsing clients
