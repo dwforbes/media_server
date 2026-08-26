@@ -35,7 +35,7 @@ pub fn finalize_episode(
 
 const EPISODE_SELECT: &str = "
     SELECT f.id, f.mime, f.size, f.duration_ms, f.width, f.height,
-           t.series, t.season, t.episode, t.title, f.art IS NOT NULL
+           t.series, t.season, t.episode, t.title, f.art IS NOT NULL, t.rating
     FROM tv_episodes t JOIN files f ON f.id = t.file_id
     WHERE f.status = 'ready'";
 
@@ -54,6 +54,7 @@ fn episode_from_row(row: &Row) -> rusqlite::Result<BrowseItem> {
     item.season = row.get(7)?;
     item.episode = row.get(8)?;
     item.has_art = row.get(10)?;
+    item.rating = row.get(11)?;
     Ok(item)
 }
 

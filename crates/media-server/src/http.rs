@@ -417,18 +417,7 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
 
     let mut rows = String::new();
     for item in &hits {
-        let chip = if item.kind == media_db::MediaKind::Music {
-            String::new()
-        } else {
-            uhd_chip(is_uhd(item.width, item.height))
-        };
-        rows.push_str(&format!(
-            "<li>{chip}<a href=\"/item/{0}\">{1}</a> \
-             <small><a href=\"{2}/media/{0}\">[▶ play]</a></small></li>",
-            item.file_id,
-            xml_escape(&item.title),
-            state.base_url
-        ));
+        rows.push_str(&listing_row(item, &state.base_url));
     }
     let summary = if terms.is_empty() {
         "Enter a search term.".to_string()
@@ -553,20 +542,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
                  <small><a href=\"/playlist/id/{id}.m3u\">[playlist]</a></small></li>",
                 xml_escape(&title)
             )),
-            tree::Entry::Item { item, .. } => {
-                let chip = if item.kind == media_db::MediaKind::Music {
-                    String::new()
-                } else {
-                    uhd_chip(is_uhd(item.width, item.height))
-                };
-                rows.push_str(&format!(
-                    "<li>{chip}<a href=\"/item/{0}\">{1}</a> \
-                     <small><a href=\"{2}/media/{0}\">[▶ play]</a></small></li>",
-                    item.file_id,
-                    xml_escape(&item.title),
-                    state.base_url
-                ))
-            }
+            tree::Entry::Item { item, .. } => rows.push_str(&listing_row(&item, &state.base_url)),
         }
     }
     let html = format!(
@@ -1131,6 +1107,46 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
 
 fn is_uhd(width: Option<i64>, height: Option<i64>) -> bool {
     width.unwrap_or(0) > 1920 || height.unwrap_or(0) > 1080
+}
+
+/// One listing row: 4K chip, title, play link, and the IMDb rating (movies
+/// and episodes that have one) boxed at the right edge.
+fn listing_row(item: &media_db::BrowseItem, base_url: &str) -> String {
+    let chip = if item.kind == media_db::MediaKind::Music {
+        String::new()
+    } else {
+        uhd_chip(is_uhd(item.width, item.height))
+    };
+    format!(
+        "<li style=\"display:flex;align-items:center\">{chip}<a href=\"/item/{0}\">{1}</a>\
+         <small style=\"margin-left:.4em\"><a href=\"{2}/media/{0}\">[▶ play]</a></small>\
+         {3}</li>",
+        item.file_id,
+        xml_escape(&item.title),
+        base_url,
+        rating_chip(item.rating)
+    )
+}
+
+/// The IMDb rating as a small coloured box: green from 7.5, orange from
+/// 5.5, red below. Empty when the item has no rating.
+fn rating_chip(rating: Option<f64>) -> String {
+    let Some(rating) = rating else {
+        return String::new();
+    };
+    let colour = if rating >= 7.5 {
+        "#2e7d32"
+    } else if rating >= 5.5 {
+        "#ef6c00"
+    } else {
+        "#c62828"
+    };
+    format!(
+        "<span title=\"IMDb rating\" style=\"margin-left:auto;flex-shrink:0;\
+         font-size:.75em;font-weight:bold;color:#fff;background:{colour};\
+         border-radius:3px;padding:.1em .45em;min-width:2.4em;\
+         text-align:center\">{rating:.1}</span>"
+    )
 }
 
 /// A small "4K" chip; hidden-but-space-reserving for non-4K rows so

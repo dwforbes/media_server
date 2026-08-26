@@ -496,7 +496,8 @@ const ITEM_SELECT: &str = "
            f.art IS NOT NULL,
            m.title, m.year,
            t.series, t.season, t.episode, t.title,
-           mu.title, mu.artist, mu.album, mu.track_no, mu.year
+           mu.title, mu.artist, mu.album, mu.track_no, mu.year,
+           m.rating, t.rating
     FROM files f
     LEFT JOIN movies m        ON m.file_id  = f.id
     LEFT JOIN tv_episodes t   ON t.file_id  = f.id
@@ -532,6 +533,7 @@ fn item_from_row(row: &Row) -> rusqlite::Result<BrowseItem> {
     item.artist = row.get(16)?;
     item.album = row.get(17)?;
     item.track_no = row.get(18)?;
+    item.rating = row.get::<_, Option<f64>>(20)?.or(row.get(21)?);
     Ok(item)
 }
 
