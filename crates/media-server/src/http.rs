@@ -1128,22 +1128,23 @@ fn listing_row(item: &media_db::BrowseItem, base_url: &str) -> String {
     )
 }
 
-/// The IMDb rating as a small coloured box: green from 7.5, orange from
+/// The IMDb rating as a small coloured box: green from 7.5, yellow from
 /// 5.5, red below. Empty when the item has no rating.
 fn rating_chip(rating: Option<f64>) -> String {
     let Some(rating) = rating else {
         return String::new();
     };
-    let colour = if rating >= 7.5 {
-        "#2e7d32"
+    // (background, text): white text on green/red, dark on yellow.
+    let (background, colour) = if rating >= 7.5 {
+        ("#2e7d32", "#fff")
     } else if rating >= 5.5 {
-        "#ef6c00"
+        ("#fbc02d", "#222")
     } else {
-        "#c62828"
+        ("#c62828", "#fff")
     };
     format!(
         "<span title=\"IMDb rating\" style=\"margin-left:auto;flex-shrink:0;\
-         font-size:.75em;font-weight:bold;color:#fff;background:{colour};\
+         font-size:.75em;font-weight:bold;color:{colour};background:{background};\
          border-radius:3px;padding:.1em .45em;min-width:2.4em;\
          text-align:center\">{rating:.1}</span>"
     )
