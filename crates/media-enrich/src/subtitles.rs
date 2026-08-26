@@ -1,6 +1,9 @@
-//! Embed a sidecar .srt into MP4 files that have no subtitle stream.
+//! Sidecar subtitles in both directions: embed a sidecar .srt into MP4
+//! files that have none, and extract an embedded text track to a sidecar
+//! .srt so every player (and the web player, without on-demand work) can
+//! use it.
 //!
-//! Equivalent to the manual recipe
+//! Embedding: equivalent to the manual recipe
 //!   ffmpeg -i in.mp4 -i in.srt -c copy -c:s mov_text out.mp4
 //! — existing streams are copied untouched; only a subtitle track is
 //! added. Unlike every other enrichment step this replaces a whole media
@@ -113,7 +116,7 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
     // rename), with a name the scanner ignores (leading dot).
     let dir = media.parent().unwrap_or_else(|| Path::new("."));
     let stem = media.file_stem().unwrap_or_default().to_string_lossy();
-    let temp = crate::remux::temp_beside(dir, &stem, "subtitles-tmp");
+    let temp = crate::remux::temp_beside(dir, &stem, "subtitles-tmp", "mp4");
     let srt_input: PathBuf = if needs_conversion {
         let converted = temp.with_extension("srt");
         std::fs::write(&converted, &srt_text)
@@ -179,4 +182,61 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
     std::fs::rename(&temp, media)
         .with_context(|| format!("replacing {}", media.display()))?;
     Ok(Outcome::Embedded)
+}
+
+pub enum ExtractOutcome {
+    Skipped(&'static str),
+    /// Dry run: the track that would be extracted.
+    WouldExtract(media_db::subtitles::Track),
+    Extracted(media_db::subtitles::Track),
+}
+
+/// Extract the best embedded text subtitle track to `{stem}.srt` when no
+/// such sidecar exists. Never overwrites: a sidecar that is already there,
+/// hand-made or not, is left alone. Forced tracks lose to full captions,
+/// SDH preferred (see media_db::subtitles).
+pub fn extract_if_missing(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: bool) -> Result<ExtractOutcome> {
+    let srt = media.with_extension("srt");
+    if srt.exists() {
+        return Ok(ExtractOutcome::Skipped("sidecar exists"));
+    }
+    let output = Command::new(ffprobe)
+        .args(media_db::subtitles::ffprobe_args())
+        .arg(media)
+        .output()
+        .with_context(|| format!("running {ffprobe}"))?;
+    if !output.status.success() {
+        bail!("ffprobe failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    let tracks = media_db::subtitles::parse_ffprobe(&String::from_utf8_lossy(&output.stdout));
+    let Some(track) = media_db::subtitles::best_text_track(&tracks).cloned() else {
+        return Ok(ExtractOutcome::Skipped("no text subtitle track"));
+    };
+    if dry_run {
+        return Ok(ExtractOutcome::WouldExtract(track));
+    }
+
+    let dir = media.parent().unwrap_or_else(|| Path::new("."));
+    let stem = media.file_stem().unwrap_or_default().to_string_lossy();
+    let temp = crate::remux::temp_beside(dir, &stem, "subtitles-extract", "srt");
+    let status = Command::new(ffmpeg)
+        .args(["-v", "error", "-nostdin", "-i"])
+        .arg(media)
+        .args(["-map", &format!("0:s:{}", track.ordinal), "-f", "srt", "-y"])
+        .arg(&temp)
+        .status()
+        .with_context(|| format!("running {ffmpeg}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&temp);
+        bail!("ffmpeg extraction failed ({status})");
+    }
+    // A track can exist yet carry no cues (empty placeholder tracks are
+    // not rare); don't leave an empty sidecar that would mask the fallback.
+    let text = std::fs::read_to_string(&temp).unwrap_or_default();
+    if !text.contains("-->") {
+        let _ = std::fs::remove_file(&temp);
+        bail!("extracted track {} has no cues", track.ordinal);
+    }
+    std::fs::rename(&temp, &srt).with_context(|| format!("placing {}", srt.display()))?;
+    Ok(ExtractOutcome::Extracted(track))
 }

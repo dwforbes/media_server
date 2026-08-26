@@ -5,6 +5,7 @@ pub mod nameparse;
 pub mod open;
 pub mod queries;
 pub mod schema;
+pub mod subtitles;
 pub mod textenc;
 
 pub use models::*;

@@ -642,19 +642,13 @@ fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-const TEXT_SUB_CODECS: &[&str] =
-    &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text", "subviewer"];
-
-/// The ordinal (among subtitle streams) of the best text subtitle track:
-/// English text track preferred, else the first text track. None when the
-/// file has no text subtitles (bitmap PGS/VobSub can't become WebVTT).
+/// The ordinal (among subtitle streams) of the text subtitle track worth
+/// showing — full English captions, SDH preferred, forced tracks last (see
+/// media_db::subtitles). None when the file has no text subtitles (bitmap
+/// PGS/VobSub can't become WebVTT).
 async fn text_sub_stream(ffprobe: &str, path: &std::path::Path) -> Option<usize> {
     let out = tokio::process::Command::new(ffprobe)
-        .args([
-            "-v", "error", "-select_streams", "s",
-            "-show_entries", "stream=codec_name:stream_tags=language",
-            "-of", "csv=p=0",
-        ])
+        .args(media_db::subtitles::ffprobe_args())
         .arg(path)
         .output()
         .await
@@ -662,20 +656,8 @@ async fn text_sub_stream(ffprobe: &str, path: &std::path::Path) -> Option<usize>
     if !out.status.success() {
         return None;
     }
-    let mut first_text = None;
-    for (ordinal, line) in String::from_utf8_lossy(&out.stdout).lines().enumerate() {
-        let mut fields = line.split(',');
-        let codec = fields.next().unwrap_or("").trim();
-        let lang = fields.next().unwrap_or("").trim().to_lowercase();
-        if !TEXT_SUB_CODECS.contains(&codec) {
-            continue;
-        }
-        if lang == "eng" || lang == "en" {
-            return Some(ordinal);
-        }
-        first_text.get_or_insert(ordinal);
-    }
-    first_text
+    let tracks = media_db::subtitles::parse_ffprobe(&String::from_utf8_lossy(&out.stdout));
+    media_db::subtitles::best_text_track(&tracks).map(|t| t.ordinal)
 }
 
 /// Subtitles as WebVTT: the .srt sidecar when present, else the embedded

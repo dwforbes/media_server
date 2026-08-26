@@ -35,6 +35,12 @@ strip_titles = true
 # stream (ffmpeg stream copy, mov_text track added; verified, then the
 # file is replaced atomically). Replaces whole media files — opt-in.
 embed_subtitles = true
+# Extract the best embedded text subtitle track (full English captions,
+# SDH preferred, "forced" foreign-parts-only tracks last) to a same-name
+# .srt sidecar wherever one is missing, so every player has it and the
+# web player needs no on-demand extraction. Only adds sidecars; on by
+# default.
+#extract_subtitles = true
 #ffmpeg_path = "ffmpeg"
 
 [[roots]]

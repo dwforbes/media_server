@@ -315,6 +315,25 @@ replacement), so it is conservative: mux to a temp file in the same directory, v
 the result with ffprobe (stream count, subtitle present, duration unchanged), then a
 single atomic rename. Opt-in; needs `ffmpeg` on the PATH (`ffmpeg_path` otherwise).
 
+### Extracting embedded subtitles to sidecars
+
+The reverse direction runs by default: for every video that has **no** same-name
+`.srt`, enrichment extracts the best embedded text subtitle track to `{stem}.srt`
+(`ffmpeg -map 0:s:N -f srt`), so VLC, Infuse, Kodi and UPnP renderers can all use it
+and the web player has captions the moment playback starts. "Best" means full
+captions over a **forced** track (foreign-language passages only — often listed
+first and a poor default): English is preferred, SDH/CC (full dialogue plus sound
+cues) over plain, forced tracks last, judged from the container's `forced` /
+`hearing_impaired` flags and the track title. Bitmap tracks (PGS, VobSub) are not
+text and are left alone, as is any `.srt` that already exists — hand-made sidecars
+are never overwritten. Disable with `extract_subtitles = false` (or
+`media-enrich --no-extract-subtitles`).
+
+The web player falls back to extracting on demand — same track choice — into a
+`vtt-cache` directory beside the catalog, for files enrichment has not reached yet
+(or could not write beside). Concurrent viewers of the same file share one
+extraction.
+
 ### Remuxing MKV to MP4
 
 Matroska is fine for TVs and VLC but not for browsers: Firefox won't range-stream it

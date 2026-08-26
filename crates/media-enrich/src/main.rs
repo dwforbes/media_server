@@ -54,6 +54,10 @@ struct Args {
     /// AAC twin). Also enabled by remux_mkv = true in the [enrich] section.
     #[arg(long)]
     remux_mkv: bool,
+    /// Skip extracting embedded text subtitle tracks to .srt sidecars (on
+    /// by default; also disabled by extract_subtitles = false in [enrich]).
+    #[arg(long)]
+    no_extract_subtitles: bool,
     /// Re-download the cached IMDb ratings dataset when older than this.
     #[arg(long, default_value_t = 7)]
     ratings_max_age_days: u64,
@@ -127,6 +131,11 @@ struct EnrichSection {
     /// after verification and removes the .mkv). Opt-in.
     #[serde(default)]
     remux_mkv: bool,
+    /// Extract the best embedded text subtitle track of every video that
+    /// has no .srt sidecar to `{stem}.srt`, ahead of playback. Only adds a
+    /// sidecar; never touches media files. On by default.
+    #[serde(default = "default_true")]
+    extract_subtitles: bool,
     #[serde(default = "default_ffmpeg")]
     ffmpeg_path: String,
     #[serde(flatten)]
@@ -135,6 +144,10 @@ struct EnrichSection {
 
 fn default_ffmpeg() -> String {
     "ffmpeg".into()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -248,10 +261,72 @@ fn strip_embedded_titles(config: &ScannerConfig) {
     }
 }
 
+/// Extract embedded text subtitles to .srt sidecars wherever one is
+/// missing. Dry run: probe and report only.
+fn extract_embedded_subtitles(config: &ScannerConfig, dry_run: bool) {
+    let mut extracted = 0usize;
+    let mut planned = 0usize;
+    for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
+        if !root.path.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&root.path)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .flatten()
+            .filter(|e| e.file_type().is_file() && is_video(e.path()))
+        {
+            let path = entry.path();
+            // Cheap pre-check before spending an ffprobe call.
+            if path.with_extension("srt").exists() {
+                continue;
+            }
+            match subtitles::extract_if_missing(
+                &config.enrich.ffmpeg_path,
+                &config.ffprobe_path,
+                path,
+                dry_run,
+            ) {
+                Ok(subtitles::ExtractOutcome::Extracted(track)) => {
+                    println!(
+                        "extracted subtitles (track {}: {}) to {}",
+                        track.ordinal,
+                        track.describe(),
+                        path.with_extension("srt").display()
+                    );
+                    extracted += 1;
+                }
+                Ok(subtitles::ExtractOutcome::WouldExtract(track)) => {
+                    println!(
+                        "would extract subtitles (track {}: {}) from {}",
+                        track.ordinal,
+                        track.describe(),
+                        path.display()
+                    );
+                    planned += 1;
+                }
+                Ok(subtitles::ExtractOutcome::Skipped(why)) => {
+                    tracing::debug!("{}: subtitles not extracted ({why})", path.display());
+                }
+                Err(err) => eprintln!("{}: subtitle extraction failed: {err:#}", path.display()),
+            }
+        }
+    }
+    if dry_run {
+        if planned > 0 {
+            println!("(dry run) videos whose subtitles would be extracted: {planned}");
+        }
+    } else if extracted > 0 {
+        println!("subtitle sidecars extracted: {extracted}");
+    }
+}
+
 /// Is this one of our own temp outputs (`.{stem}.remux-tmp*.mp4`,
 /// `.{stem}.subtitles-tmp*.mp4/.srt`)?
 fn is_enrich_temp(name: &str) -> bool {
-    name.starts_with('.') && (name.contains(".remux-tmp") || name.contains(".subtitles-tmp"))
+    name.starts_with('.')
+        && (name.contains(".remux-tmp") || name.contains(".subtitles-tmp") || name.contains(".subtitles-extract"))
 }
 
 /// Remove every temp output left under the video roots by earlier runs
@@ -440,10 +515,15 @@ fn main() -> Result<()> {
     let do_strip = args.strip_titles || config.enrich.strip_titles;
     let do_subs = args.embed_subtitles || config.enrich.embed_subtitles;
     let do_remux = args.remux_mkv || config.enrich.remux_mkv;
+    let do_extract = !args.no_extract_subtitles && config.enrich.extract_subtitles;
     if args.dry_run {
-        // Remux planning is probe-only, so the dry run can show it in full.
+        // Remux and extraction planning are probe-only, so the dry run can
+        // show them in full.
         if do_remux {
             remux_mkv_files(&config, true);
+        }
+        if do_extract {
+            extract_embedded_subtitles(&config, true);
         }
         if do_strip {
             println!("(dry run: embedded-title stripping skipped)");
@@ -459,6 +539,11 @@ fn main() -> Result<()> {
         }
         if do_subs {
             embed_sidecar_subtitles(&config);
+        }
+        // After remux (the MP4 is what gets probed) and after embedding
+        // (files that just gained a track from their sidecar keep it).
+        if do_extract {
+            extract_embedded_subtitles(&config, false);
         }
         if do_strip {
             strip_embedded_titles(&config);

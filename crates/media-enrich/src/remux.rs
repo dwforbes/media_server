@@ -260,12 +260,12 @@ pub enum Outcome {
     Remuxed(Plan),
 }
 
-/// A fresh temp path beside the media file: `.{stem}.{tag}-{pid}.mp4`,
+/// A fresh temp path beside the media file: `.{stem}.{tag}-{pid}.{ext}`,
 /// dot-prefixed so the scanner ignores it and pid-suffixed so no other
 /// process can ever write to the same name. Leftovers from earlier runs
 /// (`.{stem}.{tag}*`, e.g. after a crash) are removed first — with the run
 /// lock held nothing else can be using them.
-pub(crate) fn temp_beside(dir: &Path, stem: &str, tag: &str) -> PathBuf {
+pub(crate) fn temp_beside(dir: &Path, stem: &str, tag: &str, ext: &str) -> PathBuf {
     let stale_prefix = format!(".{stem}.{tag}");
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -274,7 +274,7 @@ pub(crate) fn temp_beside(dir: &Path, stem: &str, tag: &str) -> PathBuf {
             }
         }
     }
-    dir.join(format!(".{stem}.{tag}-{}.mp4", std::process::id()))
+    dir.join(format!(".{stem}.{tag}-{}.{ext}", std::process::id()))
 }
 
 fn is_mkv(path: &Path) -> bool {
@@ -303,7 +303,7 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
 
     let dir = media.parent().unwrap_or_else(|| Path::new("."));
     let stem = media.file_stem().unwrap_or_default().to_string_lossy();
-    let temp = temp_beside(dir, &stem, "remux-tmp");
+    let temp = temp_beside(dir, &stem, "remux-tmp", "mp4");
     let status = Command::new(ffmpeg)
         .args(ffmpeg_args(&plan, media, &temp))
         .status()

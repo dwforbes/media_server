@@ -55,6 +55,11 @@ pub struct EnrichConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub remux_mkv: bool,
+    /// Read by media-enrich: extract embedded text subtitles to .srt
+    /// sidecars (default on). Accepted here; the scanner does not act on it.
+    #[serde(default = "default_true")]
+    #[allow(dead_code)]
+    pub extract_subtitles: bool,
     /// Read by media-enrich: ffmpeg binary for subtitle embedding and remuxing.
     #[serde(default)]
     #[allow(dead_code)]
