@@ -1154,8 +1154,10 @@ async fn item_page(
     if let Some(year) = detail.year {
         heading.push_str(&format!(" ({year})"));
     }
+    // The 4K chip is markup for the <h1> only; <title> takes the plain text.
+    let mut heading_html = heading.clone();
     if is_uhd(detail.width, detail.height) {
-        heading.push_str(" <span style=\"font-size:.45em;border:1.5px solid #666;\
+        heading_html.push_str(" <span style=\"font-size:.45em;border:1.5px solid #666;\
             border-radius:4px;padding:.05em .35em;color:#555;vertical-align:middle\">4K</span>");
     }
     let subtitle = match (&detail.series, detail.season, detail.episode) {
@@ -1323,7 +1325,7 @@ async fn item_page(
     let html = format!(
         "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
          <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
-         <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading}</h1>\
+         <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
          {subtitle_html}{plot}{play_links}\
          <table style=\"border-collapse:collapse\">{rows}</table>{nav}"
     );
