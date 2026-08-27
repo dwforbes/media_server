@@ -779,7 +779,11 @@ body.player a:hover, body.player a:active,
 /// extraction, and auto-play of the next episode. That last one swaps the
 /// next episode's page pieces into this one instead of navigating: the
 /// <video> element survives, so a fullscreen player stays fullscreen, and
-/// pushState keeps the URL truthful for reload/bookmark/resume.
+/// pushState keeps the URL truthful for reload/bookmark/resume. The same
+/// script serves the music detail page, whose <audio> is the player: it
+/// fetches the page at the same path prefix (/play/ or /item/) and
+/// replaces every element marked data-swap, and links carrying
+/// data-swap-id (prior/next/next-up) swap instead of navigating.
 const PLAYER_SCRIPT: &str = r#"<script>
 (function () {
   var v = document.getElementById('player');
@@ -851,8 +855,9 @@ const PLAYER_SCRIPT: &str = r#"<script>
     if (mine && theirs) mine.replaceWith(document.importNode(theirs, true));
   }
   function each(list, f) { Array.prototype.slice.call(list).forEach(f); }
+  var prefix = location.pathname.replace(/[^\/]*$/, '');   // "/play/" or "/item/"
   function swapTo(id) {
-    fetch('/play/' + id).then(function (r) {
+    fetch(prefix + id).then(function (r) {
       if (!r.ok) throw 0;
       return r.text();
     }).then(function (html) {
@@ -867,23 +872,29 @@ const PLAYER_SCRIPT: &str = r#"<script>
       v.dataset.id = nv.dataset.id;
       v.dataset.next = nv.dataset.next || '';
       document.title = doc.title;
-      ['heading', 'context', 'card', 'next-note', 'subs'].forEach(function (k) { replaceById(k, doc); });
-      var details = document.getElementById('details');
-      if (details) details.setAttribute('href', '/item/' + id);
+      each(document.querySelectorAll('[data-swap]'), function (el) { replaceById(el.id, doc); });
       var resume = document.getElementById('resume');
       if (resume) resume.textContent = '';
       last = -1;
-      history.pushState({ id: id }, '', '/play/' + id);
+      history.pushState({ id: id }, '', prefix + id);
       v.load();
       var p = v.play();
       if (p && p.catch) p.catch(function () {});
       attachSubs();
     }).catch(function () {
-      location.href = '/play/' + id;   // plain navigation as the fallback
+      location.href = prefix + id;   // plain navigation as the fallback
     });
   }
   v.addEventListener('ended', function () {
     if (box && box.checked && v.dataset.next) swapTo(v.dataset.next);
+  });
+  // Prior / next / next-up links: swap in place (plain clicks only —
+  // modifier clicks keep their open-in-new-tab meaning).
+  document.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest ? e.target.closest('a[data-swap-id]') : null;
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    swapTo(a.dataset.swapId);
   });
   // Back/forward across swapped episodes: just render whatever the URL says.
   window.addEventListener('popstate', function () { location.reload(); });
@@ -1028,10 +1039,12 @@ fn neighbour_nav_html(
     }
     let noun = neighbour_noun(kind);
     let label = |item: &media_db::BrowseItem| neighbour_label(kind, season, item);
+    // data-swap-id: with a player on the page the script swaps the
+    // neighbour in without a navigation; otherwise a plain link.
     let prev_html = prev
         .map(|item| {
             format!(
-                "<a href=\"/item/{}\">« Prior {noun}: {}</a>",
+                "<a href=\"/item/{0}\" data-swap-id=\"{0}\">« Prior {noun}: {1}</a>",
                 item.file_id,
                 label(item)
             )
@@ -1040,7 +1053,7 @@ fn neighbour_nav_html(
     let next_html = next
         .map(|item| {
             format!(
-                "<a href=\"/item/{}\">Next {noun}: {} »</a>",
+                "<a href=\"/item/{0}\" data-swap-id=\"{0}\">Next {noun}: {1} »</a>",
                 item.file_id,
                 label(item)
             )
@@ -1082,7 +1095,7 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     // Always present (hidden when empty) so an in-place episode swap has
     // an element to replace.
     let context_line = format!(
-        "<p id=\"context\" style=\"color:#aaa;margin:.2em 0 .8em{}\">{context}</p>",
+        "<p id=\"context\" data-swap style=\"color:#aaa;margin:.2em 0 .8em{}\">{context}</p>",
         if context.is_empty() { ";display:none" } else { "" }
     );
 
@@ -1150,7 +1163,7 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         || state.vtt_cache.join(format!("{id}.vtt")).is_file();
     let subs_note = |extract: bool, text: &str| {
         format!(
-            "<p id=\"subs\" data-extract=\"{}\" style=\"color:#888;font-size:.85em\">{text}</p>",
+            "<p id=\"subs\" data-swap data-extract=\"{}\" style=\"color:#888;font-size:.85em\">{text}</p>",
             if extract { id.to_string() } else { String::new() }
         )
     };
@@ -1189,7 +1202,7 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         let noun = neighbour_noun(detail.kind);
         let next_note = match &next {
             Some(n) => format!(
-                "Next up: <a href=\"/play/{}\">{}</a>",
+                "Next up: <a href=\"/play/{0}\" data-swap-id=\"{0}\">{1}</a>",
                 n.file_id,
                 neighbour_label(detail.kind, detail.season, n)
             ),
@@ -1198,16 +1211,16 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         format!(
             "<p style=\"color:#aaa;font-size:.9em\"><label><input type=\"checkbox\" \
              id=\"autonext\" checked> Auto-play next {noun}</label>\
-             <span id=\"next-note\" style=\"margin-left:1.5em\">{next_note}</span></p>"
+             <span id=\"next-note\" data-swap style=\"margin-left:1.5em\">{next_note}</span></p>"
         )
     };
     let html = format!(
         "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
          <body class=\"player\" style=\"font-family:sans-serif;max-width:60em;margin:1.5em auto;\
          background:#111;color:#ddd\">\
-         <p><span class=\"infowrap\"><a id=\"details\" href=\"/item/{id}\">← details</a>\
-         <span class=\"card\" id=\"card\">{card}</span></span></p>\
-         <h2 id=\"heading\" style=\"margin-bottom:.1em\">{heading}</h2>{context_line}\
+         <p id=\"top\" data-swap><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
+         <span class=\"card\">{card}</span></span></p>\
+         <h2 id=\"heading\" data-swap style=\"margin-bottom:.1em\">{heading}</h2>{context_line}\
          <video id=\"player\" controls autoplay playsinline{poster} \
           data-id=\"{id}\" data-next=\"{next_id}\" \
           style=\"width:100%;max-height:80vh;background:#000\">\
@@ -1487,7 +1500,7 @@ async fn item_page(
         String::new()
     };
     let play_links = if detail.kind == media_db::MediaKind::Music {
-        format!("<p><a href=\"{}/media/{id}\" style=\"font-size:1.1em\">▶ Play</a></p>", state.base_url)
+        String::new() // the player itself is on the page, below
     } else {
         // Known browser blind spots, verified the hard way: Firefox neither
         // range-streams non-WebM Matroska (it downloads the whole file
@@ -1556,13 +1569,49 @@ async fn item_page(
             )
         })
         .collect();
-    let html = format!(
-        "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
-         <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
-         <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
-         {subtitle_html}{plot}{play_links}\
-         <table style=\"border-collapse:collapse\">{rows}</table>{nav}"
-    );
+    let html = if detail.kind == media_db::MediaKind::Music {
+        // The player lives on the detail page itself, and the next track
+        // is swapped in place when one ends (see PLAYER_SCRIPT): the
+        // regions marked data-swap are replaced, the <audio> stays.
+        let next_note = match &next {
+            Some(n) => format!(
+                "Next up: <a href=\"/item/{0}\" data-swap-id=\"{0}\">{1}</a>",
+                n.file_id,
+                neighbour_label(detail.kind, detail.season, n)
+            ),
+            None => "This is the last song available.".to_string(),
+        };
+        let next_id = next.as_ref().map(|n| n.file_id.to_string()).unwrap_or_default();
+        format!(
+            "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
+             <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
+             <p id=\"top\" data-swap><a href=\"/browse\">⌂ browse</a></p>\
+             <div id=\"above\" data-swap>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
+             {subtitle_html}{plot}</div>\
+             <div style=\"overflow:hidden\">\
+             <audio id=\"player\" controls preload=\"metadata\" data-id=\"{id}\" data-next=\"{next_id}\" \
+              style=\"display:block;width:100%\">\
+             <source src=\"{base}/media/{id}\" type=\"{mime}\"></audio>\
+             <p style=\"color:#666;font-size:.9em;margin:.4em 0\"><label><input type=\"checkbox\" \
+             id=\"autonext\" checked> Auto-play next song</label>\
+             <span id=\"next-note\" data-swap style=\"margin-left:1.5em\">{next_note}</span>\
+             <small id=\"direct\" data-swap style=\"margin-left:1.5em\">\
+             <a href=\"{base}/media/{id}\">direct stream</a></small></p>\
+             <p id=\"resume\" style=\"color:#393;font-size:.9em\"></p></div>\
+             <div id=\"below\" data-swap><table style=\"border-collapse:collapse\">{rows}</table>{nav}</div>\
+             {PLAYER_SCRIPT}",
+            base = state.base_url,
+            mime = xml_escape(&detail.mime)
+        )
+    } else {
+        format!(
+            "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
+             <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
+             <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
+             {subtitle_html}{plot}{play_links}\
+             <table style=\"border-collapse:collapse\">{rows}</table>{nav}"
+        )
+    };
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 

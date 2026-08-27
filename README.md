@@ -305,7 +305,10 @@ beside it). Rather than navigating — which would drop a fullscreen player — 
 fetches the next episode's page and swaps its pieces into place: source, poster,
 subtitle track, heading, hover card and next-up note, with the URL updated via
 `pushState` so reload, bookmark and resume keep working. The `<video>` element itself
-never changes, so fullscreen survives the hand-over.
+never changes, so fullscreen survives the hand-over. Music plays on the detail page
+itself — an `<audio>` player sits under the title, and the same in-place hand-over
+steps through the album — and with a player on the page the "Prior" / "Next" /
+"Next up" links swap the neighbour in the same way instead of reloading.
 
 The same stripping runs automatically as part of enrichment when `strip_titles = true`
 is set in the scanner config's `[enrich]` section (or with `media-enrich
