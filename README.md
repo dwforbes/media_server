@@ -287,7 +287,8 @@ The detail and player pages name what you are watching — an episode shows
 their browse pages, a track shows artist and album linked likewise (so anything found
 via search is one click from its siblings), and the detail page ends with
 "« Prior episode" / "Next episode »" links (songs likewise) that step through the
-season or album in browse order — and
+whole series (or album) in order, the last episode of a season continuing into the
+next season that exists — and
 hovering (or tab-focusing) the "← details" link reveals a card with the poster, plot,
 IMDb rating (linked to the IMDb entry when known), genres, director, duration,
 resolution, codec and size, so you rarely
@@ -297,6 +298,14 @@ playback position into the URL fragment once a second while playing (and on paus
 scrub) — `…/play/596#128s` — so the address bar is always a resumable, shareable link; opening such a URL seeks
 there once metadata loads and offers a "start from the beginning" link. Fragments are
 never sent to the server, so this is purely client side and nothing is stored.
+
+Episodes and album tracks auto-play into the next one when they end ("Auto-play next
+episode", a checkbox under the player, remembered per browser; a "Next up" link sits
+beside it). Rather than navigating — which would drop a fullscreen player — the page
+fetches the next episode's page and swaps its pieces into place: source, poster,
+subtitle track, heading, hover card and next-up note, with the URL updated via
+`pushState` so reload, bookmark and resume keep working. The `<video>` element itself
+never changes, so fullscreen survives the hand-over.
 
 The same stripping runs automatically as part of enrichment when `strip_titles = true`
 is set in the scanner config's `[enrich]` section (or with `media-enrich

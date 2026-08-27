@@ -772,13 +772,17 @@ body.player a:hover, body.player a:active,
 .infowrap .card a:hover, .infowrap .card a:active { color: #cef; }
 </style>"#;
 
-/// Resume support: the playback position rides in the URL fragment, so a
-/// paused (or scrubbed) player yields a shareable/bookmarkable link that
-/// picks up where it left off. Fragments never reach the server, so this
-/// has to be client side. Also the keyboard: ← / → skip 10 seconds.
-const RESUME_SCRIPT: &str = r#"<script>
+/// The player's script: resume (the playback position rides in the URL
+/// fragment, so a paused or scrubbed player yields a bookmarkable link
+/// that picks up where it left off — fragments never reach the server, so
+/// this is client side), ← / → skipping 10 seconds, asynchronous subtitle
+/// extraction, and auto-play of the next episode. That last one swaps the
+/// next episode's page pieces into this one instead of navigating: the
+/// <video> element survives, so a fullscreen player stays fullscreen, and
+/// pushState keeps the URL truthful for reload/bookmark/resume.
+const PLAYER_SCRIPT: &str = r#"<script>
 (function () {
-  var v = document.querySelector('video');
+  var v = document.getElementById('player');
   if (!v) return;
   // timeupdate fires ~4x/second; flooring to whole seconds throttles the
   // stamping to once per second, which also keeps us far below browsers'
@@ -811,6 +815,79 @@ const RESUME_SCRIPT: &str = r#"<script>
     var end = isFinite(v.duration) ? v.duration : Infinity;
     try { v.currentTime = Math.max(0, Math.min(end, (v.currentTime || 0) + step)); } catch (err) {}
   }, true);
+
+  // Subtitles that need extracting (#subs carries the file id) are fetched
+  // while the video already plays and attached when ready.
+  function attachSubs() {
+    var note = document.getElementById('subs');
+    if (!note || !note.dataset.extract) return;
+    var id = note.dataset.extract;
+    fetch('/subs/' + id + '.vtt').then(function (r) {
+      if (!r.ok) throw 0;
+      return r.blob();
+    }).then(function (b) {
+      if (v.dataset.id !== id) return;   // moved on to another episode meanwhile
+      var t = document.createElement('track');
+      t.kind = 'subtitles'; t.label = 'Subtitles'; t.srclang = 'en';
+      t.src = URL.createObjectURL(b); t.default = true;
+      v.appendChild(t); t.track.mode = 'showing';
+      note.textContent = 'Subtitles ready.';
+    }).catch(function () {
+      if (v.dataset.id === id) note.textContent = 'Subtitles could not be extracted.';
+    });
+  }
+  attachSubs();
+
+  // Auto-play next: remembered per browser, on unless switched off.
+  var box = document.getElementById('autonext');
+  if (box) {
+    try { box.checked = localStorage.getItem('autonext') !== '0'; } catch (e) {}
+    box.addEventListener('change', function () {
+      try { localStorage.setItem('autonext', box.checked ? '1' : '0'); } catch (e) {}
+    });
+  }
+  function replaceById(id, doc) {
+    var mine = document.getElementById(id), theirs = doc.getElementById(id);
+    if (mine && theirs) mine.replaceWith(document.importNode(theirs, true));
+  }
+  function each(list, f) { Array.prototype.slice.call(list).forEach(f); }
+  function swapTo(id) {
+    fetch('/play/' + id).then(function (r) {
+      if (!r.ok) throw 0;
+      return r.text();
+    }).then(function (html) {
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var nv = doc.getElementById('player');
+      if (!nv) throw 0;
+      v.pause();
+      each(v.querySelectorAll('source, track'), function (n) { n.remove(); });
+      if (nv.hasAttribute('poster')) v.setAttribute('poster', nv.getAttribute('poster'));
+      else v.removeAttribute('poster');
+      each(nv.querySelectorAll('source, track'), function (n) { v.appendChild(document.importNode(n, true)); });
+      v.dataset.id = nv.dataset.id;
+      v.dataset.next = nv.dataset.next || '';
+      document.title = doc.title;
+      ['heading', 'context', 'card', 'next-note', 'subs'].forEach(function (k) { replaceById(k, doc); });
+      var details = document.getElementById('details');
+      if (details) details.setAttribute('href', '/item/' + id);
+      var resume = document.getElementById('resume');
+      if (resume) resume.textContent = '';
+      last = -1;
+      history.pushState({ id: id }, '', '/play/' + id);
+      v.load();
+      var p = v.play();
+      if (p && p.catch) p.catch(function () {});
+      attachSubs();
+    }).catch(function () {
+      location.href = '/play/' + id;   // plain navigation as the fallback
+    });
+  }
+  v.addEventListener('ended', function () {
+    if (box && box.checked && v.dataset.next) swapTo(v.dataset.next);
+  });
+  // Back/forward across swapped episodes: just render whatever the URL says.
+  window.addEventListener('popstate', function () { location.reload(); });
+
   var start = parseFloat((location.hash || '').replace(/[^0-9.]/g, ''));
   if (!(start > 0)) return;
   honoured = false;
@@ -868,8 +945,8 @@ fn music_context_html(detail: &media_db::queries::files::ItemDetail, with_track:
     out
 }
 
-/// The episode (or track) before and after this one, in the order the
-/// season (album) browse page lists them. Renditions of one episode are
+/// The episode (or track) before and after this one, in series (album)
+/// order. Renditions of one episode are
 /// merged there, so a lower-quality copy still finds its place. Movies
 /// have no natural neighbours and get (None, None).
 fn neighbours(
@@ -877,9 +954,9 @@ fn neighbours(
     detail: &files::ItemDetail,
 ) -> (Option<media_db::BrowseItem>, Option<media_db::BrowseItem>) {
     let siblings = match (detail.kind, &detail.series, detail.season) {
-        (media_db::MediaKind::Tv, Some(series), Some(season)) => {
-            tv::episodes(conn, series, season)
-        }
+        // The whole series in season/episode order, so the last episode
+        // of a season continues into the next season.
+        (media_db::MediaKind::Tv, Some(series), _) => tv::series_episodes(conn, series),
         (media_db::MediaKind::Music, _, _) => {
             // Same keys the browse tree uses: album artist first, and the
             // "Unknown" placeholders for untagged files.
@@ -915,25 +992,42 @@ fn neighbours(
     (prev, next)
 }
 
+fn neighbour_noun(kind: media_db::MediaKind) -> &'static str {
+    match kind {
+        media_db::MediaKind::Music => "song",
+        _ => "episode",
+    }
+}
+
+/// "03 - Title" for an episode (prefixed "S2 " when it is in a different
+/// season than the one being viewed), "3. Title" for a track.
+fn neighbour_label(kind: media_db::MediaKind, season: Option<i64>, item: &media_db::BrowseItem) -> String {
+    match (kind, item.episode, item.track_no) {
+        (media_db::MediaKind::Tv, Some(n), _) => {
+            let prefix = match item.season {
+                Some(s) if Some(s) != season => format!("S{s} "),
+                _ => String::new(),
+            };
+            format!("{prefix}{n:02} - {}", xml_escape(&item.title))
+        }
+        (media_db::MediaKind::Music, _, Some(n)) => format!("{n}. {}", xml_escape(&item.title)),
+        _ => xml_escape(&item.title),
+    }
+}
+
 /// "« Prior episode: Title" on the left, "Next episode: Title »" on the
 /// right, spanning the same width as the details above.
 fn neighbour_nav_html(
     kind: media_db::MediaKind,
+    season: Option<i64>,
     prev: Option<&media_db::BrowseItem>,
     next: Option<&media_db::BrowseItem>,
 ) -> String {
     if prev.is_none() && next.is_none() {
         return String::new();
     }
-    let noun = match kind {
-        media_db::MediaKind::Music => "song",
-        _ => "episode",
-    };
-    let label = |item: &media_db::BrowseItem| match (kind, item.episode, item.track_no) {
-        (media_db::MediaKind::Tv, Some(n), _) => format!("{n:02} - {}", xml_escape(&item.title)),
-        (media_db::MediaKind::Music, _, Some(n)) => format!("{n}. {}", xml_escape(&item.title)),
-        _ => xml_escape(&item.title),
-    };
+    let noun = neighbour_noun(kind);
+    let label = |item: &media_db::BrowseItem| neighbour_label(kind, season, item);
     let prev_html = prev
         .map(|item| {
             format!(
@@ -967,10 +1061,12 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     let conn = state.db.lock().await;
     let detail = files::detail(&conn, id);
     let servable = files::servable(&conn, id);
-    drop(conn);
     let (Ok(Some(detail)), Ok(Some(servable))) = (detail, servable) else {
+        drop(conn);
         return StatusCode::NOT_FOUND.into_response();
     };
+    let (_, next) = neighbours(&conn, &detail);
+    drop(conn);
     let mut heading = xml_escape(&detail.title);
     if let Some(year) = detail.year {
         heading.push_str(&format!(" ({year})"));
@@ -983,11 +1079,12 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         }
         _ => music_context_html(&detail, false),
     };
-    let context_line = if context.is_empty() {
-        String::new()
-    } else {
-        format!("<p style=\"color:#aaa;margin:.2em 0 .8em\">{context}</p>")
-    };
+    // Always present (hidden when empty) so an in-place episode swap has
+    // an element to replace.
+    let context_line = format!(
+        "<p id=\"context\" style=\"color:#aaa;margin:.2em 0 .8em{}\">{context}</p>",
+        if context.is_empty() { ";display:none" } else { "" }
+    );
 
     // Everything the detail page knows, in a hover card on the back link.
     let mut card = String::new();
@@ -1051,13 +1148,19 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     // track asynchronously with a visible status, attaching it when ready.
     let instant_subs = servable.abs_path.with_extension("srt").is_file()
         || state.vtt_cache.join(format!("{id}.vtt")).is_file();
+    let subs_note = |extract: bool, text: &str| {
+        format!(
+            "<p id=\"subs\" data-extract=\"{}\" style=\"color:#888;font-size:.85em\">{text}</p>",
+            if extract { id.to_string() } else { String::new() }
+        )
+    };
     let (track, subs_async) = if instant_subs {
         (
             format!(
                 "<track kind=\"subtitles\" src=\"/subs/{id}.vtt\" \
                  srclang=\"en\" label=\"Subtitles\" default>"
             ),
-            String::new(),
+            subs_note(false, ""),
         )
     } else if state
         .subs_inflight
@@ -1068,44 +1171,51 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     {
         (
             String::new(),
-            format!(
-                "<p id=\"subs\" style=\"color:#888;font-size:.85em\">⏳ Extracting \
-                 subtitles from the file — the video can play meanwhile; captions \
-                 appear when ready (may take a minute for large files)…</p>\
-                 <script>\
-                 fetch('/subs/{id}.vtt').then(function(r) {{\
-                   if (!r.ok) throw 0; return r.blob();\
-                 }}).then(function(b) {{\
-                   var t = document.createElement('track');\
-                   t.kind = 'subtitles'; t.label = 'Subtitles'; t.srclang = 'en';\
-                   t.src = URL.createObjectURL(b); t.default = true;\
-                   var v = document.querySelector('video');\
-                   v.appendChild(t); t.track.mode = 'showing';\
-                   document.getElementById('subs').textContent = 'Subtitles ready.';\
-                 }}).catch(function() {{\
-                   document.getElementById('subs').textContent = \
-                     'Subtitles could not be extracted.';\
-                 }});\
-                 </script>"
+            subs_note(
+                true,
+                "⏳ Extracting subtitles from the file — the video can play meanwhile; \
+                 captions appear when ready (may take a minute for large files)…",
             ),
         )
     } else {
-        (String::new(), String::new())
+        (String::new(), subs_note(false, ""))
+    };
+    // Episodes and album tracks continue into the next one when it ends;
+    // the script swaps the player's contents in place (see PLAYER_SCRIPT).
+    let next_id = next.as_ref().map(|n| n.file_id.to_string()).unwrap_or_default();
+    let autonext = if detail.kind == media_db::MediaKind::Movies {
+        String::new()
+    } else {
+        let noun = neighbour_noun(detail.kind);
+        let next_note = match &next {
+            Some(n) => format!(
+                "Next up: <a href=\"/play/{}\">{}</a>",
+                n.file_id,
+                neighbour_label(detail.kind, detail.season, n)
+            ),
+            None => format!("This is the last {noun} available."),
+        };
+        format!(
+            "<p style=\"color:#aaa;font-size:.9em\"><label><input type=\"checkbox\" \
+             id=\"autonext\" checked> Auto-play next {noun}</label>\
+             <span id=\"next-note\" style=\"margin-left:1.5em\">{next_note}</span></p>"
+        )
     };
     let html = format!(
         "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
          <body class=\"player\" style=\"font-family:sans-serif;max-width:60em;margin:1.5em auto;\
          background:#111;color:#ddd\">\
-         <p><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
-         <span class=\"card\">{card}</span></span></p>\
-         <h2 style=\"margin-bottom:.1em\">{heading}</h2>{context_line}\
-         <video controls autoplay playsinline{poster} \
+         <p><span class=\"infowrap\"><a id=\"details\" href=\"/item/{id}\">← details</a>\
+         <span class=\"card\" id=\"card\">{card}</span></span></p>\
+         <h2 id=\"heading\" style=\"margin-bottom:.1em\">{heading}</h2>{context_line}\
+         <video id=\"player\" controls autoplay playsinline{poster} \
+          data-id=\"{id}\" data-next=\"{next_id}\" \
           style=\"width:100%;max-height:80vh;background:#000\">\
          <source src=\"{}/media/{id}\" type=\"{}\">{track}\
          Your browser cannot play this format.</video>\
          <p id=\"resume\" style=\"color:#9c9;font-size:.9em\"></p>\
          <p style=\"color:#666;font-size:.8em\">← / → skip 10 seconds</p>\
-         {subs_async}{RESUME_SCRIPT}",
+         {autonext}{subs_async}{PLAYER_SCRIPT}",
         state.base_url,
         xml_escape(&servable.mime)
     );
@@ -1272,7 +1382,7 @@ async fn item_page(
     };
     let (prev, next) = neighbours(&conn, &detail);
     drop(conn);
-    let nav = neighbour_nav_html(detail.kind, prev.as_ref(), next.as_ref());
+    let nav = neighbour_nav_html(detail.kind, detail.season, prev.as_ref(), next.as_ref());
 
     let mut heading = xml_escape(&detail.title);
     if let Some(year) = detail.year {
