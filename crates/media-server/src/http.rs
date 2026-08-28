@@ -17,6 +17,13 @@ use crate::didl::{self, xml_escape, DLNA_FEATURES};
 use crate::objectid::ObjectId;
 use crate::{soap, tree, xml};
 
+/// Common start of every HTML page: charset and the device icon as the
+/// favicon / home-screen icon (the same PNGs device.xml advertises).
+const HTML_HEAD: &str = "{HTML_HEAD}\
+    <link rel=\"icon\" type=\"image/png\" sizes=\"48x48\" href=\"/icon/48.png\">\
+    <link rel=\"icon\" type=\"image/png\" sizes=\"120x120\" href=\"/icon/120.png\">\
+    <link rel=\"apple-touch-icon\" href=\"/icon/120.png\">";
+
 const CDS_SERVICE: &str = "urn:schemas-upnp-org:service:ContentDirectory:1";
 const CMS_SERVICE: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
 
@@ -53,6 +60,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/art/{id}", get(serve_art))
         .route("/icon/120.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
         .route("/icon/48.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.1.clone()) }))
+        // Browsers ask for these by convention; same icon as the UPnP device.
+        .route("/favicon.ico", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.1.clone()) }))
+        .route("/apple-touch-icon.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
+        .route("/apple-touch-icon-precomposed.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
         .route("/", get(index_page))
         .route("/playlist.m3u", get(|s: State<Arc<AppState>>| playlist(s, Path("all".into()))))
         .route("/playlist/{section}", get(playlist))
@@ -440,7 +451,7 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
         )
     };
     let html = format!(
-        "<!doctype html><meta charset=utf-8><title>Search</title>\
+        "{HTML_HEAD}<title>Search</title>\
          <body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
          <p><a href=\"/browse\">⌂ top</a></p><h1>Search</h1>\
          <p><a href=\"/browse/{}\">← Back to {}</a></p>{}\
@@ -553,7 +564,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
         }
     }
     let html = format!(
-        "<!doctype html><meta charset=utf-8><title>{}</title>\
+        "{HTML_HEAD}<title>{}</title>\
          <body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
          <p><a href=\"/browse\">⌂ top</a></p><h1>{}</h1>{back_link}{search_box}\
          <p><a href=\"/playlist/id/{oid}.m3u\">Playlist of everything below this point</a></p>\
@@ -589,7 +600,7 @@ async fn index_page(State(state): State<Arc<AppState>>) -> Response {
         })
         .collect();
     let html = format!(
-        "<!doctype html><meta charset=utf-8><title>{name}</title>\
+        "{HTML_HEAD}<title>{name}</title>\
          <body style=\"font-family:sans-serif;max-width:40em;margin:2em auto\">\
          <h1>{name}</h1>\
          <p>UPnP/DLNA media server. Clients normally discover it automatically; \
@@ -1215,7 +1226,7 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         )
     };
     let html = format!(
-        "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
+        "{HTML_HEAD}<title>{heading}</title>{PLAYER_STYLE}\
          <body class=\"player\" style=\"font-family:sans-serif;max-width:60em;margin:1.5em auto;\
          background:#111;color:#ddd\">\
          <p id=\"top\" data-swap><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
@@ -1601,7 +1612,7 @@ async fn item_page(
         };
         let next_id = next.as_ref().map(|n| n.file_id.to_string()).unwrap_or_default();
         format!(
-            "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
+            "{HTML_HEAD}<title>{heading}</title>{PLAYER_STYLE}\
              <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
              <p id=\"top\" data-swap><a href=\"/browse\">⌂ browse</a></p>\
              <div id=\"above\" data-swap>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
@@ -1623,7 +1634,7 @@ async fn item_page(
         )
     } else {
         format!(
-            "<!doctype html><meta charset=utf-8><title>{heading}</title>{PLAYER_STYLE}\
+            "{HTML_HEAD}<title>{heading}</title>{PLAYER_STYLE}\
              <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
              <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
              {subtitle_html}{plot}{play_links}\
