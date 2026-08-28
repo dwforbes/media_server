@@ -1306,8 +1306,8 @@ fn is_uhd(width: Option<i64>, height: Option<i64>) -> bool {
     width.unwrap_or(0) > 1920 || height.unwrap_or(0) > 1080
 }
 
-/// One listing row: 4K chip, title, play link, and the IMDb rating (movies
-/// and episodes that have one) boxed at the right edge.
+/// One listing row: 4K chip, title, and the IMDb rating (movies and
+/// episodes that have one) boxed at the right edge.
 fn listing_row(item: &media_db::BrowseItem) -> String {
     let chip = if item.kind == media_db::MediaKind::Music {
         String::new()
@@ -1315,9 +1315,7 @@ fn listing_row(item: &media_db::BrowseItem) -> String {
         uhd_chip(is_uhd(item.width, item.height))
     };
     format!(
-        "<li style=\"display:flex;align-items:center\">{chip}<a href=\"/item/{0}\">{1}</a>\
-         <small style=\"margin-left:.4em\"><a href=\"/media/{0}\">[▶ play]</a></small>\
-         {2}</li>",
+        "<li style=\"display:flex;align-items:center\">{chip}<a href=\"/item/{0}\">{1}</a>{2}</li>",
         item.file_id,
         xml_escape(&item.title),
         rating_chip(item.rating)
