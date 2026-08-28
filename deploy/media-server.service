@@ -41,6 +41,11 @@ ReadWritePaths=/home/pi/.local/state/mediaserver
 #     install -o root -g pi -m 0640 "$RENEWED_LINEAGE/privkey.pem"   /etc/mediaserver/privkey.pem
 # (LoadCredential= would also expose them, but it copies at service start
 # only, so a renewal would then need a restart to take effect.)
+# To listen on 443 (or any port below 1024) as this unprivileged User=,
+# grant just the port-binding capability; NoNewPrivileges keeps everything
+# else as tight as before:
+#AmbientCapabilities=CAP_NET_BIND_SERVICE
+#CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target

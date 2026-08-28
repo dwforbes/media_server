@@ -383,6 +383,11 @@ those; the hourly re-read then picks renewals up automatically. (systemd's
 renewal would need a restart.) HTTPS is a secure context, which is what browser
 features like the Media Session API and "Add to Home Screen" require.
 
+To listen on the standard port 443 under the unit's unprivileged user, uncomment
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` / `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`
+in the unit (or add them as a drop-in with `systemctl edit media-server`), set
+`bind = "0.0.0.0:443"`, then `daemon-reload` and restart; generated links omit `:443`.
+
 ### Remuxing MKV to MP4
 
 Matroska is fine for TVs and VLC but not for browsers: Firefox won't range-stream it
