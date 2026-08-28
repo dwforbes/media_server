@@ -105,7 +105,7 @@ pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<BrowseItem>> {
 }
 
 /// Display artist = album_artist when set, else track artist.
-const DISPLAY_ARTIST: &str = "COALESCE(mu.album_artist, mu.artist, 'Unknown Artist')";
+pub(crate) const DISPLAY_ARTIST: &str = "COALESCE(mu.album_artist, mu.artist, 'Unknown Artist')";
 
 pub fn artists(conn: &Connection) -> Result<Vec<String>> {
     let sql = format!(

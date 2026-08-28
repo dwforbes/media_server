@@ -1,3 +1,4 @@
+pub mod counts;
 pub mod files;
 pub mod movies;
 pub mod music;

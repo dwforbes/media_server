@@ -13,7 +13,7 @@ const CLASS_PERSON: &str = "object.container.person";
 
 /// By Rating buckets: (label, lo, hi) with lo <= rating < hi. The final
 /// "Unrated" bucket is index RATING_BUCKETS.len().
-const RATING_BUCKETS: &[(&str, f64, f64)] = &[
+pub(crate) const RATING_BUCKETS: &[(&str, f64, f64)] = &[
     ("9 and above", 9.0, 10.1),
     ("8 – 9", 8.0, 9.0),
     ("7 – 8", 7.0, 8.0),

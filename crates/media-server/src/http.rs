@@ -61,6 +61,8 @@ const CMS_SERVICE: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
 pub struct AppState {
     pub db: tokio::sync::Mutex<Connection>,
     pub update_id: AtomicU32,
+    /// Leaf counts per browse container, generation-keyed on update_id.
+    pub counts: std::sync::Mutex<crate::counts::Cache>,
     pub uuid: String,
     pub friendly_name: String,
     pub base_url: String,
@@ -657,6 +659,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
             .unwrap_or_default(),
         _ => String::new(),
     };
+    let leaf_counts = crate::counts::for_children(&state, &conn, &node);
     drop(conn);
     let children = match children {
         Ok(c) => c,
@@ -669,10 +672,16 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     let mut rows = String::new();
     for entry in children {
         match entry {
-            tree::Entry::Container { id, title, .. } => rows.push_str(&format!(
-                "<li>📁 <a href=\"/browse/{id}\">{}</a></li>",
-                xml_escape(&title)
-            )),
+            tree::Entry::Container { id, title, .. } => {
+                let count = ObjectId::parse(&id)
+                    .and_then(|child| leaf_counts.get(&crate::counts::canon(&child)).copied())
+                    .map(|n| format!(" <span style=\"color:#666\">({n})</span>"))
+                    .unwrap_or_default();
+                rows.push_str(&format!(
+                    "<li>📁 <a href=\"/browse/{id}\">{}</a>{count}</li>",
+                    xml_escape(&title)
+                ));
+            }
             tree::Entry::Item { item, .. } => rows.push_str(&listing_row(&item)),
         }
     }

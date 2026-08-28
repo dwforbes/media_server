@@ -1,4 +1,5 @@
 mod config;
+mod counts;
 mod didl;
 mod http;
 mod objectid;
@@ -62,6 +63,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         db: tokio::sync::Mutex::new(conn),
         update_id: AtomicU32::new(1),
+        counts: Default::default(),
         uuid: uuid.clone(),
         friendly_name: cfg.friendly_name.clone(),
         base_url: base_url.clone(),
