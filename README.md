@@ -194,12 +194,14 @@ routers/APs mistreat multicast in creative ways. Two escape hatches:
 - **Playlists, no discovery at all**: `/playlist.m3u` (or `/playlist/movies.m3u`,
   `/playlist/tv.m3u`, `/playlist/music.m3u`) exposes the whole catalog with proper
   display titles to anything that can open a URL — VLC's "Open Network Stream", a
-  browser, a car head unit. Same streaming endpoints as UPnP, zero SSDP. The full
-  virtual tree is browsable as HTML at `http://<server>:8200/` (also `/browse`),
-  where **every container — a genre, a decade, a
-  rating bucket, a series or season, an artist or album — offers its own playlist**
-  (`/playlist/id/<objectid>.m3u`, recursive with per-file dedup, so a series playlist
-  spans its seasons). Every item links to a **detail page** (`/item/<id>`) showing
+  browser, a car head unit. Same streaming endpoints as UPnP, zero SSDP. Every
+  container of the virtual tree — a genre, a decade, a rating bucket, a series or
+  season, an artist or album — has a playlist too (`/playlist/id/<objectid>.m3u`,
+  recursive with per-file dedup, so a series playlist spans its seasons), and a
+  search has one at `/playlist/search?mq=<terms>`; the web pages no longer link
+  these, since the in-browser player covers playback. The full virtual tree is
+  browsable as HTML at `http://<server>:8200/` (also `/browse`). Every item links
+  to a **detail page** (`/item/<id>`) showing
   the poster, plot, IMDb rating, genres, director, duration, resolution, codecs,
   container, file size, and when it was added.
 

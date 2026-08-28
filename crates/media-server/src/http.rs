@@ -552,13 +552,10 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
             ""
         };
         format!(
-            "{} match{} in {}{capped} — \
-             <a href=\"/playlist/search?mq={}&in={}\">playlist of these results</a>",
+            "{} match{} in {}{capped}",
             hits.len(),
             if hits.len() == 1 { "" } else { "es" },
-            xml_escape(&scope_title),
-            urlencode(&q.q),
-            urlencode(&scope_id)
+            xml_escape(&scope_title)
         )
     };
     let head = page_head("Search", "");
@@ -603,20 +600,6 @@ async fn search_playlist(
     }
 }
 
-/// Minimal percent-encoding for values we put into our own links.
-fn urlencode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char)
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
 
 /// HTML mirror of the virtual tree: every container is browsable and
 /// offers its playlist; items link to their streams.
@@ -670,8 +653,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     for entry in children {
         match entry {
             tree::Entry::Container { id, title, .. } => rows.push_str(&format!(
-                "<li>📁 <a href=\"/browse/{id}\">{}</a> \
-                 <small><a href=\"/playlist/id/{id}.m3u\">[playlist]</a></small></li>",
+                "<li>📁 <a href=\"/browse/{id}\">{}</a></li>",
                 xml_escape(&title)
             )),
             tree::Entry::Item { item, .. } => rows.push_str(&listing_row(&item)),
@@ -681,7 +663,6 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     let html = format!(
         "{head}<body>\
          <p><a href=\"/\">⌂ top</a></p><h1>{}</h1>{back_link}{search_box}\
-         <p><a href=\"/playlist/id/{oid}.m3u\">Playlist of everything below this point</a></p>\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
         xml_escape(&title)
     );
