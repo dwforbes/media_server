@@ -57,7 +57,22 @@ pub fn probe(ffprobe: &str, path: &Path) -> Result<(TechInfo, Option<String>)> {
                     tech.height = stream.get("height").and_then(|h| h.as_i64());
                 }
                 Some("audio") if tech.audio_codec.is_none() => {
+                    let profile = stream.get("profile").and_then(|p| p.as_str());
+                    tech.audio_profile = codec_name
+                        .as_deref()
+                        .map(|c| super::audio::ffprobe_label(c, profile));
                     tech.audio_codec = codec_name;
+                    let num = |key: &str| {
+                        stream.get(key).and_then(|v| {
+                            v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+                        })
+                    };
+                    tech.audio_bitrate = num("bit_rate").map(|bps| bps / 1000).filter(|k| *k > 0);
+                    tech.audio_sample_rate = num("sample_rate");
+                    tech.audio_channels = num("channels");
+                    tech.audio_bit_depth = num("bits_per_raw_sample")
+                        .or_else(|| num("bits_per_sample"))
+                        .filter(|b| *b > 0);
                 }
                 _ => {}
             }

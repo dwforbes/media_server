@@ -66,6 +66,15 @@ pub struct TechInfo {
     pub height: Option<i64>,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
+    /// Human codec label for the (first) audio stream: "AAC LC", "FLAC".
+    pub audio_profile: Option<String>,
+    /// kbps
+    pub audio_bitrate: Option<i64>,
+    /// Hz
+    pub audio_sample_rate: Option<i64>,
+    /// Bits per sample; lossless/PCM formats only.
+    pub audio_bit_depth: Option<i64>,
+    pub audio_channels: Option<i64>,
 }
 
 /// One playable file of an item. An item usually has exactly one; a movie

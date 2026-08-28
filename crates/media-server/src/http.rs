@@ -1474,14 +1474,32 @@ async fn item_page(
     if let (Some(w), Some(h)) = (detail.width, detail.height) {
         facts.push(("Resolution", format!("{w} × {h}")));
     }
-    let codecs = match (&detail.video_codec, &detail.audio_codec) {
-        (Some(v), Some(a)) => Some(format!("{v} video, {a} audio")),
-        (Some(v), None) => Some(format!("{v} video")),
-        (None, Some(a)) => Some(a.to_string()),
-        (None, None) => None,
-    };
-    if let Some(codecs) = codecs {
-        facts.push(("Codecs", xml_escape(&codecs)));
+    let audio = detail.audio_profile.as_deref().or(detail.audio_codec.as_deref());
+    match (&detail.video_codec, audio) {
+        (Some(v), Some(a)) => facts.push(("Codecs", xml_escape(&format!("{v} video, {a} audio")))),
+        (Some(v), None) => facts.push(("Codecs", xml_escape(&format!("{v} video")))),
+        (None, Some(a)) => facts.push(("Codec", xml_escape(a))),
+        (None, None) => {}
+    }
+    if let Some(kbps) = detail.audio_bitrate {
+        facts.push(("Bitrate", format!("{kbps} kbps")));
+    }
+    if let Some(hz) = detail.audio_sample_rate {
+        let khz = hz as f64 / 1000.0;
+        facts.push(("Sample rate", format!("{} kHz", if khz.fract() == 0.0 { format!("{khz:.0}") } else { format!("{khz:.1}") })));
+    }
+    if let Some(bits) = detail.audio_bit_depth {
+        facts.push(("Bit depth", format!("{bits}-bit")));
+    }
+    if let Some(n) = detail.audio_channels {
+        let label = match n {
+            1 => "mono".to_string(),
+            2 => "stereo".to_string(),
+            6 => "5.1".to_string(),
+            8 => "7.1".to_string(),
+            n => format!("{n} channels"),
+        };
+        facts.push(("Channels", label));
     }
     if let Some(container) = &detail.container {
         facts.push(("Container", xml_escape(container)));

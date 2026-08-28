@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 11;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -135,4 +135,15 @@ pub const MIGRATIONS: &[&str] = &[
     // 9 -> 10: TMDB collection ("Harry Potter Collection") from .nfo <set>,
     // for the Franchises view.
     "ALTER TABLE movies ADD COLUMN collection TEXT;",
+    // 10 -> 11: audio stream details — codec label ("AAC LC", "FLAC"),
+    // bitrate (kbps), sample rate (Hz), bit depth, channel count. Music
+    // files go back to pending so the next reconcile re-reads their
+    // properties; video files pick the fields up whenever they are next
+    // extracted.
+    "ALTER TABLE files ADD COLUMN audio_profile TEXT;
+     ALTER TABLE files ADD COLUMN audio_bitrate INTEGER;
+     ALTER TABLE files ADD COLUMN audio_sample_rate INTEGER;
+     ALTER TABLE files ADD COLUMN audio_bit_depth INTEGER;
+     ALTER TABLE files ADD COLUMN audio_channels INTEGER;
+     UPDATE files SET status = 'pending' WHERE kind = 'music' AND status = 'ready';",
 ];

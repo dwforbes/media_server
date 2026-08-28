@@ -293,7 +293,9 @@ pub fn unfinished_files(conn: &Connection) -> Result<Vec<FileRow>> {
 pub fn update_tech(conn: &Connection, id: i64, tech: &TechInfo) -> Result<()> {
     conn.execute(
         "UPDATE files SET container = ?2, duration_ms = ?3, width = ?4, height = ?5,
-                          video_codec = ?6, audio_codec = ?7, updated_at = unixepoch()
+                          video_codec = ?6, audio_codec = ?7, audio_profile = ?8,
+                          audio_bitrate = ?9, audio_sample_rate = ?10, audio_bit_depth = ?11,
+                          audio_channels = ?12, updated_at = unixepoch()
          WHERE id = ?1",
         params![
             id,
@@ -302,7 +304,12 @@ pub fn update_tech(conn: &Connection, id: i64, tech: &TechInfo) -> Result<()> {
             tech.width,
             tech.height,
             tech.video_codec,
-            tech.audio_codec
+            tech.audio_codec,
+            tech.audio_profile,
+            tech.audio_bitrate,
+            tech.audio_sample_rate,
+            tech.audio_bit_depth,
+            tech.audio_channels
         ],
     )?;
     Ok(())
@@ -369,6 +376,11 @@ pub struct ItemDetail {
     pub height: Option<i64>,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
+    pub audio_profile: Option<String>,
+    pub audio_bitrate: Option<i64>,
+    pub audio_sample_rate: Option<i64>,
+    pub audio_bit_depth: Option<i64>,
+    pub audio_channels: Option<i64>,
     pub added_at_text: String,
     pub has_art: bool,
     pub year: Option<i64>,
@@ -404,7 +416,9 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 mu.title, mu.artist, mu.album, mu.track_no, mu.year,
                 (SELECT group_concat(g.name, ', ') FROM track_genres tg
                   JOIN genres g ON g.id = tg.genre_id WHERE tg.file_id = f.id),
-                t.rating, t.imdb_id, m.collection, mu.album_artist
+                t.rating, t.imdb_id, m.collection, mu.album_artist,
+                f.audio_profile, f.audio_bitrate, f.audio_sample_rate, f.audio_bit_depth,
+                f.audio_channels
          FROM files f
          LEFT JOIN movies m        ON m.file_id  = f.id
          LEFT JOIN tv_episodes t   ON t.file_id  = f.id
@@ -437,6 +451,11 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 height: r.get(8)?,
                 video_codec: r.get(9)?,
                 audio_codec: r.get(10)?,
+                audio_profile: r.get(35)?,
+                audio_bitrate: r.get(36)?,
+                audio_sample_rate: r.get(37)?,
+                audio_bit_depth: r.get(38)?,
+                audio_channels: r.get(39)?,
                 added_at_text: r.get(11)?,
                 has_art: r.get(12)?,
                 year: r.get::<_, Option<i64>>(14)?.or(r.get(29)?),
