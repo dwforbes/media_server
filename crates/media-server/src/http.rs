@@ -1707,6 +1707,15 @@ async fn item_page(
         })
         .collect();
     let head = page_head(&heading, PLAYER_STYLE);
+    // Same "⌂ top" as the browse pages, plus a jump to the item's section.
+    let top_nav = {
+        let (section_id, section_name) = match detail.kind {
+            media_db::MediaKind::Movies => ("mv", "Movies"),
+            media_db::MediaKind::Tv => ("tv", "TV Shows"),
+            media_db::MediaKind::Music => ("mu", "Music"),
+        };
+        format!("<a href=\"/\">⌂ top</a> · <a href=\"/browse/{section_id}\">{section_name}</a>")
+    };
     let html = if detail.kind == media_db::MediaKind::Music {
         // The player lives on the detail page itself, and the next track
         // is swapped in place when one ends (see PLAYER_SCRIPT): the
@@ -1722,7 +1731,7 @@ async fn item_page(
         let next_id = next.as_ref().map(|n| n.file_id.to_string()).unwrap_or_default();
         format!(
             "{head}<body class=\"detail\">\
-             <p id=\"top\" data-swap><a href=\"/\">⌂ browse</a></p>\
+             <p id=\"top\" data-swap>{top_nav}</p>\
              <div id=\"above\" data-swap>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
              {subtitle_html}{plot}</div>\
              <div style=\"overflow:hidden\">\
@@ -1741,7 +1750,7 @@ async fn item_page(
     } else {
         format!(
             "{head}<body class=\"detail\">\
-             <p><a href=\"/\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
+             <p>{top_nav}</p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
              {subtitle_html}{plot}{play_links}\
              <table style=\"border-collapse:collapse\">{rows}</table>{nav}{PAGE_CLOSE}"
         )
