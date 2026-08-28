@@ -23,6 +23,16 @@ pub struct SeriesInfo {
     pub tmdb_id: i64,
     pub name: String,
     pub poster_path: Option<String>,
+    pub plot: Option<String>,
+    pub imdb_id: Option<String>,
+}
+
+/// One season of a series: its own overview plus every episode's
+/// (title, overview) keyed by episode number.
+#[derive(Default)]
+pub struct SeasonInfo {
+    pub overview: Option<String>,
+    pub episodes: HashMap<i64, (String, String)>,
 }
 
 pub struct Tmdb {
@@ -176,7 +186,9 @@ impl Tmdb {
     }
 
 
-    /// Best TV-series match by name.
+    /// Best TV-series match by name. The search hit settles the identity;
+    /// one follow-up details call supplies the overview and IMDb id (the
+    /// search response has no external ids).
     pub fn find_series(&self, name: &str) -> Result<Option<SeriesInfo>> {
         let json = self.get("/search/tv", &[("query", name), ("include_adult", "false")])?;
         let Some(hit) = json
@@ -186,33 +198,52 @@ impl Tmdb {
         else {
             return Ok(None);
         };
+        let tmdb_id = hit.get("id").and_then(Value::as_i64).context("result missing id")?;
+        let details = self
+            .get_opt(&format!("/tv/{tmdb_id}"), &[("append_to_response", "external_ids")])
+            .unwrap_or(None);
+        let source = details.as_ref().unwrap_or(hit);
         Ok(Some(SeriesInfo {
-            tmdb_id: hit.get("id").and_then(Value::as_i64).context("result missing id")?,
-            name: hit
+            tmdb_id,
+            name: source
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or(name)
                 .to_string(),
-            poster_path: hit
+            poster_path: source
                 .get("poster_path")
                 .and_then(Value::as_str)
+                .map(str::to_string),
+            plot: source
+                .get("overview")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            imdb_id: details
+                .as_ref()
+                .and_then(|d| d.pointer("/external_ids/imdb_id"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
                 .map(str::to_string),
         }))
     }
 
-    /// Episode (title, overview) for one season, keyed by episode number.
-    /// One API call covers the whole season.
-    pub fn season_episode_titles(
-        &self,
-        series_id: i64,
-        season: i64,
-    ) -> Result<HashMap<i64, (String, String)>> {
+    /// One season of a series — its overview and every episode's
+    /// (title, overview). One API call covers the whole season.
+    pub fn season_details(&self, series_id: i64, season: i64) -> Result<SeasonInfo> {
         let json = match self.get(&format!("/tv/{series_id}/season/{season}"), &[]) {
             Ok(j) => j,
-            // A season TMDB doesn't know just yields no titles.
-            Err(_) => return Ok(HashMap::new()),
+            // A season TMDB doesn't know just yields no data.
+            Err(_) => return Ok(SeasonInfo::default()),
         };
-        let mut out = HashMap::new();
+        let mut out = SeasonInfo {
+            overview: json
+                .get("overview")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            episodes: HashMap::new(),
+        };
         if let Some(episodes) = json.get("episodes").and_then(|e| e.as_array()) {
             for episode in episodes {
                 if let (Some(number), Some(name)) = (
@@ -224,7 +255,7 @@ impl Tmdb {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    out.insert(number, (name.to_string(), overview));
+                    out.episodes.insert(number, (name.to_string(), overview));
                 }
             }
         }

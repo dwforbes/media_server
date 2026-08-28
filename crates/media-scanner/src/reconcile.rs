@@ -73,6 +73,20 @@ pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Resu
         if !entry.file_type().is_file() {
             continue;
         }
+        // Directory-level TV sidecars aren't media files; ingest them
+        // directly (idempotent, and cheap enough to redo every pass).
+        if root.kind == media_db::MediaKind::Tv {
+            let name = entry.file_name().to_str().unwrap_or("");
+            if name == extract::SHOW_NFO || name == extract::SEASON_NFO {
+                if let Ok(rel) = entry.path().strip_prefix(root_path) {
+                    let rel = rel.to_string_lossy();
+                    if let Err(err) = extract::ingest_tv_dir_nfo(conn, root, &rel) {
+                        tracing::warn!("ingesting {}/{rel}: {err:#}", root.path);
+                    }
+                }
+                continue;
+            }
+        }
         let Some(mime) = media_mime(root, entry.path()) else { continue };
         let Ok(rel) = entry.path().strip_prefix(root_path) else { continue };
         let rel = rel.to_string_lossy().to_string();

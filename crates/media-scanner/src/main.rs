@@ -302,7 +302,14 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         .map(str::to_lowercase)
         .unwrap_or_default();
     if ext == "nfo" {
-        refresh_nfo_sibling(conn, cfg, root, &rel)?;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if root.kind == media_db::MediaKind::Tv
+            && (name == extract::SHOW_NFO || name == extract::SEASON_NFO)
+        {
+            extract::ingest_tv_dir_nfo(conn, root, &rel)?;
+        } else {
+            refresh_nfo_sibling(conn, cfg, root, &rel)?;
+        }
         return Ok(false);
     }
     if ext == "jpg" || ext == "png" {

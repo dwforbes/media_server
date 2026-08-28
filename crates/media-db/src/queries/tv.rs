@@ -135,6 +135,56 @@ pub fn series_art(conn: &Connection, series: &str) -> Result<Option<i64>> {
     Ok(stmt.query_row([series], |r| r.get(0)).optional()?)
 }
 
+/// Series-level metadata ingested from a tvshow.nfo sidecar.
+pub struct SeriesMeta {
+    pub plot: Option<String>,
+    pub rating: Option<f64>,
+    pub imdb_id: Option<String>,
+}
+
+pub fn upsert_series(
+    conn: &Connection,
+    name: &str,
+    plot: Option<&str>,
+    rating: Option<f64>,
+    imdb_id: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO tv_series(name, plot, rating, imdb_id) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(name) DO UPDATE SET
+             plot = excluded.plot, rating = excluded.rating, imdb_id = excluded.imdb_id",
+        params![name, plot, rating, imdb_id],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_season(conn: &Connection, series: &str, season: i64, plot: Option<&str>) -> Result<()> {
+    conn.execute(
+        "INSERT INTO tv_seasons(series, season, plot) VALUES (?1, ?2, ?3)
+         ON CONFLICT(series, season) DO UPDATE SET plot = excluded.plot",
+        params![series, season, plot],
+    )?;
+    Ok(())
+}
+
+pub fn series_info(conn: &Connection, series: &str) -> Result<Option<SeriesMeta>> {
+    let mut stmt =
+        conn.prepare("SELECT plot, rating, imdb_id FROM tv_series WHERE name = ?1")?;
+    Ok(stmt
+        .query_row([series], |r| {
+            Ok(SeriesMeta { plot: r.get(0)?, rating: r.get(1)?, imdb_id: r.get(2)? })
+        })
+        .optional()?)
+}
+
+pub fn season_info(conn: &Connection, series: &str, season: i64) -> Result<Option<String>> {
+    let mut stmt =
+        conn.prepare("SELECT plot FROM tv_seasons WHERE series = ?1 AND season = ?2")?;
+    let plot: Option<Option<String>> =
+        stmt.query_row(params![series, season], |r| r.get(0)).optional()?;
+    Ok(plot.flatten())
+}
+
 /// One episode's art to stand in for a season.
 pub fn season_art(conn: &Connection, series: &str, season: i64) -> Result<Option<i64>> {
     let mut stmt = conn.prepare(

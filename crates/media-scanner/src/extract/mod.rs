@@ -245,6 +245,53 @@ pub fn music_meta_mtime(abs: &Path, root: &Path) -> Option<i64> {
         .max()
 }
 
+/// Directory-level TV sidecars: series metadata in the series folder,
+/// season metadata in a season subfolder (Kodi names).
+pub const SHOW_NFO: &str = "tvshow.nfo";
+pub const SEASON_NFO: &str = "season.nfo";
+
+/// Ingest a directory-level TV sidecar into the tv_series / tv_seasons
+/// decoration tables. Cheap enough to re-run on every watcher event and
+/// every reconcile pass; a deleted sidecar leaves the stored row behind
+/// (harmless — rows only decorate series that exist in tv_episodes).
+pub fn ingest_tv_dir_nfo(conn: &Connection, root: &Root, rel: &str) -> Result<()> {
+    let abs = Path::new(&root.path).join(rel);
+    let Some(data) = nfo::read_file(&abs) else { return Ok(()) };
+    let dir_name = |p: Option<&Path>| {
+        p.and_then(|d| d.file_name())
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+    };
+    let dir = abs.parent();
+    if abs.file_name().and_then(|n| n.to_str()) == Some(SHOW_NFO) {
+        // The series name: nfo <title>, else the folder name.
+        let Some(series) = data.title.clone().or_else(|| dir_name(dir)) else { return Ok(()) };
+        tv::upsert_series(
+            conn, &series, data.plot.as_deref(), data.rating, data.imdb_id.as_deref(),
+        )?;
+        tracing::debug!("ingested series metadata for {series:?} from {}/{rel}", root.path);
+    } else {
+        // season.nfo: series from <showtitle> (else the folder above the
+        // season folder), season from <seasonnumber>/<season> (else the
+        // first number in the season folder's name).
+        let series = data.show_title.clone().or_else(|| dir_name(dir.and_then(Path::parent)));
+        let season = data.season.or_else(|| {
+            let name = dir_name(dir)?;
+            let digits: String =
+                name.chars().skip_while(|c| !c.is_ascii_digit()).take_while(char::is_ascii_digit).collect();
+            digits.parse().ok()
+        });
+        let (Some(series), Some(season)) = (series, season) else {
+            tracing::warn!("{}/{rel}: cannot tell which series/season this is; ignored", root.path);
+            return Ok(());
+        };
+        tv::upsert_season(conn, &series, season, data.plot.as_deref())?;
+        tracing::debug!("ingested season metadata for {series:?} S{season} from {}/{rel}", root.path);
+    }
+    Ok(())
+}
+
 /// Sidecar image names recognized as art for a whole directory.
 pub const DIR_ART_NAMES: &[&str] =
     &["cover.jpg", "cover.png", "folder.jpg", "front.jpg", "poster.jpg", "poster.png"];

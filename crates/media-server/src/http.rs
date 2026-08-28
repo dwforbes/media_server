@@ -642,6 +642,21 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
             .unwrap_or_default(),
         _ => String::new(),
     };
+    // Series and season pages carry the description (and, for a series,
+    // the IMDb rating/link) ingested from tvshow.nfo / season.nfo.
+    let description = match &node {
+        ObjectId::TvSeries(series) => tv::series_info(&conn, series)
+            .ok()
+            .flatten()
+            .map(|meta| series_meta_html(&meta))
+            .unwrap_or_default(),
+        ObjectId::TvSeason { series, season } => tv::season_info(&conn, series, *season)
+            .ok()
+            .flatten()
+            .map(|plot| format!("<p style=\"max-width:38em\">{}</p>", xml_escape(&plot)))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
     drop(conn);
     let children = match children {
         Ok(c) => c,
@@ -670,13 +685,37 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     let head = page_head(&xml_escape(&title), "");
     let html = format!(
         "{head}<body>\
-         <p><a href=\"/\">⌂ top</a></p>{art}<h1>{}</h1>{back_link}{search_box}\
+         <p><a href=\"/\">⌂ top</a></p>{art}<h1>{}</h1>{description}{back_link}{search_box}\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
         xml_escape(&title)
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
+
+/// Series description plus an IMDb rating/link, same idiom as the detail
+/// page's facts table.
+fn series_meta_html(meta: &media_db::queries::tv::SeriesMeta) -> String {
+    let mut out = String::new();
+    if let Some(plot) = &meta.plot {
+        out.push_str(&format!("<p style=\"max-width:38em\">{}</p>", xml_escape(plot)));
+    }
+    let imdb = meta.imdb_id.as_deref().filter(|id| id.starts_with("tt"));
+    let line = match (meta.rating, imdb) {
+        (Some(rating), Some(id)) => Some(format!(
+            "IMDb {rating:.1} / 10 — <a href=\"https://www.imdb.com/title/{id}/\">{id}</a>"
+        )),
+        (Some(rating), None) => Some(format!("IMDb {rating:.1} / 10")),
+        (None, Some(id)) => Some(format!(
+            "IMDb — <a href=\"https://www.imdb.com/title/{id}/\">{id}</a>"
+        )),
+        (None, None) => None,
+    };
+    if let Some(line) = line {
+        out.push_str(&format!("<p style=\"color:#666\">{line}</p>"));
+    }
+    out
+}
 
 fn srt_to_vtt(srt: &str) -> String {
     let mut out = String::from("WEBVTT\n\n");

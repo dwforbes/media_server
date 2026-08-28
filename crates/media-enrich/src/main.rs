@@ -625,10 +625,20 @@ fn main() -> Result<()> {
         episodes: Vec<EpTask>,          // episodes needing an .nfo
         poster_dest: Option<PathBuf>,   // series-folder poster to write
         loose_posters: Vec<PathBuf>,    // per-file posters for folderless episodes
+        show_nfo_dest: Option<PathBuf>, // series-folder tvshow.nfo to write
+        season_nfo_dests: Vec<(i64, PathBuf)>, // season-folder season.nfo to write
+    }
+    #[derive(Default)]
+    struct SeriesAcc {
+        name: String,
+        series_dir: PathBuf,
+        episodes: Vec<EpTask>,
+        loose_posters: Vec<PathBuf>,
+        /// Season subfolders seen, by season number.
+        season_dirs: std::collections::BTreeMap<i64, PathBuf>,
     }
     let season_dir_re = regex::Regex::new(r"(?i)^(season[ ._-]*\d*|s\d{1,2})$").unwrap();
-    let mut groups: std::collections::BTreeMap<String, (String, PathBuf, Vec<EpTask>, Vec<PathBuf>)> =
-        Default::default();
+    let mut groups: std::collections::BTreeMap<String, SeriesAcc> = Default::default();
     let mut tv_up_to_date = 0usize;
     for root in config.roots.iter().filter(|r| r.kind == "tv") {
         if !root.path.is_dir() {
@@ -674,32 +684,78 @@ fn main() -> Result<()> {
             }
             let loose = series_dir == root.path;
 
-            let group = groups
-                .entry(parsed.series.to_lowercase())
-                .or_insert_with(|| (parsed.series.clone(), series_dir.clone(), Vec::new(), Vec::new()));
+            let group = groups.entry(parsed.series.to_lowercase()).or_insert_with(|| SeriesAcc {
+                name: parsed.series.clone(),
+                series_dir: series_dir.clone(),
+                ..Default::default()
+            });
             if !loose {
-                group.1 = series_dir;
+                group.series_dir = series_dir.clone();
+            }
+            if let Some(season_dir) = path.parent().filter(|p| *p != series_dir) {
+                group
+                    .season_dirs
+                    .entry(parsed.season)
+                    .or_insert_with(|| season_dir.to_path_buf());
             }
             if write_nfo {
-                group.2.push(EpTask { path: path.clone(), season: parsed.season, episode: parsed.episode });
+                group.episodes.push(EpTask { path: path.clone(), season: parsed.season, episode: parsed.episode });
             } else {
                 tv_up_to_date += 1;
             }
             if !args.no_posters && loose && (!poster_path_for(&path).exists() || args.refresh) {
-                group.3.push(path);
+                group.loose_posters.push(path);
             }
         }
     }
     let mut series_plans: Vec<SeriesPlan> = Vec::new();
-    for (_, (name, series_dir, episodes, loose_posters)) in groups {
+    for (_, acc) in groups {
+        let SeriesAcc { name, series_dir, episodes, loose_posters, season_dirs } = acc;
+        let is_series_folder =
+            series_dir.file_name().is_some() && !config.roots.iter().any(|r| r.path == series_dir);
         let poster_file = series_dir.join("poster.jpg");
-        let poster_dest = (!args.no_posters
-            && series_dir.file_name().is_some()
-            && !config.roots.iter().any(|r| r.path == series_dir)
-            && (!poster_file.exists() || args.refresh))
-        .then_some(poster_file);
-        if !episodes.is_empty() || poster_dest.is_some() || !loose_posters.is_empty() {
-            series_plans.push(SeriesPlan { name, episodes, poster_dest, loose_posters });
+        let poster_dest =
+            (!args.no_posters && is_series_folder && (!poster_file.exists() || args.refresh))
+                .then_some(poster_file);
+        // Series-level tvshow.nfo (name, overview, IMDb id/rating), same
+        // upgrade rules as episode sidecars: a generated one missing a
+        // field predates the feature and is rewritten in place.
+        let show_nfo = series_dir.join("tvshow.nfo");
+        let show_probe = nfo_state(&show_nfo);
+        let write_show_nfo = is_series_folder
+            && match show_probe.state {
+                NfoState::Missing => true,
+                NfoState::Generated => args.refresh || !show_probe.has_plot || !show_probe.has_imdb,
+                NfoState::HandWritten => args.refresh && args.force,
+            };
+        // Season-level season.nfo (the season's own TMDB overview), one
+        // per season subfolder.
+        let season_nfo_dests: Vec<(i64, PathBuf)> = season_dirs
+            .into_iter()
+            .filter(|(_, dir)| {
+                let probe = nfo_state(&dir.join("season.nfo"));
+                match probe.state {
+                    NfoState::Missing => true,
+                    NfoState::Generated => args.refresh || !probe.has_plot,
+                    NfoState::HandWritten => args.refresh && args.force,
+                }
+            })
+            .map(|(season, dir)| (season, dir.join("season.nfo")))
+            .collect();
+        if !episodes.is_empty()
+            || poster_dest.is_some()
+            || !loose_posters.is_empty()
+            || write_show_nfo
+            || !season_nfo_dests.is_empty()
+        {
+            series_plans.push(SeriesPlan {
+                name,
+                episodes,
+                poster_dest,
+                loose_posters,
+                show_nfo_dest: write_show_nfo.then_some(show_nfo),
+                season_nfo_dests,
+            });
         }
     }
 
@@ -743,9 +799,15 @@ fn main() -> Result<()> {
         }
         for plan in &series_plans {
             println!(
-                "would enrich series \"{}\": {} episode .nfo{}{}",
+                "would enrich series \"{}\": {} episode .nfo{}{}{}{}",
                 plan.name,
                 plan.episodes.len(),
+                if plan.show_nfo_dest.is_some() { ", tvshow.nfo" } else { "" },
+                if plan.season_nfo_dests.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} season.nfo", plan.season_nfo_dests.len())
+                },
                 if plan.poster_dest.is_some() { ", series poster" } else { "" },
                 if plan.loose_posters.is_empty() {
                     String::new()
@@ -889,7 +951,16 @@ fn main() -> Result<()> {
         plot: String,
         imdb_id: Option<String>,
     }
+    // Series tvshow.nfo writes are deferred like the episodes': the series
+    // IMDb id joins the same ratings-dataset pass.
+    struct PendingShow {
+        nfo_path: PathBuf,
+        name: String,
+        plot: Option<String>,
+        imdb_id: Option<String>,
+    }
     let mut pending_episodes: Vec<PendingEpisode> = Vec::new();
+    let mut pending_shows: Vec<PendingShow> = Vec::new();
     for plan in &series_plans {
         let info = match tmdb.find_series(&plan.name) {
             Ok(Some(info)) => info,
@@ -902,17 +973,15 @@ fn main() -> Result<()> {
         };
         std::thread::sleep(Duration::from_millis(args.delay_ms));
 
-        let mut season_titles: std::collections::HashMap<
-            i64,
-            std::collections::HashMap<i64, (String, String)>,
-        > = Default::default();
+        let mut season_data: std::collections::HashMap<i64, tmdb::SeasonInfo> = Default::default();
         for ep in &plan.episodes {
-            if !season_titles.contains_key(&ep.season) {
-                let titles = tmdb.season_episode_titles(info.tmdb_id, ep.season)?;
+            if !season_data.contains_key(&ep.season) {
+                let data = tmdb.season_details(info.tmdb_id, ep.season)?;
                 std::thread::sleep(Duration::from_millis(args.delay_ms));
-                season_titles.insert(ep.season, titles);
+                season_data.insert(ep.season, data);
             }
-            let (title, overview) = season_titles[&ep.season]
+            let (title, overview) = season_data[&ep.season]
+                .episodes
                 .get(&ep.episode)
                 .cloned()
                 .unwrap_or_else(|| (format!("Episode {}", ep.episode), String::new()));
@@ -928,6 +997,29 @@ fn main() -> Result<()> {
                 title,
                 plot: overview,
                 imdb_id,
+            });
+        }
+
+        // Season overviews ride the same per-season call the episode
+        // titles come from; seasons with no episode work still get one.
+        for (season, dest) in &plan.season_nfo_dests {
+            if !season_data.contains_key(season) {
+                let data = tmdb.season_details(info.tmdb_id, *season)?;
+                std::thread::sleep(Duration::from_millis(args.delay_ms));
+                season_data.insert(*season, data);
+            }
+            let overview = season_data[season].overview.as_deref().unwrap_or("");
+            match std::fs::write(dest, render_season_nfo(&info.name, *season, overview)) {
+                Ok(()) => nfos_written += 1,
+                Err(err) => eprintln!("{}: nfo not written: {err:#}", dest.display()),
+            }
+        }
+        if let Some(dest) = &plan.show_nfo_dest {
+            pending_shows.push(PendingShow {
+                nfo_path: dest.clone(),
+                name: info.name.clone(),
+                plot: info.plot.clone(),
+                imdb_id: info.imdb_id.clone(),
             });
         }
 
@@ -961,10 +1053,11 @@ fn main() -> Result<()> {
         );
     }
 
-    if !pending_episodes.is_empty() {
+    if !pending_episodes.is_empty() || !pending_shows.is_empty() {
         let needed: std::collections::HashSet<String> = pending_episodes
             .iter()
             .filter_map(|e| e.imdb_id.clone())
+            .chain(pending_shows.iter().filter_map(|s| s.imdb_id.clone()))
             .collect();
         let ep_ratings = if needed.is_empty() || args.no_ratings {
             Default::default()
@@ -991,10 +1084,22 @@ fn main() -> Result<()> {
                 Err(err) => eprintln!("{}: nfo not written: {err:#}", pe.nfo_path.display()),
             }
         }
-        println!(
-            "episode IMDb ratings attached: {ep_rated}/{}",
-            pending_episodes.len()
-        );
+        if !pending_episodes.is_empty() {
+            println!(
+                "episode IMDb ratings attached: {ep_rated}/{}",
+                pending_episodes.len()
+            );
+        }
+        for show in &pending_shows {
+            let rating = show.imdb_id.as_ref().and_then(|id| ep_ratings.get(id)).copied();
+            match std::fs::write(
+                &show.nfo_path,
+                render_show_nfo(&show.name, show.plot.as_deref(), rating, show.imdb_id.as_deref()),
+            ) {
+                Ok(()) => nfos_written += 1,
+                Err(err) => eprintln!("{}: nfo not written: {err:#}", show.nfo_path.display()),
+            }
+        }
     }
 
     println!(
@@ -1018,6 +1123,46 @@ fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Series-level tvshow.nfo (Kodi convention: sits in the series folder).
+/// <plot> and the imdb uniqueid are always present (possibly empty) so
+/// the upgrade checks can tell "TMDB has nothing" apart from "predates
+/// the feature" — same convention as the episode sidecars.
+fn render_show_nfo(
+    name: &str,
+    plot: Option<&str>,
+    rating: Option<f64>,
+    imdb_id: Option<&str>,
+) -> String {
+    let rating_line = rating
+        .map(|r| format!("  <rating>{r:.1}</rating>\n"))
+        .unwrap_or_default();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+         <!-- {MARKER} (TMDB) -->\n<tvshow>\n\
+         \x20 <title>{}</title>\n\
+         \x20 <plot>{}</plot>\n{rating_line}\
+         \x20 <uniqueid type=\"imdb\">{}</uniqueid>\n</tvshow>\n",
+        xml_escape(name),
+        xml_escape(plot.unwrap_or("")),
+        xml_escape(imdb_id.unwrap_or(""))
+    )
+}
+
+/// Season-level season.nfo (Kodi convention: sits in the season folder).
+/// <showtitle> is included so the scanner can key the season without
+/// guessing from directory names.
+fn render_season_nfo(show: &str, season: i64, plot: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+         <!-- {MARKER} (TMDB) -->\n<season>\n\
+         \x20 <showtitle>{}</showtitle>\n\
+         \x20 <seasonnumber>{season}</seasonnumber>\n\
+         \x20 <plot>{}</plot>\n</season>\n",
+        xml_escape(show),
+        xml_escape(plot)
+    )
 }
 
 fn render_episode_nfo(

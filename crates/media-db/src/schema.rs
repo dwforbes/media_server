@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 11;
+pub const SCHEMA_VERSION: i32 = 12;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -146,4 +146,23 @@ pub const MIGRATIONS: &[&str] = &[
      ALTER TABLE files ADD COLUMN audio_bit_depth INTEGER;
      ALTER TABLE files ADD COLUMN audio_channels INTEGER;
      UPDATE files SET status = 'pending' WHERE kind = 'music' AND status = 'ready';",
+    // 11 -> 12: series- and season-level metadata, ingested from
+    // directory-level tvshow.nfo / season.nfo sidecars. Series and seasons
+    // stay virtual groupings of tv_episodes (matched by name, NOCASE like
+    // every series query); these tables only decorate them, so an orphan
+    // row for a removed series is harmless and never shown.
+    r#"
+    CREATE TABLE tv_series (
+        name    TEXT PRIMARY KEY COLLATE NOCASE,
+        plot    TEXT,
+        rating  REAL,
+        imdb_id TEXT
+    );
+    CREATE TABLE tv_seasons (
+        series TEXT NOT NULL COLLATE NOCASE,
+        season INTEGER NOT NULL,
+        plot   TEXT,
+        PRIMARY KEY (series, season)
+    );
+    "#,
 ];
