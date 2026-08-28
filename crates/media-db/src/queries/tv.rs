@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::models::{BrowseItem, MediaKind, TechInfo};
 use crate::queries::{files, merge_renditions};
@@ -105,13 +105,45 @@ pub fn series_list(conn: &Connection) -> Result<Vec<(String, Option<i64>)>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-pub fn seasons(conn: &Connection, series: &str) -> Result<Vec<i64>> {
+/// Seasons of a series as (season, art file id): each season is
+/// represented by the artwork of its first episode that has any (usually
+/// the season or series poster every episode in the folder inherits).
+pub fn seasons(conn: &Connection, series: &str) -> Result<Vec<(i64, Option<i64>)>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT t.season FROM tv_episodes t JOIN files f ON f.id = t.file_id
-         WHERE f.status = 'ready' AND t.series = ?1 COLLATE NOCASE ORDER BY t.season",
+        "SELECT t.season,
+                (SELECT f2.id FROM tv_episodes t2 JOIN files f2 ON f2.id = t2.file_id
+                  WHERE f2.status = 'ready' AND f2.art IS NOT NULL
+                    AND t2.series = ?1 COLLATE NOCASE AND t2.season = t.season
+                  ORDER BY t2.episode LIMIT 1)
+         FROM tv_episodes t JOIN files f ON f.id = t.file_id
+         WHERE f.status = 'ready' AND t.series = ?1 COLLATE NOCASE
+         GROUP BY t.season ORDER BY t.season",
     )?;
-    let rows = stmt.query_map([series], |r| r.get(0))?;
+    let rows = stmt.query_map([series], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// One episode's art to stand in for the whole series, first season first
+/// (the same promotion `series_list` does, for a single series).
+pub fn series_art(conn: &Connection, series: &str) -> Result<Option<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id FROM tv_episodes t JOIN files f ON f.id = t.file_id
+         WHERE f.status = 'ready' AND f.art IS NOT NULL
+           AND t.series = ?1 COLLATE NOCASE
+         ORDER BY t.season, t.episode LIMIT 1",
+    )?;
+    Ok(stmt.query_row([series], |r| r.get(0)).optional()?)
+}
+
+/// One episode's art to stand in for a season.
+pub fn season_art(conn: &Connection, series: &str, season: i64) -> Result<Option<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id FROM tv_episodes t JOIN files f ON f.id = t.file_id
+         WHERE f.status = 'ready' AND f.art IS NOT NULL
+           AND t.series = ?1 COLLATE NOCASE AND t.season = ?2
+         ORDER BY t.episode LIMIT 1",
+    )?;
+    Ok(stmt.query_row(params![series, season], |r| r.get(0)).optional()?)
 }
 
 /// Every episode of a series across all seasons, ordered season/episode,

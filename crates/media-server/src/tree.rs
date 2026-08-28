@@ -318,11 +318,14 @@ pub fn browse_children(
         }
         TvSeries(series) => tv::seasons(conn, series)?
             .into_iter()
-            .map(|season| {
-                container(
-                    &TvSeason { series: series.clone(), season },
-                    oid,
-                    season_title(season),
+            .map(|(season, art)| {
+                with_art(
+                    container(
+                        &TvSeason { series: series.clone(), season },
+                        oid,
+                        season_title(season),
+                    ),
+                    art,
                 )
             })
             .collect(),
@@ -443,10 +446,11 @@ pub fn browse_metadata(conn: &Connection, oid: &ObjectId) -> Result<Entry> {
         }
         MusicFolders => container(oid, &Music, "Folders"),
         Tv => container(oid, &Root, "TV Shows"),
-        TvSeries(s) => container(oid, &Tv, s.clone()),
-        TvSeason { series, season } => {
-            container(oid, &TvSeries(series.clone()), season_title(*season))
-        }
+        TvSeries(s) => with_art(container(oid, &Tv, s.clone()), tv::series_art(conn, s)?),
+        TvSeason { series, season } => with_art(
+            container(oid, &TvSeries(series.clone()), season_title(*season)),
+            tv::season_art(conn, series, *season)?,
+        ),
         TvFolders => container(oid, &Tv, "Folders"),
         Dir { root_id, rel_dir } => {
             let root = files::get_root(conn, *root_id)?

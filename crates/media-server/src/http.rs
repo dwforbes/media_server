@@ -608,13 +608,15 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
         return StatusCode::NOT_FOUND.into_response();
     };
     let conn = state.db.lock().await;
-    let (title, parent_id) = tree::browse_metadata(&conn, &node)
+    let (title, parent_id, art_item) = tree::browse_metadata(&conn, &node)
         .ok()
         .map(|entry| match entry {
-            tree::Entry::Container { title, parent, .. } => (title, Some(parent)),
-            tree::Entry::Item { item, .. } => (item.title, None),
+            tree::Entry::Container { title, parent, art_item, .. } => {
+                (title, Some(parent), art_item)
+            }
+            tree::Entry::Item { item, .. } => (item.title, None, None),
         })
-        .unwrap_or_else(|| ("Browse".to_string(), None));
+        .unwrap_or_else(|| ("Browse".to_string(), None, None));
     // "Back to <parent>" one level up; the root points at itself, so skip.
     let back_link = parent_id
         .filter(|p| *p != oid)
@@ -659,10 +661,16 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
             tree::Entry::Item { item, .. } => rows.push_str(&listing_row(&item)),
         }
     }
+    // A container with representative art (a series or season, borrowing
+    // an episode's poster) shows it floated beside the listing, same
+    // placement as the detail page.
+    let art = art_item
+        .map(|id| format!("<img src=\"/art/{id}\" alt=\"\" class=\"art\">"))
+        .unwrap_or_default();
     let head = page_head(&xml_escape(&title), "");
     let html = format!(
         "{head}<body>\
-         <p><a href=\"/\">⌂ top</a></p><h1>{}</h1>{back_link}{search_box}\
+         <p><a href=\"/\">⌂ top</a></p>{art}<h1>{}</h1>{back_link}{search_box}\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
         xml_escape(&title)
     );
