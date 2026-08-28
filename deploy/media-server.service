@@ -31,13 +31,16 @@ ProtectSystem=strict
 ProtectHome=read-only
 # The .uuid file is created next to the db on first run.
 ReadWritePaths=/home/pi/.local/state/mediaserver
-# HTTPS ([tls] in media-server.toml): hand the certificate and key to the
-# service with systemd credentials — the service reads them as
-# $CREDENTIALS_DIRECTORY/cert.pem and key.pem, so point `cert`/`key` there.
-# Root-owned files stay root-owned and the sandbox stays as tight as it is.
-# (For a Let's Encrypt certificate, name the live/ files here.)
-#LoadCredential=cert.pem:/etc/letsencrypt/live/media.example.net/fullchain.pem
-#LoadCredential=key.pem:/etc/letsencrypt/live/media.example.net/privkey.pem
+# HTTPS ([tls] in media-server.toml): the service re-reads `cert`/`key`
+# every reload_secs, so renewals are picked up without a restart — provided
+# the files it reads are the ones being renewed. Let's Encrypt's live/ files
+# are root-only, so install a certbot deploy hook that copies them somewhere
+# this User= can read (ProtectSystem=strict still allows reading /etc):
+#   /etc/letsencrypt/renewal-hooks/deploy/mediaserver.sh
+#     install -o root -g pi -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/mediaserver/fullchain.pem
+#     install -o root -g pi -m 0640 "$RENEWED_LINEAGE/privkey.pem"   /etc/mediaserver/privkey.pem
+# (LoadCredential= would also expose them, but it copies at service start
+# only, so a renewal would then need a restart to take effect.)
 
 [Install]
 WantedBy=multi-user.target

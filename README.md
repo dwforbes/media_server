@@ -369,16 +369,19 @@ host the client used, while the plain port keeps the canonical UPnP URLs. With
 `redirect_pages = true`, only HTML pages (`/`, `/browse…`, `/item/…`, `/play/…`,
 `/search`) are redirected — media, artwork, playlists, icons and the UPnP endpoints
 never are. The certificate and key are re-read every `reload_secs`, so a renewed
-certificate needs no restart; a missing file or an unbindable port fails at startup.
+certificate needs no restart — as long as the files it reads are the renewed ones (see
+below); a missing file or an unbindable port fails at startup.
 TLS is rustls with the `ring` provider (pure Rust, no cmake or C toolchain on the Pi).
 
 For the certificate, a public name with a Let's Encrypt certificate obtained via a
 DNS-01 challenge works well even for a LAN-only address (the name can resolve to a
-private IP; nothing on port 80 needs exposing). Under the systemd unit's sandbox the
-tidy way to hand root-owned files to the service is `LoadCredential=` — see the
-commented lines in `deploy/media-server.service`; the files then appear as
-`$CREDENTIALS_DIRECTORY/cert.pem` and `key.pem`. HTTPS is a secure context, which
-is what browser features like the Media Session API and "Add to Home Screen" require.
+private IP; nothing on port 80 needs exposing). Let's Encrypt's `live/` files are
+root-only, so have a certbot deploy hook copy each renewal to files the service user can
+read — the commented recipe in `deploy/media-server.service` — and point `cert`/`key` at
+those; the hourly re-read then picks renewals up automatically. (systemd's
+`LoadCredential=` is not a fit here: it copies files once at service start, so a
+renewal would need a restart.) HTTPS is a secure context, which is what browser
+features like the Media Session API and "Add to Home Screen" require.
 
 ### Remuxing MKV to MP4
 
