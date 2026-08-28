@@ -685,7 +685,8 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     let head = page_head(&xml_escape(&title), "");
     let html = format!(
         "{head}<body>\
-         <p><a href=\"/\">⌂ top</a></p>{art}<h1>{}</h1>{description}{back_link}{search_box}\
+         <p><a href=\"/\">⌂ top</a></p>{art}<h1>{}</h1>{description}\
+         <div style=\"clear:both\"></div>{back_link}{search_box}\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
         xml_escape(&title)
     );
