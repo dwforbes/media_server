@@ -139,7 +139,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/favicon.ico", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.1.clone()) }))
         .route("/apple-touch-icon.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
         .route("/apple-touch-icon-precomposed.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
-        .route("/", get(index_page))
+        // The root is the library itself; /browse stays as an alias.
+        .route("/", get(|s: State<Arc<AppState>>| browse_page(s, Path("0".into()))))
         .route(
             "/playlist.m3u",
             get(|s: State<Arc<AppState>>, h: HeaderMap, https: Option<Extension<Https>>| {
@@ -543,7 +544,7 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
     let head = page_head("Search", "");
     let html = format!(
         "{head}<body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
-         <p><a href=\"/browse\">⌂ top</a></p><h1>Search</h1>\
+         <p><a href=\"/\">⌂ top</a></p><h1>Search</h1>\
          <p><a href=\"/browse/{}\">← Back to {}</a></p>{}\
          <p>{summary}</p>\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{PAGE_CLOSE}",
@@ -659,7 +660,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     let head = page_head(&xml_escape(&title), "");
     let html = format!(
         "{head}<body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
-         <p><a href=\"/browse\">⌂ top</a></p><h1>{}</h1>{back_link}{search_box}\
+         <p><a href=\"/\">⌂ top</a></p><h1>{}</h1>{back_link}{search_box}\
          <p><a href=\"/playlist/id/{oid}.m3u\">Playlist of everything below this point</a></p>\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
         xml_escape(&title)
@@ -667,44 +668,6 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
-/// Minimal index so the base URL is self-explanatory in a browser.
-async fn index_page(State(state): State<Arc<AppState>>) -> Response {
-    let conn = state.db.lock().await;
-    let counts: [(String, i64); 3] = ["movies", "tv", "music"].map(|kind| {
-        let n = conn
-            .query_row(
-                "SELECT count(*) FROM files WHERE kind = ?1 AND status = 'ready'",
-                [kind],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        (kind.to_string(), n)
-    });
-    drop(conn);
-    let name = xml_escape(&state.friendly_name);
-    let search_box = search_form("0", "");
-    let rows: String = counts
-        .iter()
-        .map(|(kind, n)| {
-            format!(
-                "<li><a href=\"/playlist/{kind}.m3u\">{kind}.m3u</a> — {n} items</li>"
-            )
-        })
-        .collect();
-    let head = page_head(&name, "");
-    let html = format!(
-        "{head}<body style=\"font-family:sans-serif;max-width:40em;margin:2em auto\">\
-         <h1>{name}</h1>\
-         <p>UPnP/DLNA media server. Clients normally discover it automatically; \
-         anything that can open a URL can also use these playlists directly:</p>\
-         {search_box}\
-         <ul><li><a href=\"/playlist.m3u\">playlist.m3u</a> — everything</li>{rows}</ul>\
-         <p><a href=\"/browse\">Browse the virtual library</a> — every folder \
-         (by genre, decade, rating, series/season, artist/album) offers its own playlist.</p>\
-         <p>Device description: <a href=\"/device.xml\">device.xml</a></p>{PAGE_CLOSE}"
-    );
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
-}
 
 fn srt_to_vtt(srt: &str) -> String {
     let mut out = String::from("WEBVTT\n\n");
@@ -1703,7 +1666,7 @@ async fn item_page(
         let next_id = next.as_ref().map(|n| n.file_id.to_string()).unwrap_or_default();
         format!(
             "{head}<body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
-             <p id=\"top\" data-swap><a href=\"/browse\">⌂ browse</a></p>\
+             <p id=\"top\" data-swap><a href=\"/\">⌂ browse</a></p>\
              <div id=\"above\" data-swap>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
              {subtitle_html}{plot}</div>\
              <div style=\"overflow:hidden\">\
@@ -1723,7 +1686,7 @@ async fn item_page(
     } else {
         format!(
             "{head}<body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
-             <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
+             <p><a href=\"/\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
              {subtitle_html}{plot}{play_links}\
              <table style=\"border-collapse:collapse\">{rows}</table>{nav}{PAGE_CLOSE}"
         )

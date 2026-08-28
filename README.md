@@ -191,12 +191,12 @@ routers/APs mistreat multicast in creative ways. Two escape hatches:
   Apple TVs until rebooted) needs the second hatch.
 - **A relay beacon on another segment**: run `media-announcer` on an always-on box
   in that network — see "Remote announcers" below.
-- **Playlists, no discovery at all**: `http://<server>:8200/` is a small index page,
-  and `/playlist.m3u` (or `/playlist/movies.m3u`, `/playlist/tv.m3u`,
-  `/playlist/music.m3u`) exposes the whole catalog with proper display titles to
-  anything that can open a URL — VLC's "Open Network Stream", a browser, a car head
-  unit. Same streaming endpoints as UPnP, zero SSDP. The full virtual tree is also
-  browsable as HTML at `/browse`, where **every container — a genre, a decade, a
+- **Playlists, no discovery at all**: `/playlist.m3u` (or `/playlist/movies.m3u`,
+  `/playlist/tv.m3u`, `/playlist/music.m3u`) exposes the whole catalog with proper
+  display titles to anything that can open a URL — VLC's "Open Network Stream", a
+  browser, a car head unit. Same streaming endpoints as UPnP, zero SSDP. The full
+  virtual tree is browsable as HTML at `http://<server>:8200/` (also `/browse`),
+  where **every container — a genre, a decade, a
   rating bucket, a series or season, an artist or album — offers its own playlist**
   (`/playlist/id/<objectid>.m3u`, recursive with per-file dedup, so a series playlist
   spans its seasons). Every item links to a **detail page** (`/item/<id>`) showing
