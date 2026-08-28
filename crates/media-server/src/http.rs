@@ -29,9 +29,29 @@ fn page_head(title: &str, extra: &str) -> String {
          <title>{title}</title>\
          <link rel=\"icon\" type=\"image/png\" sizes=\"48x48\" href=\"/icon/48.png\">\
          <link rel=\"icon\" type=\"image/png\" sizes=\"120x120\" href=\"/icon/120.png\">\
-         <link rel=\"apple-touch-icon\" href=\"/icon/120.png\">{extra}</head>\n"
+         <link rel=\"apple-touch-icon\" href=\"/icon/120.png\">{BASE_STYLE}{extra}</head>\n"
     )
 }
+
+/// Layout shared by every page. Widths and margins live here rather than
+/// inline so that phones get side padding (auto margins collapse to zero
+/// once the viewport is narrower than max-width, leaving text on the
+/// screen edge) and the detail page's poster stops floating beside a
+/// heading it would otherwise squeeze.
+const BASE_STYLE: &str = "<style>\
+html{-webkit-text-size-adjust:100%}\
+body{font-family:sans-serif;max-width:44em;margin:2em auto;padding:0 1.25rem 2rem;box-sizing:border-box}\
+body.detail{max-width:46em;line-height:1.5}\
+body.player{max-width:60em;margin:1.5em auto;background:#111;color:#ddd}\
+img.art{float:right;max-width:220px;margin:0 0 1em 1.5em;border-radius:6px}\
+table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
+p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:center}\
+@media (max-width:40em){\
+body{margin:1em auto;padding:0 1rem 1.5rem}\
+body.player{margin:.5em auto}\
+img.art{float:none;display:block;max-width:55%;margin:0 auto 1em}\
+h1{font-size:1.5em}}\
+</style>";
 
 const PAGE_CLOSE: &str = "\n</body></html>\n";
 
@@ -543,7 +563,7 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
     };
     let head = page_head("Search", "");
     let html = format!(
-        "{head}<body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
+        "{head}<body>\
          <p><a href=\"/\">⌂ top</a></p><h1>Search</h1>\
          <p><a href=\"/browse/{}\">← Back to {}</a></p>{}\
          <p>{summary}</p>\
@@ -659,7 +679,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     }
     let head = page_head(&xml_escape(&title), "");
     let html = format!(
-        "{head}<body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
+        "{head}<body>\
          <p><a href=\"/\">⌂ top</a></p><h1>{}</h1>{back_link}{search_box}\
          <p><a href=\"/playlist/id/{oid}.m3u\">Playlist of everything below this point</a></p>\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
@@ -827,8 +847,10 @@ const PLAYER_STYLE: &str = r#"<style>
   font-size: .85em; line-height: 1.5; text-align: left; }
 .infowrap:hover .card, .infowrap:focus-within .card { display: block; }
 .infowrap .card img { float: right; width: 6em; margin: 0 0 .6em .9em; border-radius: 4px; }
-.infowrap .card .facts { color: #9a9a9a; margin-top: .5em; }
-.infowrap .card .plot { margin-top: .5em; }
+/* Spans, not divs: the card sits inside a <p>, and a <div> would close
+   that <p> in the parser, dropping these outside the card entirely. */
+.infowrap .card .facts { display: block; color: #9a9a9a; margin-top: .5em; }
+.infowrap .card .plot { display: block; margin-top: .5em; }
 /* Dark surfaces (the player page, the card on either page): browser
    default link colours — navy visited links especially — vanish on
    near-black, so pin every link state to a light blue. */
@@ -1183,7 +1205,7 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         } else {
             plot.to_string()
         };
-        card.push_str(&format!("<div class=\"plot\">{}</div>", xml_escape(&trimmed)));
+        card.push_str(&format!("<span class=\"plot\">{}</span>", xml_escape(&trimmed)));
     }
     let mut facts: Vec<String> = Vec::new();
     // The rating links to the IMDb entry when we know it — the episode's
@@ -1213,7 +1235,7 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         facts.push(xml_escape(codec));
     }
     facts.push(human_size(detail.size));
-    card.push_str(&format!("<div class=\"facts\">{}</div>", facts.join(" · ")));
+    card.push_str(&format!("<span class=\"facts\">{}</span>", facts.join(" · ")));
 
     let poster = if detail.has_art {
         format!(" poster=\"/art/{id}\"")
@@ -1275,15 +1297,14 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
             None => format!("This is the last {noun} available."),
         };
         format!(
-            "<p style=\"color:#aaa;font-size:.9em\"><label><input type=\"checkbox\" \
+            "<p class=\"controls\" style=\"color:#aaa;font-size:.9em\"><label><input type=\"checkbox\" \
              id=\"autonext\" checked> Auto-play next {noun}</label>\
-             <span id=\"next-note\" data-swap style=\"margin-left:1.5em\">{next_note}</span></p>"
+             <span id=\"next-note\" data-swap>{next_note}</span></p>"
         )
     };
     let head = page_head(&heading, PLAYER_STYLE);
     let html = format!(
-        "{head}<body class=\"player\" style=\"font-family:sans-serif;max-width:60em;margin:1.5em auto;\
-         background:#111;color:#ddd\">\
+        "{head}<body class=\"player\">\
          <p id=\"top\" data-swap><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
          <span class=\"card\">{card}</span></span></p>\
          <h2 id=\"heading\" data-swap style=\"margin-bottom:.1em\">{heading}</h2>{context_line}\
@@ -1575,8 +1596,7 @@ async fn item_page(
 
     let art = if detail.has_art {
         format!(
-            "<img src=\"/art/{id}\" alt=\"\" style=\"float:right;max-width:220px;\
-             margin:0 0 1em 1.5em;border-radius:6px\">"
+            "<img src=\"/art/{id}\" alt=\"\" class=\"art\">"
         )
     } else {
         String::new()
@@ -1665,7 +1685,7 @@ async fn item_page(
         };
         let next_id = next.as_ref().map(|n| n.file_id.to_string()).unwrap_or_default();
         format!(
-            "{head}<body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
+            "{head}<body class=\"detail\">\
              <p id=\"top\" data-swap><a href=\"/\">⌂ browse</a></p>\
              <div id=\"above\" data-swap>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
              {subtitle_html}{plot}</div>\
@@ -1673,11 +1693,10 @@ async fn item_page(
              <audio id=\"player\" controls preload=\"metadata\" data-id=\"{id}\" data-next=\"{next_id}\" \
               style=\"display:block;width:100%\">\
              <source src=\"/media/{id}\" type=\"{mime}\"></audio>\
-             <p style=\"color:#666;font-size:.9em;margin:.4em 0\"><label><input type=\"checkbox\" \
-             id=\"autonext\" checked> Auto-play next song</label>\
-             <span id=\"next-note\" data-swap style=\"margin-left:1.5em\">{next_note}</span>\
-             <small id=\"direct\" data-swap style=\"margin-left:1.5em\">\
-             <a href=\"/media/{id}\">direct stream</a></small></p>\
+             <p class=\"controls\" style=\"color:#666;font-size:.9em;margin:.4em 0\">\
+             <label><input type=\"checkbox\" id=\"autonext\" checked> Auto-play next song</label>\
+             <span id=\"next-note\" data-swap>{next_note}</span>\
+             <small id=\"direct\" data-swap><a href=\"/media/{id}\">direct stream</a></small></p>\
              <p id=\"resume\" style=\"color:#393;font-size:.9em\"></p></div>\
              <div id=\"below\" data-swap><table style=\"border-collapse:collapse\">{rows}</table>{nav}</div>\
              {PLAYER_SCRIPT}{PAGE_CLOSE}",
@@ -1685,7 +1704,7 @@ async fn item_page(
         )
     } else {
         format!(
-            "{head}<body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
+            "{head}<body class=\"detail\">\
              <p><a href=\"/\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
              {subtitle_html}{plot}{play_links}\
              <table style=\"border-collapse:collapse\">{rows}</table>{nav}{PAGE_CLOSE}"
