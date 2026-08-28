@@ -28,6 +28,9 @@ pub struct Config {
     /// How many items the "Recently Added" views list per media type.
     #[serde(default = "default_recent_count")]
     pub recent_count: usize,
+    /// Optional HTTPS listener for the web pages on a second port. The
+    /// UPnP side stays on the plain `bind` (renderers cannot do TLS).
+    pub tls: Option<TlsConfig>,
     /// Seconds between periodic SSDP alive announcements. Lower helps
     /// clients on lossy links (wifi) discover the server sooner.
     #[serde(default = "default_ssdp_alive_secs")]
@@ -59,6 +62,36 @@ fn default_ffprobe() -> String {
 
 fn default_recent_count() -> usize {
     25
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    /// HTTPS listen address, e.g. "0.0.0.0:8443".
+    #[serde(default = "default_tls_bind")]
+    pub bind: SocketAddr,
+    /// The name the certificate is issued for; used in redirects and in
+    /// self-links when a request carries no Host header.
+    pub hostname: String,
+    /// PEM certificate chain and private key.
+    pub cert: PathBuf,
+    pub key: PathBuf,
+    /// Send browsers that open a page on the plain port to https://hostname.
+    /// Only HTML pages: media, artwork, playlists and the UPnP endpoints are
+    /// never redirected.
+    #[serde(default)]
+    pub redirect_pages: bool,
+    /// How often to re-read the certificate files, so a renewed certificate
+    /// is picked up without a restart.
+    #[serde(default = "default_reload_secs")]
+    pub reload_secs: u64,
+}
+
+fn default_tls_bind() -> SocketAddr {
+    "0.0.0.0:8443".parse().unwrap()
+}
+fn default_reload_secs() -> u64 {
+    3600
 }
 
 fn default_bind() -> SocketAddr {

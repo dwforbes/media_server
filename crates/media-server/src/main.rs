@@ -35,6 +35,9 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let cfg = config::Config::load(&args.config)?;
+    // rustls needs one process-wide crypto provider; ring is the only one
+    // compiled in (no cmake/C toolchain needed on the Pi).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let db_path = cfg.db_path();
 
     let conn = media_db::open_ro(&db_path)?;
@@ -74,6 +77,11 @@ async fn main() -> Result<()> {
             let _ = std::fs::create_dir_all(&dir);
             dir
         },
+        tls: cfg.tls.as_ref().map(|t| http::TlsInfo {
+            hostname: t.hostname.clone(),
+            port: t.bind.port(),
+            redirect_pages: t.redirect_pages,
+        }),
         subs_inflight: Default::default(),
     });
 
@@ -110,6 +118,13 @@ async fn main() -> Result<()> {
         .with_context(|| format!("binding {}", cfg.bind))?;
     tracing::info!("\"{}\" serving at {base_url} (uuid {uuid})", cfg.friendly_name);
 
+    // Optional HTTPS listener for the web pages: same router, second
+    // port, certificate re-read periodically so renewals need no restart.
+    let tls_handle = match &cfg.tls {
+        Some(tls) => Some(spawn_tls_listener(tls, http::router_tls(state.clone())).await?),
+        None => None,
+    };
+
     axum::serve(listener, http::router(state))
         .with_graceful_shutdown(async move {
             // SIGINT for the terminal, SIGTERM for systemd stop/restart.
@@ -130,8 +145,62 @@ async fn main() -> Result<()> {
         })
         .await?;
 
+    if let Some(handle) = tls_handle {
+        handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+    }
     ssdp::byebye(&ssdp_senders, &cfg.ssdp_unicast_clients, &uuid, &location).await;
     Ok(())
+}
+
+/// Bind the HTTPS port (failing loudly now rather than in a background
+/// task), serve `app` on it, and keep the certificate fresh.
+async fn spawn_tls_listener(
+    tls: &config::TlsConfig,
+    app: axum::Router,
+) -> Result<axum_server::Handle> {
+    use axum_server::tls_rustls::RustlsConfig;
+    let rustls = RustlsConfig::from_pem_file(&tls.cert, &tls.key)
+        .await
+        .with_context(|| format!("loading TLS certificate {} / key {}", tls.cert.display(), tls.key.display()))?;
+    let std_listener = std::net::TcpListener::bind(tls.bind)
+        .with_context(|| format!("binding {} for HTTPS", tls.bind))?;
+    std_listener.set_nonblocking(true)?;
+    let handle = axum_server::Handle::new();
+    let origin = http::TlsInfo {
+        hostname: tls.hostname.clone(),
+        port: tls.bind.port(),
+        redirect_pages: tls.redirect_pages,
+    }
+    .origin();
+    tracing::info!(
+        "web pages also at {origin} (HTTPS on {}{})",
+        tls.bind,
+        if tls.redirect_pages { "; plain-port page requests redirect there" } else { "" }
+    );
+
+    let (cert, key, every) = (tls.cert.clone(), tls.key.clone(), tls.reload_secs.max(30));
+    let reload = rustls.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(every)).await;
+            match reload.reload_from_pem_file(&cert, &key).await {
+                Ok(()) => tracing::debug!("TLS certificate re-read from {}", cert.display()),
+                Err(err) => tracing::warn!("TLS certificate reload failed ({}): {err}", cert.display()),
+            }
+        }
+    });
+
+    let server_handle = handle.clone();
+    tokio::spawn(async move {
+        let result = axum_server::from_tcp_rustls(std_listener, rustls)
+            .handle(server_handle)
+            .serve(app.into_make_service())
+            .await;
+        if let Err(err) = result {
+            tracing::error!("HTTPS listener stopped: {err}");
+        }
+    });
+    Ok(handle)
 }
 
 fn spawn_db_watch(db_path: &std::path::Path, state: Arc<AppState>) -> Result<()> {

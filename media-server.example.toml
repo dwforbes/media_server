@@ -21,6 +21,23 @@ friendly_name = "Home Media Server"
 # How many items each "Recently Added" view lists (Movies, TV Shows, Music).
 recent_count = 25
 
+# Optional HTTPS for the web pages on a second port. UPnP/DLNA stays on
+# the plain port above — renderers cannot do TLS — and nothing there
+# changes. The certificate must be issued for `hostname` (a Let's Encrypt
+# certificate obtained with a DNS-01 challenge for a name that resolves to
+# this host works well; see README "HTTPS for the web pages"). With
+# redirect_pages = true, browsers opening a page on the plain port are sent
+# to https://hostname; media, artwork, playlists and the UPnP endpoints are
+# never redirected. The certificate files are re-read every reload_secs so
+# renewals need no restart.
+#[tls]
+#bind = "0.0.0.0:8443"
+#hostname = "media.example.net"
+#cert = "/etc/mediaserver/fullchain.pem"
+#key = "/etc/mediaserver/privkey.pem"
+#redirect_pages = false
+#reload_secs = 3600
+
 # Seconds between periodic SSDP alive announcements (each sent twice per
 # cycle). Lower helps clients on lossy links (wifi) discover the server
 # sooner; 120 is a good balance.

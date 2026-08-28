@@ -346,6 +346,40 @@ The web player falls back to extracting on demand — same track choice — into
 (or could not write beside). Concurrent viewers of the same file share one
 extraction.
 
+### HTTPS for the web pages
+
+The browser pages can also be served over TLS on a second port, leaving the UPnP side
+untouched — SSDP `LOCATION`, `device.xml`, the SOAP endpoints and every DIDL `<res>` URL
+stay plain HTTP on `bind`, because renderers and TVs neither speak HTTPS nor could
+validate a private certificate. Add a `[tls]` section to `media-server.toml`:
+
+```toml
+[tls]
+bind = "0.0.0.0:8443"
+hostname = "media.example.net"          # the name the certificate is issued for
+cert = "/etc/mediaserver/fullchain.pem"
+key = "/etc/mediaserver/privkey.pem"
+redirect_pages = false                  # true: plain-port page requests → https://hostname
+reload_secs = 3600                      # re-read the files this often (renewals)
+```
+
+The same router serves both ports. Pages use relative media URLs, so nothing is
+mixed-content over HTTPS; playlists fetched over HTTPS carry `https://` entries for the
+host the client used, while the plain port keeps the canonical UPnP URLs. With
+`redirect_pages = true`, only HTML pages (`/`, `/browse…`, `/item/…`, `/play/…`,
+`/search`) are redirected — media, artwork, playlists, icons and the UPnP endpoints
+never are. The certificate and key are re-read every `reload_secs`, so a renewed
+certificate needs no restart; a missing file or an unbindable port fails at startup.
+TLS is rustls with the `ring` provider (pure Rust, no cmake or C toolchain on the Pi).
+
+For the certificate, a public name with a Let's Encrypt certificate obtained via a
+DNS-01 challenge works well even for a LAN-only address (the name can resolve to a
+private IP; nothing on port 80 needs exposing). Under the systemd unit's sandbox the
+tidy way to hand root-owned files to the service is `LoadCredential=` — see the
+commented lines in `deploy/media-server.service`; the files then appear as
+`$CREDENTIALS_DIRECTORY/cert.pem` and `key.pem`. HTTPS is a secure context, which
+is what browser features like the Media Session API and "Add to Home Screen" require.
+
 ### Remuxing MKV to MP4
 
 Matroska is fine for TVs and VLC but not for browsers: Firefox won't range-stream it

@@ -2,9 +2,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::extract::{Extension, Path, Query, Request, State};
+use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
 use axum::Router;
 use media_db::mime::{AUDIO_EXTENSIONS, VIDEO_EXTENSIONS};
@@ -49,12 +50,76 @@ pub struct AppState {
     pub ffmpeg: String,
     pub ffprobe: String,
     pub vtt_cache: std::path::PathBuf,
+    /// The HTTPS listener, when configured.
+    pub tls: Option<TlsInfo>,
     /// Subtitle extractions in progress, by file id. The first request
     /// spawns one detached ffmpeg and parks a receiver here; every later
     /// request for the same file awaits that receiver instead of starting
     /// another ffmpeg. The entry is removed (after the cache file lands)
     /// just before the sender is dropped, which is what wakes the waiters.
     pub subs_inflight: std::sync::Mutex<std::collections::HashMap<i64, tokio::sync::watch::Receiver<()>>>,
+}
+
+pub struct TlsInfo {
+    pub hostname: String,
+    pub port: u16,
+    pub redirect_pages: bool,
+}
+
+impl TlsInfo {
+    /// "https://host" or "https://host:port".
+    pub fn origin(&self) -> String {
+        if self.port == 443 {
+            format!("https://{}", self.hostname)
+        } else {
+            format!("https://{}:{}", self.hostname, self.port)
+        }
+    }
+}
+
+/// Request extension marking requests that arrived over the HTTPS listener.
+#[derive(Clone, Copy)]
+pub struct Https;
+
+/// The same routes as `router`, with every request marked as HTTPS.
+pub fn router_tls(state: Arc<AppState>) -> Router {
+    router(state).layer(middleware::from_fn(|mut req: Request, next: Next| async move {
+        req.extensions_mut().insert(Https);
+        next.run(req).await
+    }))
+}
+
+/// Absolute URL prefix for links that leave the page (playlists): the
+/// host the client actually used when over HTTPS, else the canonical
+/// UPnP base URL.
+fn request_base_url(state: &AppState, headers: &HeaderMap, https: bool) -> String {
+    if !https {
+        return state.base_url.clone();
+    }
+    match headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
+        Some(host) if !host.is_empty() => format!("https://{host}"),
+        _ => state.tls.as_ref().map(TlsInfo::origin).unwrap_or_else(|| state.base_url.clone()),
+    }
+}
+
+/// With `redirect_pages`, HTML page requests on the plain listener go to
+/// the HTTPS origin. Everything UPnP clients fetch (device.xml, control,
+/// /media, /art, playlists, icons) is left alone.
+async fn redirect_pages(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    if let Some(tls) = state.tls.as_ref().filter(|t| t.redirect_pages) {
+        let path = req.uri().path();
+        let is_page = path == "/"
+            || path == "/browse"
+            || path.starts_with("/browse/")
+            || path.starts_with("/item/")
+            || path.starts_with("/play/")
+            || path == "/search";
+        if is_page && req.method() == Method::GET && req.extensions().get::<Https>().is_none() {
+            let rest = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+            return Redirect::temporary(&format!("{}{rest}", tls.origin())).into_response();
+        }
+    }
+    next.run(req).await
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -75,7 +140,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/apple-touch-icon.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
         .route("/apple-touch-icon-precomposed.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
         .route("/", get(index_page))
-        .route("/playlist.m3u", get(|s: State<Arc<AppState>>| playlist(s, Path("all".into()))))
+        .route(
+            "/playlist.m3u",
+            get(|s: State<Arc<AppState>>, h: HeaderMap, https: Option<Extension<Https>>| {
+                playlist(s, Path("all".into()), h, https)
+            }),
+        )
         .route("/playlist/{section}", get(playlist))
         .route("/playlist/id/{oid}", get(playlist_by_id))
         .route("/browse", get(|s: State<Arc<AppState>>| browse_page(s, Path("0".into()))))
@@ -85,6 +155,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/playlist/search", get(search_playlist))
         .route("/play/{id}", get(play_page))
         .route("/subs/{id}", get(serve_subs))
+        .layer(middleware::from_fn_with_state(state.clone(), redirect_pages))
         .with_state(state)
 }
 
@@ -346,15 +417,12 @@ fn playlist_title(item: &media_db::BrowseItem) -> String {
     }
 }
 
-fn render_m3u(state: &AppState, entries: &[media_db::BrowseItem]) -> Response {
+fn render_m3u(base_url: &str, entries: &[media_db::BrowseItem]) -> Response {
     let mut out = String::from("#EXTM3U\n");
     for item in entries {
         let secs = item.duration_ms.map(|ms| ms / 1000).unwrap_or(-1);
         let title = playlist_title(item).replace(['\n', '\r'], " ");
-        out.push_str(&format!(
-            "#EXTINF:{secs},{title}\n{}/media/{}\n",
-            state.base_url, item.file_id
-        ));
+        out.push_str(&format!("#EXTINF:{secs},{title}\n{base_url}/media/{}\n", item.file_id));
     }
     (
         [(header::CONTENT_TYPE, "audio/x-mpegurl; charset=utf-8")],
@@ -364,7 +432,13 @@ fn render_m3u(state: &AppState, entries: &[media_db::BrowseItem]) -> Response {
 }
 
 /// M3U for any node of the virtual tree, by its object id.
-async fn playlist_by_id(State(state): State<Arc<AppState>>, Path(oid): Path<String>) -> Response {
+async fn playlist_by_id(
+    State(state): State<Arc<AppState>>,
+    Path(oid): Path<String>,
+    headers: HeaderMap,
+    https: Option<Extension<Https>>,
+) -> Response {
+    let base = request_base_url(&state, &headers, https.is_some());
     let oid = oid.trim_end_matches(".m3u");
     let Some(node) = ObjectId::parse(oid) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -375,7 +449,7 @@ async fn playlist_by_id(State(state): State<Arc<AppState>>, Path(oid): Path<Stri
     let result = flatten_items(&conn, &node, state.recent_count, 5, &mut seen, &mut entries);
     drop(conn);
     match result {
-        Ok(()) => render_m3u(&state, &entries),
+        Ok(()) => render_m3u(&base, &entries),
         Err(err) => {
             tracing::warn!("playlist {oid}: {err:#}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -385,7 +459,13 @@ async fn playlist_by_id(State(state): State<Arc<AppState>>, Path(oid): Path<Stri
 
 /// Discovery-free fallback: the catalog as M3U, playable by anything that
 /// can open a URL — no SSDP involved. Friendly aliases over the tree.
-async fn playlist(State(state): State<Arc<AppState>>, Path(section): Path<String>) -> Response {
+async fn playlist(
+    State(state): State<Arc<AppState>>,
+    Path(section): Path<String>,
+    headers: HeaderMap,
+    https: Option<Extension<Https>>,
+) -> Response {
+    let base = request_base_url(&state, &headers, https.is_some());
     let node = match section.trim_end_matches(".m3u") {
         "all" => ObjectId::Root,
         "movies" => ObjectId::Movies,
@@ -399,7 +479,7 @@ async fn playlist(State(state): State<Arc<AppState>>, Path(section): Path<String
     let result = flatten_items(&conn, &node, state.recent_count, 5, &mut seen, &mut entries);
     drop(conn);
     match result {
-        Ok(()) => render_m3u(&state, &entries),
+        Ok(()) => render_m3u(&base, &entries),
         Err(err) => {
             tracing::warn!("playlist {section}: {err:#}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -438,7 +518,7 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
 
     let mut rows = String::new();
     for item in &hits {
-        rows.push_str(&listing_row(item, &state.base_url));
+        rows.push_str(&listing_row(item));
     }
     let summary = if terms.is_empty() {
         "Enter a search term.".to_string()
@@ -478,7 +558,10 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
 async fn search_playlist(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SearchQuery>,
+    headers: HeaderMap,
+    https: Option<Extension<Https>>,
 ) -> Response {
+    let base = request_base_url(&state, &headers, https.is_some());
     let scope_id = if q.scope.is_empty() { "0".to_string() } else { q.scope.clone() };
     let Some(scope) = ObjectId::parse(&scope_id) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -491,7 +574,7 @@ async fn search_playlist(
     let hits = search_scope(&conn, &scope, &terms, ClassFilter::Any, state.recent_count);
     drop(conn);
     match hits {
-        Ok(entries) => render_m3u(&state, &entries),
+        Ok(entries) => render_m3u(&base, &entries),
         Err(err) => {
             tracing::warn!("search playlist: {err:#}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -570,7 +653,7 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
                  <small><a href=\"/playlist/id/{id}.m3u\">[playlist]</a></small></li>",
                 xml_escape(&title)
             )),
-            tree::Entry::Item { item, .. } => rows.push_str(&listing_row(&item, &state.base_url)),
+            tree::Entry::Item { item, .. } => rows.push_str(&listing_row(&item)),
         }
     }
     let head = page_head(&xml_escape(&title), "");
@@ -1244,12 +1327,11 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
          <video id=\"player\" controls autoplay playsinline{poster} \
           data-id=\"{id}\" data-next=\"{next_id}\" \
           style=\"width:100%;max-height:80vh;background:#000\">\
-         <source src=\"{}/media/{id}\" type=\"{}\">{track}\
+         <source src=\"/media/{id}\" type=\"{}\">{track}\
          Your browser cannot play this format.</video>\
          <p id=\"resume\" style=\"color:#9c9;font-size:.9em\"></p>\
          <p style=\"color:#666;font-size:.8em\">← / → skip 10 seconds</p>\
          {autonext}{subs_async}{PLAYER_SCRIPT}{PAGE_CLOSE}",
-        state.base_url,
         xml_escape(&servable.mime)
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
@@ -1261,7 +1343,7 @@ fn is_uhd(width: Option<i64>, height: Option<i64>) -> bool {
 
 /// One listing row: 4K chip, title, play link, and the IMDb rating (movies
 /// and episodes that have one) boxed at the right edge.
-fn listing_row(item: &media_db::BrowseItem, base_url: &str) -> String {
+fn listing_row(item: &media_db::BrowseItem) -> String {
     let chip = if item.kind == media_db::MediaKind::Music {
         String::new()
     } else {
@@ -1269,11 +1351,10 @@ fn listing_row(item: &media_db::BrowseItem, base_url: &str) -> String {
     };
     format!(
         "<li style=\"display:flex;align-items:center\">{chip}<a href=\"/item/{0}\">{1}</a>\
-         <small style=\"margin-left:.4em\"><a href=\"{2}/media/{0}\">[▶ play]</a></small>\
-         {3}</li>",
+         <small style=\"margin-left:.4em\"><a href=\"/media/{0}\">[▶ play]</a></small>\
+         {2}</li>",
         item.file_id,
         xml_escape(&item.title),
-        base_url,
         rating_chip(item.rating)
     )
 }
@@ -1583,8 +1664,7 @@ async fn item_page(
             .unwrap_or_default();
         format!(
             "<p><a href=\"/play/{id}\" style=\"font-size:1.1em\">▶ Play in browser</a> \
-             &nbsp; <small><a href=\"{}/media/{id}\">direct stream</a></small></p>{warning}",
-            state.base_url
+             &nbsp; <small><a href=\"/media/{id}\">direct stream</a></small></p>{warning}"
         )
     };
     let plot = detail
@@ -1629,16 +1709,15 @@ async fn item_page(
              <div style=\"overflow:hidden\">\
              <audio id=\"player\" controls preload=\"metadata\" data-id=\"{id}\" data-next=\"{next_id}\" \
               style=\"display:block;width:100%\">\
-             <source src=\"{base}/media/{id}\" type=\"{mime}\"></audio>\
+             <source src=\"/media/{id}\" type=\"{mime}\"></audio>\
              <p style=\"color:#666;font-size:.9em;margin:.4em 0\"><label><input type=\"checkbox\" \
              id=\"autonext\" checked> Auto-play next song</label>\
              <span id=\"next-note\" data-swap style=\"margin-left:1.5em\">{next_note}</span>\
              <small id=\"direct\" data-swap style=\"margin-left:1.5em\">\
-             <a href=\"{base}/media/{id}\">direct stream</a></small></p>\
+             <a href=\"/media/{id}\">direct stream</a></small></p>\
              <p id=\"resume\" style=\"color:#393;font-size:.9em\"></p></div>\
              <div id=\"below\" data-swap><table style=\"border-collapse:collapse\">{rows}</table>{nav}</div>\
              {PLAYER_SCRIPT}{PAGE_CLOSE}",
-            base = state.base_url,
             mime = xml_escape(&detail.mime)
         )
     } else {

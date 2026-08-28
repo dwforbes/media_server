@@ -31,6 +31,13 @@ ProtectSystem=strict
 ProtectHome=read-only
 # The .uuid file is created next to the db on first run.
 ReadWritePaths=/home/pi/.local/state/mediaserver
+# HTTPS ([tls] in media-server.toml): hand the certificate and key to the
+# service with systemd credentials — the service reads them as
+# $CREDENTIALS_DIRECTORY/cert.pem and key.pem, so point `cert`/`key` there.
+# Root-owned files stay root-owned and the sandbox stays as tight as it is.
+# (For a Let's Encrypt certificate, name the live/ files here.)
+#LoadCredential=cert.pem:/etc/letsencrypt/live/media.example.net/fullchain.pem
+#LoadCredential=key.pem:/etc/letsencrypt/live/media.example.net/privkey.pem
 
 [Install]
 WantedBy=multi-user.target
