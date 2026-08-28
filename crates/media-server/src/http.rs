@@ -17,12 +17,22 @@ use crate::didl::{self, xml_escape, DLNA_FEATURES};
 use crate::objectid::ObjectId;
 use crate::{soap, tree, xml};
 
-/// Common start of every HTML page: charset and the device icon as the
-/// favicon / home-screen icon (the same PNGs device.xml advertises).
-const HTML_HEAD: &str = "{HTML_HEAD}\
-    <link rel=\"icon\" type=\"image/png\" sizes=\"48x48\" href=\"/icon/48.png\">\
-    <link rel=\"icon\" type=\"image/png\" sizes=\"120x120\" href=\"/icon/120.png\">\
-    <link rel=\"apple-touch-icon\" href=\"/icon/120.png\">";
+/// Everything before <body>: doctype, <html>/<head>, charset, viewport,
+/// the title, the device icon as favicon / home-screen icon (the same
+/// PNGs device.xml advertises) and any page-specific head markup. Every
+/// page ends with PAGE_CLOSE.
+fn page_head(title: &str, extra: &str) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>{title}</title>\
+         <link rel=\"icon\" type=\"image/png\" sizes=\"48x48\" href=\"/icon/48.png\">\
+         <link rel=\"icon\" type=\"image/png\" sizes=\"120x120\" href=\"/icon/120.png\">\
+         <link rel=\"apple-touch-icon\" href=\"/icon/120.png\">{extra}</head>\n"
+    )
+}
+
+const PAGE_CLOSE: &str = "\n</body></html>\n";
 
 const CDS_SERVICE: &str = "urn:schemas-upnp-org:service:ContentDirectory:1";
 const CMS_SERVICE: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
@@ -450,13 +460,13 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
             urlencode(&scope_id)
         )
     };
+    let head = page_head("Search", "");
     let html = format!(
-        "{HTML_HEAD}<title>Search</title>\
-         <body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
+        "{head}<body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
          <p><a href=\"/browse\">⌂ top</a></p><h1>Search</h1>\
          <p><a href=\"/browse/{}\">← Back to {}</a></p>{}\
          <p>{summary}</p>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>",
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{PAGE_CLOSE}",
         xml_escape(&scope_id),
         xml_escape(&scope_title),
         search_form(&scope_id, &q.q)
@@ -563,13 +573,12 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
             tree::Entry::Item { item, .. } => rows.push_str(&listing_row(&item, &state.base_url)),
         }
     }
+    let head = page_head(&xml_escape(&title), "");
     let html = format!(
-        "{HTML_HEAD}<title>{}</title>\
-         <body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
+        "{head}<body style=\"font-family:sans-serif;max-width:44em;margin:2em auto\">\
          <p><a href=\"/browse\">⌂ top</a></p><h1>{}</h1>{back_link}{search_box}\
          <p><a href=\"/playlist/id/{oid}.m3u\">Playlist of everything below this point</a></p>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}",
-        xml_escape(&title),
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
         xml_escape(&title)
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
@@ -599,9 +608,9 @@ async fn index_page(State(state): State<Arc<AppState>>) -> Response {
             )
         })
         .collect();
+    let head = page_head(&name, "");
     let html = format!(
-        "{HTML_HEAD}<title>{name}</title>\
-         <body style=\"font-family:sans-serif;max-width:40em;margin:2em auto\">\
+        "{head}<body style=\"font-family:sans-serif;max-width:40em;margin:2em auto\">\
          <h1>{name}</h1>\
          <p>UPnP/DLNA media server. Clients normally discover it automatically; \
          anything that can open a URL can also use these playlists directly:</p>\
@@ -609,7 +618,7 @@ async fn index_page(State(state): State<Arc<AppState>>) -> Response {
          <ul><li><a href=\"/playlist.m3u\">playlist.m3u</a> — everything</li>{rows}</ul>\
          <p><a href=\"/browse\">Browse the virtual library</a> — every folder \
          (by genre, decade, rating, series/season, artist/album) offers its own playlist.</p>\
-         <p>Device description: <a href=\"/device.xml\">device.xml</a></p>"
+         <p>Device description: <a href=\"/device.xml\">device.xml</a></p>{PAGE_CLOSE}"
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -1225,9 +1234,9 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
              <span id=\"next-note\" data-swap style=\"margin-left:1.5em\">{next_note}</span></p>"
         )
     };
+    let head = page_head(&heading, PLAYER_STYLE);
     let html = format!(
-        "{HTML_HEAD}<title>{heading}</title>{PLAYER_STYLE}\
-         <body class=\"player\" style=\"font-family:sans-serif;max-width:60em;margin:1.5em auto;\
+        "{head}<body class=\"player\" style=\"font-family:sans-serif;max-width:60em;margin:1.5em auto;\
          background:#111;color:#ddd\">\
          <p id=\"top\" data-swap><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
          <span class=\"card\">{card}</span></span></p>\
@@ -1239,7 +1248,7 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
          Your browser cannot play this format.</video>\
          <p id=\"resume\" style=\"color:#9c9;font-size:.9em\"></p>\
          <p style=\"color:#666;font-size:.8em\">← / → skip 10 seconds</p>\
-         {autonext}{subs_async}{PLAYER_SCRIPT}",
+         {autonext}{subs_async}{PLAYER_SCRIPT}{PAGE_CLOSE}",
         state.base_url,
         xml_escape(&servable.mime)
     );
@@ -1598,6 +1607,7 @@ async fn item_page(
             )
         })
         .collect();
+    let head = page_head(&heading, PLAYER_STYLE);
     let html = if detail.kind == media_db::MediaKind::Music {
         // The player lives on the detail page itself, and the next track
         // is swapped in place when one ends (see PLAYER_SCRIPT): the
@@ -1612,8 +1622,7 @@ async fn item_page(
         };
         let next_id = next.as_ref().map(|n| n.file_id.to_string()).unwrap_or_default();
         format!(
-            "{HTML_HEAD}<title>{heading}</title>{PLAYER_STYLE}\
-             <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
+            "{head}<body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
              <p id=\"top\" data-swap><a href=\"/browse\">⌂ browse</a></p>\
              <div id=\"above\" data-swap>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
              {subtitle_html}{plot}</div>\
@@ -1628,17 +1637,16 @@ async fn item_page(
              <a href=\"{base}/media/{id}\">direct stream</a></small></p>\
              <p id=\"resume\" style=\"color:#393;font-size:.9em\"></p></div>\
              <div id=\"below\" data-swap><table style=\"border-collapse:collapse\">{rows}</table>{nav}</div>\
-             {PLAYER_SCRIPT}",
+             {PLAYER_SCRIPT}{PAGE_CLOSE}",
             base = state.base_url,
             mime = xml_escape(&detail.mime)
         )
     } else {
         format!(
-            "{HTML_HEAD}<title>{heading}</title>{PLAYER_STYLE}\
-             <body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
+            "{head}<body style=\"font-family:sans-serif;max-width:46em;margin:2em auto;line-height:1.5\">\
              <p><a href=\"/browse\">⌂ browse</a></p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
              {subtitle_html}{plot}{play_links}\
-             <table style=\"border-collapse:collapse\">{rows}</table>{nav}"
+             <table style=\"border-collapse:collapse\">{rows}</table>{nav}{PAGE_CLOSE}"
         )
     };
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
