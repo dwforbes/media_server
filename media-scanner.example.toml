@@ -15,6 +15,19 @@ reconcile_interval_hours = 1
 
 ffprobe_path = "ffprobe"
 
+# Automatic "skip intro / skip credits" detection: episodes of a season
+# share nearly identical intro and credits audio, so the scanner
+# fingerprints each episode's first ten and last five minutes
+# (chromaprint via ffmpeg) and stores the stretches episodes have in
+# common as skippable segments. Runs after new media settles, one season
+# at a time; fingerprints are cached in the catalog, so only new or
+# changed episodes are decoded. Chapter markers and .edl sidecars always
+# take precedence over detection. On by default; the section is optional.
+#[segments]
+#auto = true
+# ffmpeg for audio decoding; falls back to [enrich] ffmpeg_path, then "ffmpeg".
+#ffmpeg_path = "ffmpeg"
+
 # Run media-enrich automatically when new media is catalogued. The scanner
 # waits for a quiet period after the last arrival (so a season drop is one
 # run), keeps one run in flight, and never triggers on sidecar changes.

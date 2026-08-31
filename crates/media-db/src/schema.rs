@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -185,5 +185,22 @@ pub const MIGRATIONS: &[&str] = &[
     );
     ALTER TABLE files ADD COLUMN edl_mtime INTEGER;
     UPDATE files SET edl_mtime = -1 WHERE kind = 'tv';
+    "#,
+    // 13 -> 14: cached chromaprint fingerprints for the automatic
+    // intro/credits detector — the head and tail audio windows of each TV
+    // episode, keyed to size+mtime (plus the analyzer version) so a
+    // changed file re-fingerprints. A row also marks its file as
+    // analyzed, even with empty prints (undecodable audio), which is what
+    // stops re-analysis loops; a season is stale while any ready episode
+    // lacks a current row.
+    r#"
+    CREATE TABLE segment_prints (
+        file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        size    INTEGER NOT NULL,
+        mtime   INTEGER NOT NULL,
+        ver     INTEGER NOT NULL,
+        head    BLOB NOT NULL,
+        tail    BLOB NOT NULL
+    );
     "#,
 ];

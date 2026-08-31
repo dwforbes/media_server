@@ -20,6 +20,28 @@ pub struct Config {
     pub ffprobe_path: String,
     /// Optional: run media-enrich automatically when new media appears.
     pub enrich: Option<EnrichConfig>,
+    /// Automatic intro/credits detection by audio similarity (on by
+    /// default; section optional).
+    #[serde(default)]
+    pub segments: SegmentsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SegmentsConfig {
+    /// Master switch for the audio detector.
+    #[serde(default = "default_true")]
+    pub auto: bool,
+    /// ffmpeg binary for audio decoding; falls back to the [enrich]
+    /// ffmpeg_path, then plain "ffmpeg".
+    #[serde(default)]
+    pub ffmpeg_path: Option<String>,
+}
+
+impl Default for SegmentsConfig {
+    fn default() -> Self {
+        SegmentsConfig { auto: true, ffmpeg_path: None }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,6 +141,15 @@ impl Config {
 
     pub fn db_path(&self) -> PathBuf {
         self.db_path.clone().unwrap_or_else(media_db::open::default_db_path)
+    }
+
+    /// The ffmpeg binary the segment detector decodes audio with.
+    pub fn segments_ffmpeg(&self) -> String {
+        self.segments
+            .ffmpeg_path
+            .clone()
+            .or_else(|| self.enrich.as_ref().and_then(|e| e.ffmpeg_path.clone()))
+            .unwrap_or_else(|| "ffmpeg".into())
     }
 
     /// Roots as (absolute path string, kind), for media_db::sync_roots.

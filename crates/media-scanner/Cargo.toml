@@ -19,3 +19,4 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 walkdir = "2"
+rusty-chromaprint = "0.3.0"

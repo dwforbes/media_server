@@ -1,3 +1,4 @@
+mod analyze;
 mod config;
 mod extract;
 mod reconcile;
@@ -113,6 +114,40 @@ impl EnrichRunner {
     }
 }
 
+/// Debounced driver for the audio segment detector: one season per tick,
+/// which keeps the watcher responsive, and only after new media has
+/// settled and enrichment is idle — enrichment may rewrite media files
+/// (subtitle embedding, remuxing), which would immediately re-stale the
+/// fingerprints it just computed.
+struct AnalyzeRunner {
+    ffmpeg: String,
+    pending: bool,
+    last_add: Instant,
+}
+
+const ANALYZE_QUIET: Duration = Duration::from_secs(60);
+
+impl AnalyzeRunner {
+    fn note_media_added(&mut self) {
+        self.pending = true;
+        self.last_add = Instant::now();
+    }
+
+    fn tick(&mut self, conn: &mut Connection, enrich_idle: bool) {
+        if !self.pending || !enrich_idle || self.last_add.elapsed() < ANALYZE_QUIET {
+            return;
+        }
+        match analyze::analyze_next(conn, &self.ffmpeg) {
+            Ok(true) => {} // a season was analyzed; more may remain — keep pending
+            Ok(false) => self.pending = false,
+            Err(err) => {
+                tracing::warn!("segment analysis: {err:#}");
+                self.pending = false;
+            }
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(about = "Watches media source folders and maintains the shared catalog database")]
 struct Args {
@@ -161,6 +196,10 @@ fn main() -> Result<()> {
                 Err(err) => tracing::warn!("could not launch {}: {err}", command.display()),
             }
         }
+        if cfg.segments.auto {
+            let ffmpeg = cfg.segments_ffmpeg();
+            while analyze::analyze_next(&mut conn, &ffmpeg)? {}
+        }
         tracing::info!("--once: reconcile complete, exiting");
         return Ok(());
     }
@@ -174,6 +213,13 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    // pending from the start: seasons left stale by an earlier run (or a
+    // schema upgrade) get picked up once the startup quiet period passes.
+    let mut analyzer = cfg.segments.auto.then(|| AnalyzeRunner {
+        ffmpeg: cfg.segments_ffmpeg(),
+        pending: true,
+        last_add: Instant::now(),
+    });
 
     // Watch all roots; the debouncer waits for events to settle before
     // delivering, which absorbs most mid-copy churn.
@@ -216,6 +262,9 @@ fn main() -> Result<()> {
                             if let Some(runner) = &mut enricher {
                                 runner.note_media_added();
                             }
+                            if let Some(runner) = &mut analyzer {
+                                runner.note_media_added();
+                            }
                         }
                         Ok(false) => {}
                         Err(err) => tracing::warn!("handling {}: {err:#}", path.display()),
@@ -238,11 +287,20 @@ fn main() -> Result<()> {
                 if let Some(runner) = &mut enricher {
                     runner.note_media_added();
                 }
+                if let Some(runner) = &mut analyzer {
+                    runner.note_media_added();
+                }
             }
             last_reconcile = Instant::now();
         }
         if let Some(runner) = &mut enricher {
             runner.tick();
+        }
+        if let Some(runner) = &mut analyzer {
+            let enrich_idle = enricher
+                .as_ref()
+                .map_or(true, |e| e.child.is_none() && !e.pending);
+            runner.tick(&mut conn, enrich_idle);
         }
     }
 }
