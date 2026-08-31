@@ -1025,18 +1025,31 @@ async fn extract_subs(state: &AppState, id: i64, path: &std::path::Path, cache: 
 /// :focus-within means keyboard users get it too. Touch devices can't
 /// hover, which is why the season/episode context is also rendered
 /// inline — the card is enrichment, not the only route to the facts.
+///
+/// The "details" link rides at the right of the heading; the card
+/// anchors to the heading itself (not the link) so it always opens
+/// along the column's left edge instead of wherever the link landed.
+/// The link's padding-bottom is the hover bridge: vertical padding on
+/// an inline box is hit-tested but never moves the layout, so the
+/// pointer can travel from the link down into the card without
+/// crossing a dead zone that would dismiss it.
 const PLAYER_STYLE: &str = r#"<style>
-.infowrap { position: relative; display: inline-block; }
-.infowrap .card { display: none; position: absolute; left: 0; top: 1.7em; z-index: 10;
+#heading { position: relative; }
+.infowrap { display: inline; font-size: 1rem; font-weight: normal;
+  margin-left: 1em; padding-bottom: 1em; }
+.infowrap .card { display: none; position: absolute; left: 0; top: 100%; z-index: 10;
   width: 32em; max-width: 90vw; padding: .9em 1em; background: #1c1c1c; color: #ddd;
   border: 1px solid #444; border-radius: 6px; box-shadow: 0 8px 22px rgba(0,0,0,.55);
-  font-size: .85em; line-height: 1.5; text-align: left; }
+  font-size: .85rem; line-height: 1.5; text-align: left; }
 .infowrap:hover .card, .infowrap:focus-within .card { display: block; }
 .infowrap .card img { float: right; width: 6em; margin: 0 0 .6em .9em; border-radius: 4px; }
-/* Spans, not divs: the card sits inside a <p>, and a <div> would close
-   that <p> in the parser, dropping these outside the card entirely. */
+/* Spans, not divs: the card sits inside the <h2>, which only permits
+   phrasing content — a <div> in there is invalid HTML. */
 .infowrap .card .facts { display: block; color: #9a9a9a; margin-top: .5em; }
 .infowrap .card .plot { display: block; margin-top: .5em; }
+.infowrap .card .nav { display: flex; justify-content: space-between; gap: 1.5em;
+  clear: both; margin-top: .6em; padding-top: .5em; border-top: 1px solid #3a3a3a; }
+.infowrap .card .nav span:last-child { text-align: right; }
 /* Dark surfaces (the player page, the card on either page): browser
    default link colours — navy visited links especially — vanish on
    near-black, so pin every link state to a light blue. */
@@ -1395,7 +1408,7 @@ async fn play_page(
         drop(conn);
         return StatusCode::NOT_FOUND.into_response();
     };
-    let (_, next) = neighbours(&conn, &detail);
+    let (prev, next) = neighbours(&conn, &detail);
     let segments = queries::segments::for_file(&conn, id).unwrap_or_default();
     drop(conn);
     let mut heading = xml_escape(&detail.title);
@@ -1417,7 +1430,8 @@ async fn play_page(
         if context.is_empty() { ";display:none" } else { "" }
     );
 
-    // Everything the detail page knows, in a hover card on the back link.
+    // Everything the detail page knows, in a hover card on the "details"
+    // link beside the heading.
     let mut card = String::new();
     if detail.has_art {
         card.push_str(&format!("<img src=\"/art/{id}\" alt=\"\">"));
@@ -1462,6 +1476,30 @@ async fn play_page(
     }
     facts.push(human_size(detail.size));
     card.push_str(&format!("<span class=\"facts\">{}</span>", facts.join(" · ")));
+    // Prior/next for serial programs. neighbours() orders the whole
+    // series, so the last episode of a season leads into the next season
+    // and vice versa; the links stay in the player (and swap in place).
+    if prev.is_some() || next.is_some() {
+        let noun = neighbour_noun(detail.kind);
+        let link = |item: &media_db::BrowseItem, text: String| {
+            format!("<a href=\"/play/{0}\" data-swap-id=\"{0}\">{text}</a>", item.file_id)
+        };
+        let prev_html = prev
+            .as_ref()
+            .map(|item| {
+                link(item, format!("« Prior {noun}: {}", neighbour_label(detail.kind, detail.season, item)))
+            })
+            .unwrap_or_default();
+        let next_html = next
+            .as_ref()
+            .map(|item| {
+                link(item, format!("Next {noun}: {} »", neighbour_label(detail.kind, detail.season, item)))
+            })
+            .unwrap_or_default();
+        card.push_str(&format!(
+            "<span class=\"nav\"><span>{prev_html}</span><span>{next_html}</span></span>"
+        ));
+    }
 
     let poster = if detail.has_art {
         format!(" poster=\"/art/{id}\"")
@@ -1554,9 +1592,9 @@ async fn play_page(
     let head = page_head(&xml_escape(&tab_title(&detail)), &format!("{PLAYER_STYLE}{og}"));
     let html = format!(
         "{head}<body class=\"player\">\
-         <p id=\"top\" data-swap><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
-         <span class=\"card\">{card}</span></span></p>\
-         <h2 id=\"heading\" data-swap style=\"margin-bottom:.1em\">{heading}</h2>{context_line}\
+         <h2 id=\"heading\" data-swap style=\"margin-bottom:.1em\">{heading}\
+         <span class=\"infowrap\"><a href=\"/item/{id}\">details</a>\
+         <span class=\"card\">{card}</span></span></h2>{context_line}\
          <div class=\"videowrap\">\
          <video id=\"player\" controls autoplay playsinline{poster} \
           data-id=\"{id}\" data-next=\"{next_id}\" data-segments=\"{segments_attr}\">\

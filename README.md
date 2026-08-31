@@ -298,9 +298,10 @@ via search is one click from its siblings), and the detail page ends with
 "« Prior episode" / "Next episode »" links (songs likewise) that step through the
 whole series (or album) in order, the last episode of a season continuing into the
 next season that exists — and
-hovering (or tab-focusing) the "← details" link reveals a card with the poster, plot,
-IMDb rating (linked to the IMDb entry when known), genres, director, duration,
-resolution, codec and size, so you rarely
+hovering (or tab-focusing) the "details" link beside the player's title reveals a
+card with the poster, plot, IMDb rating (linked to the IMDb entry when known),
+genres, director, duration, resolution, codec, size and the same
+"« Prior episode" / "Next episode »" links, so you rarely
 need to navigate back for context. The in-browser player (`/play/{id}`, linked from
 every video detail page) skips 10 seconds on ← / →, offers a "Skip intro" /
 "Skip credits" button when the catalog knows the segments (see "Skip intro /
