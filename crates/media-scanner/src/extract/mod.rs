@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod nfo;
+pub mod segments;
 pub mod video;
 
 pub use media_db::nameparse;
@@ -58,7 +59,7 @@ fn try_extract(
     let mut embedded = false;
     match root.kind {
         MediaKind::Movies => {
-            let (tech, tag_genre) = probe_or_default(ffprobe, &abs);
+            let (tech, tag_genre, chapters) = probe_or_default(ffprobe, &abs);
             let (mut title, mut year) = nameparse::movie(&stem);
             let mut genres: Vec<String> =
                 tag_genre.map(|g| audio::split_genres(&g)).unwrap_or_default();
@@ -88,9 +89,10 @@ fn try_extract(
                 conn, file_id, &tech, &title, &sort, year, rating, plot.as_deref(),
                 imdb_id.as_deref(), collection.as_deref(), &genres, &directors,
             )?;
+            store_segments(conn, file_id, &abs, &tech, &chapters)?;
         }
         MediaKind::Tv => {
-            let (tech, _) = probe_or_default(ffprobe, &abs);
+            let (tech, _, chapters) = probe_or_default(ffprobe, &abs);
             let parsed = nameparse::episode(&stem, &parent_dirs);
             let nfo = nfo::read_sidecar(&abs);
             // nfo values win; name-parse fills the gaps.
@@ -120,6 +122,7 @@ fn try_extract(
                 conn, file_id, &tech, &series, season, episode, &title, plot.as_deref(),
                 rating, ep_imdb.as_deref(),
             )?;
+            store_segments(conn, file_id, &abs, &tech, &chapters)?;
         }
         MediaKind::Music => {
             let (tech, mut meta, embedded_art) = audio::extract(&abs, &stem, &parent_dirs)?;
@@ -159,6 +162,23 @@ fn try_extract(
         .or_else(|| embedded.then(|| "embedded".to_string()));
     files::record_art(conn, file_id, art.as_deref())?;
     files::record_nfo_mtime(conn, file_id, nfo_mtime(&abs))?;
+    files::record_edl_mtime(conn, file_id, segments::edl_mtime(&abs))?;
+    Ok(())
+}
+
+/// Discover and store the skippable segments for one video file.
+fn store_segments(
+    conn: &Connection,
+    file_id: i64,
+    abs: &Path,
+    tech: &TechInfo,
+    chapters: &[video::Chapter],
+) -> Result<()> {
+    let (source, segs) = segments::discover(abs, tech.duration_ms, chapters);
+    media_db::queries::segments::replace_for_file(conn, file_id, source, &segs)?;
+    if !segs.is_empty() {
+        tracing::debug!("{} skippable segments ({source}) for {}", segs.len(), abs.display());
+    }
     Ok(())
 }
 
@@ -365,12 +385,12 @@ pub fn nfo_mtime(media_path: &Path) -> Option<i64> {
 
 /// ffprobe failure degrades to an empty TechInfo: the file is still
 /// catalogued and playable, just without duration/resolution attributes.
-fn probe_or_default(ffprobe: &str, abs: &Path) -> (TechInfo, Option<String>) {
+fn probe_or_default(ffprobe: &str, abs: &Path) -> (TechInfo, Option<String>, Vec<video::Chapter>) {
     match video::probe(ffprobe, abs) {
         Ok(result) => result,
         Err(err) => {
             tracing::warn!("ffprobe unavailable/failed ({err:#}); cataloguing without tech info");
-            (TechInfo::default(), None)
+            (TechInfo::default(), None, Vec::new())
         }
     }
 }

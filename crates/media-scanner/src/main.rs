@@ -308,8 +308,16 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         {
             extract::ingest_tv_dir_nfo(conn, root, &rel)?;
         } else {
-            refresh_nfo_sibling(conn, cfg, root, &rel)?;
+            refresh_sidecar_sibling(conn, cfg, root, &rel, "nfo", |abs, kf| {
+                extract::nfo_mtime(abs) == kf.nfo_mtime
+            })?;
         }
+        return Ok(false);
+    }
+    if ext == "edl" {
+        refresh_sidecar_sibling(conn, cfg, root, &rel, "edl", |abs, kf| {
+            extract::segments::edl_mtime(abs) == kf.edl_mtime
+        })?;
         return Ok(false);
     }
     if ext == "jpg" || ext == "png" {
@@ -449,21 +457,29 @@ fn refresh_music_meta(conn: &mut Connection, cfg: &Config, root: &Root, toml_rel
     Ok(())
 }
 
-/// An .nfo changed: re-extract the media file it sits beside.
-fn refresh_nfo_sibling(conn: &mut Connection, cfg: &Config, root: &Root, nfo_rel: &str) -> Result<()> {
-    let stem_prefix = format!("{}.", nfo_rel.trim_end_matches("nfo").trim_end_matches('.'));
+/// A sidecar (.nfo, .edl) changed: re-extract the media file it sits
+/// beside. `unchanged` reports whether the catalog already reflects the
+/// sidecar's state — spurious events are common on CIFS.
+fn refresh_sidecar_sibling(
+    conn: &mut Connection,
+    cfg: &Config,
+    root: &Root,
+    sidecar_rel: &str,
+    ext: &str,
+    unchanged: impl Fn(&Path, &files::KnownFile) -> bool,
+) -> Result<()> {
+    let stem_prefix = format!("{}.", sidecar_rel.trim_end_matches(ext).trim_end_matches('.'));
     let known = files::known_files(conn, root.id)?;
     for (rel, kf) in known {
-        if !rel.starts_with(&stem_prefix) || rel == nfo_rel {
+        if !rel.starts_with(&stem_prefix) || rel == sidecar_rel {
             continue;
         }
-        // Verify actual change: spurious events are common on CIFS.
         let abs = Path::new(&root.path).join(&rel);
-        if extract::nfo_mtime(&abs) == kf.nfo_mtime {
-            tracing::debug!("ignoring no-op nfo event for {}/{rel}", root.path);
+        if unchanged(&abs, &kf) {
+            tracing::debug!("ignoring no-op {ext} event for {}/{rel}", root.path);
             continue;
         }
-        tracing::info!("nfo changed; re-extracting {}/{rel}", root.path);
+        tracing::info!("{ext} changed; re-extracting {}/{rel}", root.path);
         extract::extract_file(conn, &cfg.ffprobe_path, root, &rel, kf.id)?;
     }
     Ok(())

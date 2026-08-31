@@ -37,6 +37,46 @@ impl fmt::Display for MediaKind {
     }
 }
 
+/// What a skippable segment is, which decides the label on the player's
+/// skip button. Stored as text in the segments table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentKind {
+    Intro,
+    Credits,
+    Recap,
+    Commercial,
+}
+
+impl SegmentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SegmentKind::Intro => "intro",
+            SegmentKind::Credits => "credits",
+            SegmentKind::Recap => "recap",
+            SegmentKind::Commercial => "commercial",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "intro" => Some(SegmentKind::Intro),
+            "credits" => Some(SegmentKind::Credits),
+            "recap" => Some(SegmentKind::Recap),
+            "commercial" => Some(SegmentKind::Commercial),
+            _ => None,
+        }
+    }
+}
+
+/// A skippable stretch of one video file's timeline, ingested from named
+/// chapter markers or a .edl sidecar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Segment {
+    pub kind: SegmentKind,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Root {
     pub id: i64,

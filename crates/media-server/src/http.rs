@@ -1098,6 +1098,41 @@ const PLAYER_SCRIPT: &str = r#"<script>
   }
   attachSubs();
 
+  // Skip intro / credits: segments the catalog knows (named chapter
+  // markers or .edl sidecars) surface as a button over the player while
+  // playback is inside one — a nudge, never an auto-skip. A credits
+  // segment usually reaches the end of the file, so skipping it fires
+  // 'ended' and the auto-play-next machinery takes over from there.
+  var skipBtn = document.getElementById('skipseg');
+  var segs = [];
+  function loadSegs() {
+    try { segs = JSON.parse(v.dataset.segments || '[]'); } catch (e) { segs = []; }
+  }
+  loadSegs();
+  var SEG_LABELS = { intro: 'Skip intro', credits: 'Skip credits', recap: 'Skip recap' };
+  function activeSeg() {
+    var t = v.currentTime || 0;
+    for (var i = 0; i < segs.length; i++) {
+      if (t >= segs[i].start && t < segs[i].end - 0.5) return segs[i];
+    }
+    return null;
+  }
+  if (skipBtn) {
+    v.addEventListener('timeupdate', function () {
+      var s = activeSeg();
+      if (!s) { skipBtn.hidden = true; return; }
+      skipBtn.textContent = SEG_LABELS[s.kind] || 'Skip';
+      skipBtn.hidden = false;
+    });
+    skipBtn.addEventListener('click', function () {
+      var s = activeSeg();
+      if (!s) return;
+      var end = isFinite(v.duration) ? v.duration : s.end;
+      try { v.currentTime = Math.min(s.end, end); } catch (e) {}
+      skipBtn.hidden = true;
+    });
+  }
+
   // Auto-play next: remembered per browser, on unless switched off.
   var box = document.getElementById('autonext');
   if (box) {
@@ -1127,6 +1162,9 @@ const PLAYER_SCRIPT: &str = r#"<script>
       each(nv.querySelectorAll('source, track'), function (n) { v.appendChild(document.importNode(n, true)); });
       v.dataset.id = nv.dataset.id;
       v.dataset.next = nv.dataset.next || '';
+      v.dataset.segments = nv.dataset.segments || '[]';
+      loadSegs();
+      if (skipBtn) skipBtn.hidden = true;
       document.title = doc.title;
       each(document.querySelectorAll('[data-swap]'), function (el) { replaceById(el.id, doc); });
       var resume = document.getElementById('resume');
@@ -1340,6 +1378,7 @@ async fn play_page(
         return StatusCode::NOT_FOUND.into_response();
     };
     let (_, next) = neighbours(&conn, &detail);
+    let segments = queries::segments::for_file(&conn, id).unwrap_or_default();
     drop(conn);
     let mut heading = xml_escape(&detail.title);
     if let Some(year) = detail.year {
@@ -1477,21 +1516,43 @@ async fn play_page(
         &detail,
         &state.friendly_name,
     );
+    // Skippable segments (intro/credits) for the script, seconds to match
+    // currentTime. Kinds come from the schema's CHECK set, JSON-safe as-is.
+    let segments_json = format!(
+        "[{}]",
+        segments
+            .iter()
+            .map(|s| {
+                format!(
+                    "{{\"kind\":\"{}\",\"start\":{},\"end\":{}}}",
+                    s.kind.as_str(),
+                    s.start_ms as f64 / 1000.0,
+                    s.end_ms as f64 / 1000.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let head = page_head(&heading, &format!("{PLAYER_STYLE}{og}"));
     let html = format!(
         "{head}<body class=\"player\">\
          <p id=\"top\" data-swap><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
          <span class=\"card\">{card}</span></span></p>\
          <h2 id=\"heading\" data-swap style=\"margin-bottom:.1em\">{heading}</h2>{context_line}\
+         <div style=\"position:relative\">\
          <video id=\"player\" controls autoplay playsinline{poster} \
-          data-id=\"{id}\" data-next=\"{next_id}\" \
+          data-id=\"{id}\" data-next=\"{next_id}\" data-segments=\"{segments_attr}\" \
           style=\"width:100%;max-height:80vh;background:#000\">\
          <source src=\"/media/{id}\" type=\"{}\">{track}\
          Your browser cannot play this format.</video>\
+         <button id=\"skipseg\" hidden style=\"position:absolute;right:1.2em;bottom:3.4em;\
+          font-size:1em;padding:.55em 1.1em;background:rgba(15,15,15,.85);color:#fff;\
+          border:1px solid #999;border-radius:4px;cursor:pointer\">Skip</button></div>\
          <p id=\"resume\" style=\"color:#9c9;font-size:.9em\"></p>\
          <p style=\"color:#666;font-size:.8em\">← / → skip 10 seconds</p>\
          {autonext}{subs_async}{PLAYER_SCRIPT}{PAGE_CLOSE}",
-        xml_escape(&servable.mime)
+        xml_escape(&servable.mime),
+        segments_attr = xml_escape(&segments_json)
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }

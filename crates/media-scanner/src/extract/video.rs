@@ -5,11 +5,23 @@ use anyhow::{bail, Context, Result};
 use media_db::TechInfo;
 use serde_json::Value;
 
+/// A chapter marker from the container, times in ms. Title is empty when
+/// the chapter is unnamed.
+#[derive(Debug, Clone)]
+pub struct Chapter {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub title: String,
+}
+
 /// Probe a video file with ffprobe. Returns the technical attributes plus
-/// any genre embedded in the container tags.
-pub fn probe(ffprobe: &str, path: &Path) -> Result<(TechInfo, Option<String>)> {
+/// any genre embedded in the container tags and the chapter markers.
+pub fn probe(ffprobe: &str, path: &Path) -> Result<(TechInfo, Option<String>, Vec<Chapter>)> {
     let output = Command::new(ffprobe)
-        .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
+        .args([
+            "-v", "error", "-print_format", "json",
+            "-show_format", "-show_streams", "-show_chapters",
+        ])
         .arg(path)
         .output()
         .with_context(|| format!("running {ffprobe}"))?;
@@ -78,5 +90,26 @@ pub fn probe(ffprobe: &str, path: &Path) -> Result<(TechInfo, Option<String>)> {
             }
         }
     }
-    Ok((tech, genre))
+    let mut chapters = Vec::new();
+    if let Some(list) = json.get("chapters").and_then(|c| c.as_array()) {
+        for chapter in list {
+            let secs = |key: &str| {
+                chapter
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .map(|s| (s * 1000.0) as i64)
+            };
+            let (Some(start_ms), Some(end_ms)) = (secs("start_time"), secs("end_time")) else {
+                continue;
+            };
+            let title = chapter
+                .pointer("/tags/title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            chapters.push(Chapter { start_ms, end_ms, title });
+        }
+    }
+    Ok((tech, genre, chapters))
 }

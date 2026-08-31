@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 12;
+pub const SCHEMA_VERSION: i32 = 13;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -164,5 +164,26 @@ pub const MIGRATIONS: &[&str] = &[
         plot   TEXT,
         PRIMARY KEY (series, season)
     );
+    "#,
+    // 12 -> 13: skippable segments (intro / credits / recap / commercial
+    // breaks) per video file, ingested from named chapter markers and .edl
+    // sidecars; source says which ('chapters'/'edl') so later detectors
+    // can defer to deliberate sidecars. edl_mtime mirrors nfo_mtime for
+    // sidecar staleness, and the -1 poke makes every TV file look
+    // edl-stale so the next reconcile re-probes it for chapters (never
+    // seen before this version) without taking it out of 'ready' — the
+    // same trick the nfo_mtime migrations use. Movies gain nothing from
+    // skip buttons, so they wait for their next natural re-extraction.
+    r#"
+    CREATE TABLE segments (
+        file_id  INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        start_ms INTEGER NOT NULL,
+        end_ms   INTEGER NOT NULL,
+        kind     TEXT NOT NULL CHECK (kind IN ('intro','credits','recap','commercial')),
+        source   TEXT NOT NULL,
+        PRIMARY KEY (file_id, start_ms)
+    );
+    ALTER TABLE files ADD COLUMN edl_mtime INTEGER;
+    UPDATE files SET edl_mtime = -1 WHERE kind = 'tv';
     "#,
 ];

@@ -64,13 +64,14 @@ pub struct KnownFile {
     pub mtime: i64,
     pub status: String,
     pub nfo_mtime: Option<i64>,
+    pub edl_mtime: Option<i64>,
     pub art: Option<String>,
     pub updated_at: i64,
 }
 
 pub fn known_files(conn: &Connection, root_id: i64) -> Result<HashMap<String, KnownFile>> {
     let mut stmt = conn.prepare(
-        "SELECT rel_path, id, size, mtime, status, nfo_mtime, art, updated_at
+        "SELECT rel_path, id, size, mtime, status, nfo_mtime, edl_mtime, art, updated_at
          FROM files WHERE root_id = ?1",
     )?;
     let rows = stmt.query_map([root_id], |r| {
@@ -82,8 +83,9 @@ pub fn known_files(conn: &Connection, root_id: i64) -> Result<HashMap<String, Kn
                 mtime: r.get(3)?,
                 status: r.get(4)?,
                 nfo_mtime: r.get(5)?,
-                art: r.get(6)?,
-                updated_at: r.get(7)?,
+                edl_mtime: r.get(6)?,
+                art: r.get(7)?,
+                updated_at: r.get(8)?,
             },
         ))
     })?;
@@ -321,6 +323,16 @@ pub fn record_nfo_mtime(conn: &Connection, id: i64, nfo_mtime: Option<i64>) -> R
     conn.execute(
         "UPDATE files SET nfo_mtime = ?2 WHERE id = ?1",
         params![id, nfo_mtime],
+    )?;
+    Ok(())
+}
+
+/// Record the .edl sidecar mtime observed during extraction (None = no
+/// sidecar); the same staleness contract as record_nfo_mtime.
+pub fn record_edl_mtime(conn: &Connection, id: i64, edl_mtime: Option<i64>) -> Result<()> {
+    conn.execute(
+        "UPDATE files SET edl_mtime = ?2 WHERE id = ?1",
+        params![id, edl_mtime],
     )?;
     Ok(())
 }

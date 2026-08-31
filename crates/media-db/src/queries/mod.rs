@@ -2,6 +2,7 @@ pub mod counts;
 pub mod files;
 pub mod movies;
 pub mod music;
+pub mod segments;
 pub mod tv;
 
 use std::collections::HashMap;

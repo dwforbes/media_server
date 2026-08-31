@@ -118,9 +118,12 @@ pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Resu
                     // permanently-failing file must not re-trigger
                     // auto-enrichment every reconcile.
                     to_extract.push((kf.id, rel));
-                } else if extract::nfo_mtime(entry.path()) != kf.nfo_mtime || art_stale() {
-                    // A sidecar (.nfo or artwork) appeared, vanished, or
-                    // changed since extraction.
+                } else if extract::nfo_mtime(entry.path()) != kf.nfo_mtime
+                    || extract::segments::edl_mtime(entry.path()) != kf.edl_mtime
+                    || art_stale()
+                {
+                    // A sidecar (.nfo, .edl, or artwork) appeared,
+                    // vanished, or changed since extraction.
                     to_extract.push((kf.id, rel));
                 } else if root.kind == media_db::MediaKind::Music
                     && extract::music_meta_mtime(entry.path(), root_path)
