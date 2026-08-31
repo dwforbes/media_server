@@ -42,7 +42,9 @@ const BASE_STYLE: &str = "<style>\
 html{-webkit-text-size-adjust:100%}\
 body{font-family:sans-serif;max-width:44em;margin:2em auto;padding:0 1.25rem 2rem;box-sizing:border-box}\
 body.detail{max-width:46em;line-height:1.5}\
-body.player{max-width:60em;margin:1.5em auto;background:#111;color:#ddd}\
+body.player{max-width:60em;margin:1.5em auto;background:#111;color:#ddd;overflow-x:hidden}\
+div.videowrap{position:relative;width:100vw;margin-left:calc(50% - 50vw)}\
+div.videowrap video{display:block;width:100%;max-height:85vh;background:#000}\
 img.art{float:right;max-width:220px;margin:0 0 1em 1.5em;border-radius:6px}\
 table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
 p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:center}\
@@ -1555,10 +1557,9 @@ async fn play_page(
          <p id=\"top\" data-swap><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
          <span class=\"card\">{card}</span></span></p>\
          <h2 id=\"heading\" data-swap style=\"margin-bottom:.1em\">{heading}</h2>{context_line}\
-         <div style=\"position:relative\">\
+         <div class=\"videowrap\">\
          <video id=\"player\" controls autoplay playsinline{poster} \
-          data-id=\"{id}\" data-next=\"{next_id}\" data-segments=\"{segments_attr}\" \
-          style=\"width:100%;max-height:80vh;background:#000\">\
+          data-id=\"{id}\" data-next=\"{next_id}\" data-segments=\"{segments_attr}\">\
          <source src=\"/media/{id}\" type=\"{}\">{track}\
          Your browser cannot play this format.</video>\
          <button id=\"skipseg\" hidden style=\"position:absolute;right:1.2em;bottom:3.4em;\
