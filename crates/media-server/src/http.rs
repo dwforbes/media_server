@@ -107,6 +107,22 @@ fn og_meta(
     out
 }
 
+/// The browser-tab <title> for one playable item. Episodes carry their
+/// season and series — "Do Not Resuscitate (S02 - The Sopranos)" — so a
+/// tab stays identifiable among others; everything else is the title
+/// with its year.
+fn tab_title(detail: &files::ItemDetail) -> String {
+    match (&detail.series, detail.season) {
+        (Some(series), Some(season)) => {
+            format!("{} (S{season:02} - {series})", detail.title)
+        }
+        _ => match detail.year {
+            Some(year) => format!("{} ({year})", detail.title),
+            None => detail.title.clone(),
+        },
+    }
+}
+
 /// OG tags for one playable item, shared by the detail and player pages.
 /// The plain-text title carries the context a bare episode or track title
 /// lacks when it lands in a chat: series and SxxEyy for TV, the artist
@@ -1533,7 +1549,7 @@ async fn play_page(
             .collect::<Vec<_>>()
             .join(",")
     );
-    let head = page_head(&heading, &format!("{PLAYER_STYLE}{og}"));
+    let head = page_head(&xml_escape(&tab_title(&detail)), &format!("{PLAYER_STYLE}{og}"));
     let html = format!(
         "{head}<body class=\"player\">\
          <p id=\"top\" data-swap><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
@@ -1911,7 +1927,7 @@ async fn item_page(
         &detail,
         &state.friendly_name,
     );
-    let head = page_head(&heading, &format!("{PLAYER_STYLE}{og}"));
+    let head = page_head(&xml_escape(&tab_title(&detail)), &format!("{PLAYER_STYLE}{og}"));
     // Same "⌂ top" as the browse pages, plus a jump to the item's section.
     let top_nav = {
         let (section_id, section_name) = match detail.kind {
