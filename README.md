@@ -8,7 +8,8 @@ Two Rust applications sharing one SQLite catalog:
 - **media-scanner** — a daemon that watches source folders (FSEvents + periodic full
   reconcile) and maintains the database: the raw file list plus locally-extracted
   attributes (title, year, genre, artist/album, series/season/episode, duration,
-  resolution, codecs).
+  resolution, codecs), artwork, and skippable intro/credits segments (see
+  "Skip intro / skip credits" below).
 
 They are deliberately separate binaries. The shared-database complexity is handled by the
 `media-db` workspace crate — single source of truth for schema, migrations, and queries —
@@ -200,10 +201,16 @@ routers/APs mistreat multicast in creative ways. Two escape hatches:
   recursive with per-file dedup, so a series playlist spans its seasons), and a
   search has one at `/playlist/search?mq=<terms>`; the web pages no longer link
   these, since the in-browser player covers playback. The full virtual tree is
-  browsable as HTML at `http://<server>:8200/` (also `/browse`). Every item links
-  to a **detail page** (`/item/<id>`) showing
-  the poster, plot, IMDb rating, genres, director, duration, resolution, codecs,
-  container, file size, and when it was added.
+  browsable as HTML at `http://<server>:8200/` (also `/browse`). Every container
+  link shows how many playable items live beneath it, and listing rows carry a 4K
+  chip and the IMDb rating as a colour-coded box. Every item links to a **detail
+  page** (`/item/<id>`) showing the poster, plot, IMDb rating, genres, director,
+  duration, resolution, codecs, container, file size, and when it was added.
+  Series and season pages are decorated too: the poster (promoted from an
+  episode's artwork), the description from a Kodi-style `tvshow.nfo` /
+  `season.nfo` (series pages add the IMDb rating and a link to the IMDb entry),
+  and — on a series page — a season × episode **ratings grid**, every cell a
+  colour-coded rating box linking to that episode.
 
 ### Remote announcers (media-announcer)
 
@@ -295,7 +302,9 @@ hovering (or tab-focusing) the "← details" link reveals a card with the poster
 IMDb rating (linked to the IMDb entry when known), genres, director, duration,
 resolution, codec and size, so you rarely
 need to navigate back for context. The in-browser player (`/play/{id}`, linked from
-every video detail page) skips 10 seconds on ← / →, and stamps the
+every video detail page) skips 10 seconds on ← / →, offers a "Skip intro" /
+"Skip credits" button when the catalog knows the segments (see "Skip intro /
+skip credits" below), and stamps the
 playback position into the URL fragment once a second while playing (and on pause or
 scrub) — `…/play/596#128s` — so the address bar is always a resumable, shareable link; opening such a URL seeks
 there once metadata loads and offers a "start from the beginning" link. Fragments are
@@ -347,6 +356,65 @@ The web player falls back to extracting on demand — same track choice — into
 `vtt-cache` directory beside the catalog, for files enrichment has not reached yet
 (or could not write beside). Concurrent viewers of the same file share one
 extraction.
+
+### Skip intro / skip credits
+
+The catalog stores **skippable segments** per video file (intro, credits, recap,
+commercial break), and the web player overlays a "Skip intro" / "Skip credits"
+button while playback is inside one — a nudge, never an auto-skip. Credits
+usually run to the end of the file, so skipping them fires the normal
+end-of-media path and auto-play-next carries straight into the next episode.
+(Web player only; UPnP has no vocabulary for this.) Three sources feed the
+segments, in order of authority:
+
+- **Chapter markers**: chapters named like "Opening", "Intro", "End Credits",
+  "Recap" / "Previously on" are recognized during extraction (conservatively —
+  unnamed or ordinary chapters yield nothing).
+- **`.edl` sidecars**: a Kodi-style edit decision list beside the file (what
+  comskip emits) — one `start stop action` line per segment, seconds. Cut (0)
+  and commercial-break (3) actions become segments; EDL carries no
+  intro/credits notion, so the kind is inferred from position (reaching the
+  file's tail = credits, starting in the first five minutes = intro, anything
+  else a commercial break). The sidecar is deliberate, so its presence — even
+  empty — silences the other two sources; like `.nfo` files it is tracked by
+  mtime, and edits are picked up by the watcher or the next reconcile.
+- **Automatic audio detection**: episodes of a season share nearly identical
+  intro and credits audio, so the scanner decodes each episode's first ten and
+  last five minutes (ffmpeg, mono 11 kHz), fingerprints them with chromaprint,
+  and cross-matches episode pairs — candidate alignments by hash voting (intro
+  and credits sit at different relative offsets between two episodes, so a
+  single best alignment is not enough), then gap-bridged runs of near-identical
+  items along each. Median consensus across pairings (two agreeing pairings,
+  or one in a two-episode season) yields each episode's intro and credits,
+  stored as source `audio` — never overwriting the deliberate sources above.
+
+Detection is incremental: fingerprints are cached in the catalog keyed to the
+file's size and mtime, so a newly arrived episode decodes only itself and is
+matched against its siblings' cached prints. The daemon analyzes one season per
+tick (keeping the watcher responsive), after new media settles and while
+enrichment is idle — enrichment may rewrite files, which would immediately
+re-stale fresh fingerprints; `--once` drains everything before exiting. Seasons
+with unreachable files (an unmounted share) are skipped and retried later. On by
+default; an optional `[segments]` section in `media-scanner.toml` turns it off
+(`auto = false`) or points at a specific ffmpeg (`ffmpeg_path`, falling back to
+the `[enrich]` one). Renditions of the same episode are never matched against
+each other, and a near-total match between two "different" episodes is rejected
+as mislabeled duplicate content rather than reported as an intro. If detection
+misfires on a show, drop an `.edl` beside the episode — it wins outright.
+
+### Link previews when sharing pages
+
+Every page carries Open Graph tags, so a link pasted into a chat or feed unfurls
+into a poster / title / description card: series, season, detail, and player
+pages all participate, with the type-appropriate context a bare title lacks
+("Series S01E03 — Episode Title", "Title (2023)", "Artist — Track"). The
+`og:image` points at `/art/{id}/og.jpg`, the poster downscaled to at most 900 px
+on the long edge and re-encoded as JPEG — preview scrapers silently drop
+full-size posters — and every URL is absolute against the origin the visitor
+actually used, HTTPS included. Whether a card appears depends on who fetches it:
+iMessage fetches previews from the sender's device, so plain LAN links unfurl
+fine there; Slack or Discord fetch from their servers and need the HTTPS
+hostname to be reachable from outside.
 
 ### HTTPS for the web pages
 
@@ -419,4 +487,4 @@ change so Recently Added doesn't fill with conversions. `--dry-run` shows the fu
 - GENA eventing (clients poll instead).
 - DLNA.ORG_PN media profiles — protocolInfo is the permissive generic form, which VLC,
   BubbleUPnP, and most TVs accept.
-- Transcoding, playlists.
+- Transcoding.
