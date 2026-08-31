@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -202,5 +202,18 @@ pub const MIGRATIONS: &[&str] = &[
         head    BLOB NOT NULL,
         tail    BLOB NOT NULL
     );
+    "#,
+    // 14 -> 15: chapter ingestion gained a sanity cap (real files carry
+    // garbage chapter tables — a recognizably named chapter spanning the
+    // whole episode became a skip-to-the-end "intro"). Re-derive every
+    // file whose segments came from chapters via the edl-stale poke, and
+    // drop those files' fingerprints so their seasons re-analyze and the
+    // audio detector fills in wherever the filtered chapters now leave
+    // nothing.
+    r#"
+    DELETE FROM segment_prints WHERE file_id IN
+        (SELECT DISTINCT file_id FROM segments WHERE source = 'chapters');
+    UPDATE files SET edl_mtime = -1 WHERE id IN
+        (SELECT DISTINCT file_id FROM segments WHERE source = 'chapters');
     "#,
 ];

@@ -19,7 +19,7 @@ pub fn discover(
     if let Ok(text) = std::fs::read_to_string(edl_path(abs)) {
         return ("edl", parse_edl(&text, duration_ms));
     }
-    ("chapters", from_chapters(chapters))
+    ("chapters", from_chapters(chapters, duration_ms))
 }
 
 fn edl_path(abs: &Path) -> PathBuf {
@@ -60,10 +60,22 @@ fn classify(title: &str) -> Option<SegmentKind> {
     }
 }
 
-fn from_chapters(chapters: &[Chapter]) -> Vec<Segment> {
+/// Cap on what a chapter marker may claim as skippable: real files carry
+/// garbage chapter tables (a recognizably named chapter spanning the
+/// whole episode), and skipping such a "segment" jumps to the end. A
+/// span longer than this, or than half the file, is not an intro or
+/// credits — discard it, which also leaves the file open for the audio
+/// detector to have a say.
+const MAX_CHAPTER_SEGMENT_MS: i64 = 15 * 60 * 1000;
+
+fn from_chapters(chapters: &[Chapter], duration_ms: Option<i64>) -> Vec<Segment> {
     chapters
         .iter()
         .filter(|c| c.end_ms > c.start_ms && c.start_ms >= 0)
+        .filter(|c| {
+            let len = c.end_ms - c.start_ms;
+            len <= MAX_CHAPTER_SEGMENT_MS && !duration_ms.is_some_and(|d| len * 2 > d)
+        })
         .filter_map(|c| {
             classify(&c.title).map(|kind| Segment {
                 kind,
@@ -121,12 +133,15 @@ mod tests {
 
     #[test]
     fn named_chapters_classify() {
-        let segments = from_chapters(&[
-            chapter(0, 25_000, "Previously On"),
-            chapter(25_000, 115_000, "Opening Credits"),
-            chapter(115_000, 2_500_000, "Part 1"),
-            chapter(2_500_000, 2_580_000, "End Credits"),
-        ]);
+        let segments = from_chapters(
+            &[
+                chapter(0, 25_000, "Previously On"),
+                chapter(25_000, 115_000, "Opening Credits"),
+                chapter(115_000, 2_500_000, "Part 1"),
+                chapter(2_500_000, 2_580_000, "End Credits"),
+            ],
+            Some(2_580_000),
+        );
         let kinds: Vec<SegmentKind> = segments.iter().map(|s| s.kind).collect();
         assert_eq!(
             kinds,
@@ -138,11 +153,31 @@ mod tests {
 
     #[test]
     fn unnamed_and_ordinary_chapters_yield_nothing() {
-        let segments = from_chapters(&[
-            chapter(0, 60_000, ""),
-            chapter(60_000, 120_000, "Chapter 2"),
-        ]);
+        let segments = from_chapters(
+            &[chapter(0, 60_000, ""), chapter(60_000, 120_000, "Chapter 2")],
+            None,
+        );
         assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn absurd_chapter_spans_are_discarded() {
+        // A named chapter spanning nearly the whole episode (real-world
+        // garbage chaptering) must not become a skip target.
+        let whole = from_chapters(
+            &[chapter(5_000, 3_500_000, "Intro")],
+            Some(3_600_000),
+        );
+        assert!(whole.is_empty());
+        // Over half the file, even under the absolute cap.
+        let half = from_chapters(&[chapter(0, 600_000, "Intro")], Some(1_100_000));
+        assert!(half.is_empty());
+        // Without a known duration the absolute cap still applies…
+        let long = from_chapters(&[chapter(0, 1_000_000, "Intro")], None);
+        assert!(long.is_empty());
+        // …and a normal intro is kept.
+        let ok = from_chapters(&[chapter(0, 90_000, "Intro")], None);
+        assert_eq!(ok.len(), 1);
     }
 
     #[test]
