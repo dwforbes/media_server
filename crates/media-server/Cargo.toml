@@ -11,6 +11,7 @@ axum = "0.8"
 base64.workspace = true
 clap.workspace = true
 if-addrs = "0.13"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lofty = "0.21"
 quick-xml.workspace = true
 rusqlite.workspace = true

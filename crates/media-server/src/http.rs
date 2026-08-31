@@ -55,6 +55,103 @@ h1{font-size:1.5em}}\
 
 const PAGE_CLOSE: &str = "\n</body></html>\n";
 
+/// Truncate on a word boundary with an ellipsis. Long synopses are cut
+/// down for the player's hover card and for link-preview descriptions.
+fn truncate_words(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max).collect();
+    let cut = cut.rsplit_once(' ').map(|(head, _)| head.to_string()).unwrap_or(cut);
+    format!("{cut}…")
+}
+
+/// Open Graph tags (plus a Twitter card hint) for the page head, so a
+/// link shared into a chat or feed unfurls into a title / description /
+/// poster card. Scrapers resolve no relative URLs, so everything is
+/// absolute against the origin the visitor actually used; the image is
+/// the downscaled /art/{id}/og.jpg rendition because several platforms
+/// silently drop preview images beyond a few hundred KB.
+fn og_meta(
+    base: &str,
+    path: &str,
+    kind: &str,
+    title: &str,
+    description: Option<&str>,
+    art_id: Option<i64>,
+    site: &str,
+) -> String {
+    let mut out = format!(
+        "<meta property=\"og:type\" content=\"{kind}\">\
+         <meta property=\"og:site_name\" content=\"{}\">\
+         <meta property=\"og:url\" content=\"{}{}\">\
+         <meta property=\"og:title\" content=\"{}\">\
+         <meta name=\"twitter:card\" content=\"summary\">",
+        xml_escape(site),
+        xml_escape(base),
+        xml_escape(path),
+        xml_escape(title)
+    );
+    if let Some(desc) = description.map(str::trim).filter(|d| !d.is_empty()) {
+        out.push_str(&format!(
+            "<meta property=\"og:description\" content=\"{}\">",
+            xml_escape(&truncate_words(desc, 300))
+        ));
+    }
+    if let Some(id) = art_id {
+        out.push_str(&format!(
+            "<meta property=\"og:image\" content=\"{}/art/{id}/og.jpg\">",
+            xml_escape(base)
+        ));
+    }
+    out
+}
+
+/// OG tags for one playable item, shared by the detail and player pages.
+/// The plain-text title carries the context a bare episode or track title
+/// lacks when it lands in a chat: series and SxxEyy for TV, the artist
+/// for music, the year for movies.
+fn item_og_meta(base: &str, path: &str, detail: &files::ItemDetail, site: &str) -> String {
+    let title = match (&detail.series, detail.season, detail.episode) {
+        (Some(series), Some(season), Some(episode)) => {
+            format!("{series} S{season:02}E{episode:02} — {}", detail.title)
+        }
+        _ => match (detail.kind, detail.artist.as_deref()) {
+            (media_db::MediaKind::Music, Some(artist)) => {
+                format!("{artist} — {}", detail.title)
+            }
+            _ => match detail.year {
+                Some(year) => format!("{} ({year})", detail.title),
+                None => detail.title.clone(),
+            },
+        },
+    };
+    let description = detail
+        .plot
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| {
+            // Tracks have no synopsis; the album is the next best context.
+            (detail.kind == media_db::MediaKind::Music)
+                .then(|| detail.album.clone())
+                .flatten()
+        });
+    let kind = match detail.kind {
+        media_db::MediaKind::Movies => "video.movie",
+        media_db::MediaKind::Tv => "video.episode",
+        media_db::MediaKind::Music => "music.song",
+    };
+    og_meta(
+        base,
+        path,
+        kind,
+        &title,
+        description.as_deref(),
+        detail.has_art.then_some(detail.file_id),
+        site,
+    )
+}
+
 const CDS_SERVICE: &str = "urn:schemas-upnp-org:service:ContentDirectory:1";
 const CMS_SERVICE: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
 
@@ -155,6 +252,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/event/cms", any(event_stub))
         .route("/media/{id}", get(serve_media))
         .route("/art/{id}", get(serve_art))
+        .route("/art/{id}/og.jpg", get(serve_art_og))
         .route("/icon/120.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
         .route("/icon/48.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.1.clone()) }))
         // Browsers ask for these by convention; same icon as the UPnP device.
@@ -162,7 +260,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/apple-touch-icon.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
         .route("/apple-touch-icon-precomposed.png", get(|State(s): State<Arc<AppState>>| async move { icon_response(s.icon.0.clone()) }))
         // The root is the library itself; /browse stays as an alias.
-        .route("/", get(|s: State<Arc<AppState>>| browse_page(s, Path("0".into()))))
+        .route(
+            "/",
+            get(|s: State<Arc<AppState>>, h: HeaderMap, https: Option<Extension<Https>>| {
+                browse_page(s, Path("0".into()), h, https)
+            }),
+        )
         .route(
             "/playlist.m3u",
             get(|s: State<Arc<AppState>>, h: HeaderMap, https: Option<Extension<Https>>| {
@@ -171,7 +274,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/playlist/{section}", get(playlist))
         .route("/playlist/id/{oid}", get(playlist_by_id))
-        .route("/browse", get(|s: State<Arc<AppState>>| browse_page(s, Path("0".into()))))
+        .route(
+            "/browse",
+            get(|s: State<Arc<AppState>>, h: HeaderMap, https: Option<Extension<Https>>| {
+                browse_page(s, Path("0".into()), h, https)
+            }),
+        )
         .route("/browse/{oid}", get(browse_page))
         .route("/item/{id}", get(item_page))
         .route("/search", get(search_page))
@@ -605,7 +713,12 @@ async fn search_playlist(
 
 /// HTML mirror of the virtual tree: every container is browsable and
 /// offers its playlist; items link to their streams.
-async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>) -> Response {
+async fn browse_page(
+    State(state): State<Arc<AppState>>,
+    Path(oid): Path<String>,
+    headers: HeaderMap,
+    https: Option<Extension<Https>>,
+) -> Response {
     let Some(node) = ObjectId::parse(&oid) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -645,19 +758,25 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
         _ => String::new(),
     };
     // Series and season pages carry the description (and, for a series,
-    // the IMDb rating/link) ingested from tvshow.nfo / season.nfo.
-    let description = match &node {
+    // the IMDb rating/link) ingested from tvshow.nfo / season.nfo. The
+    // raw plot is kept alongside the rendered HTML for the OG tags.
+    let (description, og_plot) = match &node {
         ObjectId::TvSeries(series) => tv::series_info(&conn, series)
             .ok()
             .flatten()
-            .map(|meta| series_meta_html(&meta))
+            .map(|meta| (series_meta_html(&meta), meta.plot))
             .unwrap_or_default(),
         ObjectId::TvSeason { series, season } => tv::season_info(&conn, series, *season)
             .ok()
             .flatten()
-            .map(|plot| format!("<p style=\"max-width:38em\">{}</p>", xml_escape(&plot)))
+            .map(|plot| {
+                (
+                    format!("<p style=\"max-width:38em\">{}</p>", xml_escape(&plot)),
+                    Some(plot),
+                )
+            })
             .unwrap_or_default(),
-        _ => String::new(),
+        _ => (String::new(), None),
     };
     let leaf_counts = crate::counts::for_children(&state, &conn, &node);
     drop(conn);
@@ -691,7 +810,18 @@ async fn browse_page(State(state): State<Arc<AppState>>, Path(oid): Path<String>
     let art = art_item
         .map(|id| format!("<img src=\"/art/{id}\" alt=\"\" class=\"art\">"))
         .unwrap_or_default();
-    let head = page_head(&xml_escape(&title), "");
+    // Shared links unfurl into a poster/description card. Series and
+    // season pages have both; other containers at least name themselves.
+    let og = og_meta(
+        &request_base_url(&state, &headers, https.is_some()),
+        &if oid == "0" { "/".to_string() } else { format!("/browse/{oid}") },
+        if matches!(node, ObjectId::TvSeries(_)) { "video.tv_show" } else { "website" },
+        &title,
+        og_plot.as_deref(),
+        art_item,
+        &state.friendly_name,
+    );
+    let head = page_head(&xml_escape(&title), &og);
     let html = format!(
         "{head}<body>\
          <p><a href=\"/\">⌂ top</a></p>{art}<h1>{}</h1>{description}\
@@ -1196,7 +1326,12 @@ fn neighbour_nav_html(
 
 /// In-browser player: native <video> controls, poster art, and the .srt
 /// sidecar as a selectable subtitle track.
-async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+async fn play_page(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    https: Option<Extension<Https>>,
+) -> Response {
     let conn = state.db.lock().await;
     let detail = files::detail(&conn, id);
     let servable = files::servable(&conn, id);
@@ -1236,14 +1371,10 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
     }
     if let Some(plot) = detail.plot.as_deref().filter(|p| !p.trim().is_empty()) {
         // Keep the card a card: truncate long synopses on a word boundary.
-        let trimmed = if plot.chars().count() > 400 {
-            let cut: String = plot.chars().take(400).collect();
-            let cut = cut.rsplit_once(' ').map(|(head, _)| head.to_string()).unwrap_or(cut);
-            format!("{cut}…")
-        } else {
-            plot.to_string()
-        };
-        card.push_str(&format!("<span class=\"plot\">{}</span>", xml_escape(&trimmed)));
+        card.push_str(&format!(
+            "<span class=\"plot\">{}</span>",
+            xml_escape(&truncate_words(plot, 400))
+        ));
     }
     let mut facts: Vec<String> = Vec::new();
     // The rating links to the IMDb entry when we know it — the episode's
@@ -1340,7 +1471,13 @@ async fn play_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
              <span id=\"next-note\" data-swap>{next_note}</span></p>"
         )
     };
-    let head = page_head(&heading, PLAYER_STYLE);
+    let og = item_og_meta(
+        &request_base_url(&state, &headers, https.is_some()),
+        &format!("/play/{id}"),
+        &detail,
+        &state.friendly_name,
+    );
+    let head = page_head(&heading, &format!("{PLAYER_STYLE}{og}"));
     let html = format!(
         "{head}<body class=\"player\">\
          <p id=\"top\" data-swap><span class=\"infowrap\"><a href=\"/item/{id}\">← details</a>\
@@ -1501,6 +1638,7 @@ async fn item_page(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     headers: HeaderMap,
+    https: Option<Extension<Https>>,
 ) -> Response {
     let conn = state.db.lock().await;
     let detail = files::detail(&conn, id);
@@ -1706,7 +1844,13 @@ async fn item_page(
             )
         })
         .collect();
-    let head = page_head(&heading, PLAYER_STYLE);
+    let og = item_og_meta(
+        &request_base_url(&state, &headers, https.is_some()),
+        &format!("/item/{id}"),
+        &detail,
+        &state.friendly_name,
+    );
+    let head = page_head(&heading, &format!("{PLAYER_STYLE}{og}"));
     // Same "⌂ top" as the browse pages, plus a jump to the item's section.
     let top_nav = {
         let (section_id, section_name) = match detail.kind {
@@ -1977,7 +2121,64 @@ async fn cms_control(headers: HeaderMap, _body: String) -> Response {
     }
 }
 
-async fn serve_art(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+/// The raw art bytes and their MIME type for an art source. Blocking
+/// (file reads, tag parsing) — call from spawn_blocking.
+fn read_art(source: files::ArtSource) -> anyhow::Result<(Vec<u8>, String)> {
+    match source {
+        files::ArtSource::File(path) => {
+            let mime = if path.extension().and_then(|e| e.to_str()) == Some("png") {
+                "image/png"
+            } else {
+                "image/jpeg"
+            };
+            Ok((std::fs::read(path)?, mime.to_string()))
+        }
+        files::ArtSource::Embedded(media_path) => {
+            use lofty::file::TaggedFileExt;
+            let tagged = lofty::read_from_path(&media_path)?;
+            let tag = tagged
+                .primary_tag()
+                .or_else(|| tagged.first_tag())
+                .ok_or_else(|| anyhow::anyhow!("no tag"))?;
+            let picture = tag
+                .pictures()
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("no embedded picture"))?;
+            let mime = picture
+                .mime_type()
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_else(|| "image/jpeg".to_string());
+            Ok((picture.data().to_vec(), mime))
+        }
+    }
+}
+
+/// Art downscaled for link-preview cards: a JPEG capped at 900px on the
+/// long edge (a 2:3 poster becomes 600×900). Preview scrapers silently
+/// drop images beyond a few hundred KB, which full-size posters routinely
+/// exceed. Art that fails to decode — or is already small — passes
+/// through unchanged.
+fn og_art(bytes: Vec<u8>, mime: String) -> (Vec<u8>, String) {
+    const MAX_EDGE: u32 = 900;
+    let Ok(img) = image::load_from_memory(&bytes) else {
+        return (bytes, mime);
+    };
+    let img = if img.width().max(img.height()) > MAX_EDGE {
+        img.resize(MAX_EDGE, MAX_EDGE, image::imageops::FilterType::Lanczos3)
+    } else if mime == "image/jpeg" {
+        return (bytes, mime);
+    } else {
+        img
+    };
+    let mut out = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82);
+    match encoder.encode_image(&img.to_rgb8()) {
+        Ok(()) => (out, "image/jpeg".to_string()),
+        Err(_) => (bytes, mime),
+    }
+}
+
+async fn serve_art_variant(state: Arc<AppState>, id: i64, social: bool) -> Response {
     let source = {
         let conn = state.db.lock().await;
         files::art_source(&conn, id)
@@ -1991,33 +2192,8 @@ async fn serve_art(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
         }
     };
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<u8>, String)> {
-        match source {
-            files::ArtSource::File(path) => {
-                let mime = if path.extension().and_then(|e| e.to_str()) == Some("png") {
-                    "image/png"
-                } else {
-                    "image/jpeg"
-                };
-                Ok((std::fs::read(path)?, mime.to_string()))
-            }
-            files::ArtSource::Embedded(media_path) => {
-                use lofty::file::TaggedFileExt;
-                let tagged = lofty::read_from_path(&media_path)?;
-                let tag = tagged
-                    .primary_tag()
-                    .or_else(|| tagged.first_tag())
-                    .ok_or_else(|| anyhow::anyhow!("no tag"))?;
-                let picture = tag
-                    .pictures()
-                    .first()
-                    .ok_or_else(|| anyhow::anyhow!("no embedded picture"))?;
-                let mime = picture
-                    .mime_type()
-                    .map(|m| m.as_str().to_string())
-                    .unwrap_or_else(|| "image/jpeg".to_string());
-                Ok((picture.data().to_vec(), mime))
-            }
-        }
+        let (bytes, mime) = read_art(source)?;
+        Ok(if social { og_art(bytes, mime) } else { (bytes, mime) })
     })
     .await;
     match result {
@@ -2046,6 +2222,15 @@ async fn serve_art(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> R
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+async fn serve_art(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    serve_art_variant(state, id, false).await
+}
+
+/// The og:image target: the same art, sized for preview cards.
+async fn serve_art_og(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    serve_art_variant(state, id, true).await
 }
 
 async fn serve_media(
@@ -2088,4 +2273,50 @@ async fn serve_media(
     );
     headers.insert("transferMode.dlna.org", "Streaming".parse().unwrap());
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encoded(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
+        let img = image::DynamicImage::new_rgb8(width, height);
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, format).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn og_art_downscales_to_capped_jpeg() {
+        let poster = encoded(1200, 1800, image::ImageFormat::Png);
+        let (bytes, mime) = og_art(poster, "image/png".to_string());
+        assert_eq!(mime, "image/jpeg");
+        let img = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((img.width(), img.height()), (600, 900));
+    }
+
+    #[test]
+    fn og_art_passes_small_jpeg_through() {
+        let small = encoded(400, 600, image::ImageFormat::Jpeg);
+        let (bytes, mime) = og_art(small.clone(), "image/jpeg".to_string());
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(bytes, small);
+    }
+
+    #[test]
+    fn og_art_leaves_undecodable_bytes_alone() {
+        let junk = b"not an image".to_vec();
+        let (bytes, mime) = og_art(junk.clone(), "image/jpeg".to_string());
+        assert_eq!((bytes, mime), (junk, "image/jpeg".to_string()));
+    }
+
+    #[test]
+    fn truncate_words_cuts_on_a_word_boundary() {
+        assert_eq!(truncate_words("short enough", 300), "short enough");
+        let long = "word ".repeat(100);
+        let cut = truncate_words(&long, 30);
+        assert!(cut.ends_with('…'));
+        assert!(cut.chars().count() <= 31);
+        assert!(!cut.trim_end_matches('…').ends_with(' '));
+    }
 }
