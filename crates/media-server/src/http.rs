@@ -1122,7 +1122,8 @@ body.cc div.videowrap { width: calc(100vw - var(--ccw)); margin-left: calc(50% -
 /// that picks up where it left off — fragments never reach the server, so
 /// this is client side; the position is also stashed in sessionStorage
 /// per file, backing a 30-second "resume at m:ss" offer for viewers who
-/// come back via links instead of Back), ← / → skipping 10 seconds, asynchronous subtitle
+/// come back via links instead of Back), ← / → skipping 10 seconds and space toggling
+/// play/pause wherever focus is, asynchronous subtitle
 /// extraction, the captions panel (every subtitle line down a column at the
 /// right, laid out along the running time, click to seek — see the CC block
 /// inside), and auto-play of the next episode. That last one swaps the
@@ -1154,20 +1155,42 @@ const PLAYER_SCRIPT: &str = r#"<script>
   v.addEventListener('timeupdate', stamp);
   v.addEventListener('pause', stamp);
   v.addEventListener('seeked', stamp);
-  // Arrow keys skip 10 s. Registered on the capture phase and stopping
-  // propagation so the native controls (which seek by their own step
+  // Arrow keys skip 10 s and space toggles play/pause, wherever focus
+  // is. Registered on the capture phase and stopping propagation so the
+  // native controls (which seek by their own step and toggle on space
   // when the <video> is focused) never see the key — otherwise the two
-  // seeks would stack. Modified keys and text fields are left alone.
+  // actions would stack. Modified keys and text fields are left alone,
+  // and so is space on a focused button: that is how a button is pressed.
+  function ownsKey(e) {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return false;
+    var t = e.target, tag = t && t.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable)) return false;
+    var space = e.key === ' ' || e.key === 'Spacebar';
+    if (space && tag === 'BUTTON') return false;
+    return space || e.key === 'ArrowLeft' || e.key === 'ArrowRight';
+  }
   document.addEventListener('keydown', function (e) {
-    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
-    var step = e.key === 'ArrowLeft' ? -10 : e.key === 'ArrowRight' ? 10 : 0;
-    if (!step) return;
-    var t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (!ownsKey(e)) return;
     e.preventDefault();
     e.stopPropagation();
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      if (e.repeat) return;   // a held key is one press, not a flicker
+      if (v.paused) {
+        var p = v.play();
+        if (p && p.catch) p.catch(function () {});
+      } else {
+        v.pause();
+      }
+      return;
+    }
+    var step = e.key === 'ArrowLeft' ? -10 : 10;
     var end = isFinite(v.duration) ? v.duration : Infinity;
     try { v.currentTime = Math.max(0, Math.min(end, (v.currentTime || 0) + step)); } catch (err) {}
+  }, true);
+  // The keyup as well: a button presses on space's keyup, and the native
+  // controls' play button is one.
+  document.addEventListener('keyup', function (e) {
+    if (ownsKey(e)) { e.preventDefault(); e.stopPropagation(); }
   }, true);
 
   // Subtitles that need extracting (#subs carries the file id) are fetched
@@ -2002,7 +2025,7 @@ async fn play_page(
          <button id=\"skipseg\" hidden style=\"position:absolute;right:1.2em;bottom:3.4em;\
           font-size:1em;padding:.55em 1.1em;background:rgba(15,15,15,.85);color:#fff;\
           border:1px solid #999;border-radius:4px;cursor:pointer\">Skip</button></div>\
-         <p class=\"hint\"><span>← / → skip 10 seconds</span>\
+         <p class=\"hint\"><span>← / → skip 10 seconds · space play/pause</span>\
          <span id=\"rejoin\" hidden></span>\
          <span class=\"right\"><button id=\"cc\" type=\"button\" data-swap aria-pressed=\"false\" \
           aria-controls=\"cc-panel\" title=\"Captions panel: every line along the \

@@ -304,7 +304,9 @@ card with the poster, plot, IMDb rating (linked to the IMDb entry when known),
 genres, director, duration, resolution, codec, size and the same
 "« Prior episode" / "Next episode »" links, so you rarely
 need to navigate back for context. The in-browser player (`/play/{id}`, linked from
-every video detail page) skips 10 seconds on ← / →, offers a "Skip intro" /
+every video detail page) skips 10 seconds on ← / → and toggles play/pause on space —
+wherever focus is, not only with the video focused; text fields and focused buttons
+keep the keys — offers a "Skip intro" /
 "Skip credits" button when the catalog knows the segments (see "Skip intro /
 skip credits" below), and stamps the
 playback position into the URL fragment once a second while playing (and on pause or
