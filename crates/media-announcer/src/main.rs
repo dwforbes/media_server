@@ -13,10 +13,11 @@
 //!
 //! The SSDP wire format here intentionally mirrors media-server/src/ssdp.rs.
 
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -77,6 +78,42 @@ fn local_interfaces() -> Vec<Ipv4Addr> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Directly attached IPv4 networks, as (address, netmask): M-SEARCH is
+/// answered only for sources on one of them, so a forged source elsewhere
+/// cannot use the responder as an amplifier.
+fn local_networks() -> Vec<(Ipv4Addr, Ipv4Addr)> {
+    if_addrs::get_if_addrs()
+        .map(|ifs| {
+            ifs.into_iter()
+                .filter_map(|i| match i.addr {
+                    if_addrs::IfAddr::V4(a) => Some((a.ip, a.netmask)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn on_link(nets: &[(Ipv4Addr, Ipv4Addr)], src: IpAddr) -> bool {
+    let IpAddr::V4(src) = src else { return false };
+    let s = u32::from(src);
+    nets.iter().any(|(ip, mask)| {
+        let m = u32::from(*mask);
+        (u32::from(*ip) & m) == (s & m)
+    })
+}
+
+/// A UUID exactly as device.xml should carry it. Anything else — say, an
+/// impostor answering on the server's address with header-breaking text
+/// in its UDN — is not relayed into SSDP headers.
+fn valid_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 /// One multicast sender socket per interface.
@@ -151,7 +188,10 @@ fn io_error_kind(err: &reqwest::Error) -> Option<std::io::ErrorKind> {
 fn check_health(client: &reqwest::blocking::Client, location: &str) -> Health {
     match client.get(location).send() {
         Ok(response) => {
-            let body = response.text().unwrap_or_default();
+            // device.xml is a few KB; read no more than that from whatever
+            // answered.
+            let mut body = String::new();
+            let _ = response.take(64 * 1024).read_to_string(&mut body);
             let uuid = body.find("<UDN>uuid:").and_then(|i| {
                 let start = i + "<UDN>uuid:".len();
                 body[start..]
@@ -159,7 +199,11 @@ fn check_health(client: &reqwest::blocking::Client, location: &str) -> Health {
                     .map(|e| body[start..start + e].trim().to_string())
             });
             match uuid {
-                Some(uuid) => Health::Up(uuid),
+                Some(uuid) if valid_uuid(&uuid) => Health::Up(uuid),
+                Some(other) => {
+                    tracing::warn!("device.xml carries an implausible UDN {other:?}; not announcing");
+                    Health::DownConfirmed
+                }
                 // Something answered HTTP but it isn't our server.
                 None => Health::DownConfirmed,
             }
@@ -193,9 +237,23 @@ fn responder_thread(state: Arc<Mutex<Option<String>>>, location: String, interfa
             return;
         }
     };
+    let nets = local_networks();
+    // Reply budget: SSDP has no handshake, so a flood of M-SEARCH must
+    // not become a flood of replies (25/s, bursts of 100).
+    let mut tokens = 100.0_f64;
+    let mut last = Instant::now();
     let mut buf = [0u8; 2048];
     loop {
-        let Ok((len, src)) = socket.recv_from(&mut buf) else { continue };
+        let (len, src) = match socket.recv_from(&mut buf) {
+            Ok(x) => x,
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
+        if !nets.is_empty() && !on_link(&nets, src.ip()) {
+            continue;
+        }
         let Ok(text) = std::str::from_utf8(&buf[..len]) else { continue };
         if !text.starts_with("M-SEARCH") {
             continue;
@@ -206,13 +264,25 @@ fn responder_thread(state: Arc<Mutex<Option<String>>>, location: String, interfa
             .find_map(|l| l.strip_prefix("ST:").or_else(|| l.strip_prefix("st:")))
             .map(str::trim)
             .unwrap_or("");
-        for (nt, usn) in targets(&uuid) {
-            if st == "ssdp:all" || st == nt {
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age={MAX_AGE}\r\nEXT:\r\nLOCATION: {location}\r\nSERVER: {SERVER_ID}\r\nST: {nt}\r\nUSN: {usn}\r\n\r\n"
-                );
-                let _ = socket.send_to(response.as_bytes(), src);
-            }
+        let replies: Vec<(String, String)> = targets(&uuid)
+            .into_iter()
+            .filter(|(nt, _)| st == "ssdp:all" || st == nt)
+            .collect();
+        if replies.is_empty() {
+            continue;
+        }
+        let now = Instant::now();
+        tokens = (tokens + now.duration_since(last).as_secs_f64() * 25.0).min(100.0);
+        last = now;
+        if tokens < replies.len() as f64 {
+            continue;
+        }
+        tokens -= replies.len() as f64;
+        for (nt, usn) in replies {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age={MAX_AGE}\r\nEXT:\r\nLOCATION: {location}\r\nSERVER: {SERVER_ID}\r\nST: {nt}\r\nUSN: {usn}\r\n\r\n"
+            );
+            let _ = socket.send_to(response.as_bytes(), src);
         }
     }
 }

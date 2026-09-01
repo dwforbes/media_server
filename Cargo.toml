@@ -17,7 +17,7 @@ version = "0.1.0"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
-quick-xml = "0.37"
+quick-xml = "0.41"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

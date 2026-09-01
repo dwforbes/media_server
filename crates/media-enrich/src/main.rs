@@ -183,8 +183,16 @@ impl NfoProbe {
     }
 }
 
+/// Every sidecar this tool writes goes through the atomic, symlink-refusing
+/// writer: a half-written .nfo is never seen by the scanner, and a link
+/// planted at the target path is never followed.
+fn write_sidecar(path: &Path, text: String) -> std::io::Result<()> {
+    media_db::sidecar::write_atomic(path, text.as_bytes())
+}
+
 fn nfo_state(nfo_path: &Path) -> NfoProbe {
-    let text = std::fs::read_to_string(nfo_path).unwrap_or_default();
+    let text = media_db::sidecar::read_text_capped(nfo_path, media_db::sidecar::MAX_TEXT)
+        .unwrap_or_default();
     let state = if text.is_empty() {
         NfoState::Missing
     } else if text.contains(MARKER) {
@@ -930,7 +938,7 @@ fn main() -> Result<()> {
         if rating.is_some() {
             rated += 1;
         }
-        match std::fs::write(nfo_path, render_nfo(info, rating, imdb_id.as_deref())) {
+        match write_sidecar(nfo_path, render_nfo(info, rating, imdb_id.as_deref())) {
             Ok(()) => nfos_written += 1,
             Err(err) => eprintln!("{}: nfo not written: {err:#}", nfo_path.display()),
         }
@@ -1009,7 +1017,7 @@ fn main() -> Result<()> {
                 season_data.insert(*season, data);
             }
             let overview = season_data[season].overview.as_deref().unwrap_or("");
-            match std::fs::write(dest, render_season_nfo(&info.name, *season, overview)) {
+            match write_sidecar(dest, render_season_nfo(&info.name, *season, overview)) {
                 Ok(()) => nfos_written += 1,
                 Err(err) => eprintln!("{}: nfo not written: {err:#}", dest.display()),
             }
@@ -1073,7 +1081,7 @@ fn main() -> Result<()> {
             if rating.is_some() {
                 ep_rated += 1;
             }
-            match std::fs::write(
+            match write_sidecar(
                 &pe.nfo_path,
                 render_episode_nfo(
                     &pe.show, pe.season, pe.episode, &pe.title, &pe.plot,
@@ -1092,7 +1100,7 @@ fn main() -> Result<()> {
         }
         for show in &pending_shows {
             let rating = show.imdb_id.as_ref().and_then(|id| ep_ratings.get(id)).copied();
-            match std::fs::write(
+            match write_sidecar(
                 &show.nfo_path,
                 render_show_nfo(&show.name, show.plot.as_deref(), rating, show.imdb_id.as_deref()),
             ) {

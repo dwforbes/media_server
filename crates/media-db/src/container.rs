@@ -54,7 +54,7 @@ struct Atom {
 
 impl Atom {
     fn body(&self) -> (u64, u64) {
-        (self.offset + self.header_len, self.offset + self.size)
+        (self.offset + self.header_len, self.offset + self.size)   // both ≤ end: see atoms_in
     }
 }
 
@@ -62,7 +62,7 @@ impl Atom {
 fn atoms_in(file: &mut File, start: u64, end: u64) -> Result<Vec<Atom>> {
     let mut out = Vec::new();
     let mut pos = start;
-    while pos + 8 <= end {
+    while pos.saturating_add(8) <= end {
         file.seek(SeekFrom::Start(pos))?;
         let mut header = [0u8; 8];
         file.read_exact(&mut header)?;
@@ -77,7 +77,9 @@ fn atoms_in(file: &mut File, start: u64, end: u64) -> Result<Vec<Atom>> {
             }
             s => (s as u64, 8),
         };
-        if size < header_len || pos + size > end {
+        // `size > end - pos` rather than `pos + size > end`: a 64-bit
+        // largesize near u64::MAX would wrap the sum past the check.
+        if size < header_len || size > end - pos {
             bail!("malformed atom at offset {pos}");
         }
         out.push(Atom { offset: pos, size, header_len, kind });
@@ -116,7 +118,11 @@ fn title_text(file: &mut File, title: &Atom) -> Result<Option<String>> {
     if data_hi <= data_lo + 8 {
         return Ok(None);
     }
-    let mut payload = vec![0u8; (data_hi - data_lo - 8) as usize];
+    // A title is a line of text. The atom's declared span is bounded only
+    // by the file, so a crafted "extends to EOF" ©nam would otherwise ask
+    // for the whole file in memory; read at most this much of it.
+    const MAX_TITLE_BYTES: u64 = 64 * 1024;
+    let mut payload = vec![0u8; (data_hi - data_lo - 8).min(MAX_TITLE_BYTES) as usize];
     file.seek(SeekFrom::Start(data_lo + 8))?;
     file.read_exact(&mut payload)?;
     Ok(Some(String::from_utf8_lossy(&payload).to_string()))
@@ -143,10 +149,14 @@ struct EbmlElement {
 
 impl EbmlElement {
     fn data_offset(&self) -> u64 {
-        self.offset + self.id_len as u64 + self.size_len as u64
+        self.offset
+            .saturating_add(self.id_len as u64)
+            .saturating_add(self.size_len as u64)
     }
+    /// Saturating: an all-ones size VINT is "unknown" (u64::MAX), and a
+    /// crafted near-max size must not wrap back inside the file.
     fn end(&self) -> u64 {
-        self.data_offset() + self.data_len
+        self.data_offset().saturating_add(self.data_len)
     }
 }
 
@@ -206,7 +216,7 @@ fn matroska_titles(file: &mut File, file_len: u64) -> Result<Vec<EbmlElement>> {
 
     let mut titles = Vec::new();
     let mut pos = segment.data_offset();
-    while pos + 2 <= segment_end {
+    while pos.saturating_add(2) <= segment_end {
         let child = read_ebml_element(file, pos)?;
         if child.data_len == u64::MAX {
             bail!("unexpected unknown-size element at offset {pos}");
@@ -215,14 +225,15 @@ fn matroska_titles(file: &mut File, file_len: u64) -> Result<Vec<EbmlElement>> {
             CLUSTER => break,
             INFO => {
                 let mut inner = child.data_offset();
-                while inner + 2 <= child.end() {
+                while inner.saturating_add(2) <= child.end() {
                     let grand = read_ebml_element(file, inner)?;
                     if grand.data_len == u64::MAX {
                         bail!("unexpected unknown-size element at offset {inner}");
                     }
-                    // A Title claiming to extend past EOF is malformed; never
-                    // trust its size for allocation or in-place rewriting.
-                    if grand.id == TITLE && grand.end() <= file_len {
+                    // A Title claiming to extend past EOF is malformed, and one
+                    // claiming more than a line of text is not a title; never
+                    // trust such a size for allocation or in-place rewriting.
+                    if grand.id == TITLE && grand.end() <= file_len && grand.data_len <= 64 * 1024 {
                         titles.push(grand);
                     }
                     inner = grand.end();
@@ -256,6 +267,11 @@ fn encode_vint(value: u64, len: u8) -> Result<Vec<u8>> {
 /// The old title text is zeroed for good measure.
 fn void_element(file: &mut File, element: &EbmlElement) -> Result<()> {
     let new_size_len = element.id_len + element.size_len - 1;
+    if new_size_len > 8 {
+        // A 2-byte ID with an 8-byte size VINT: no legal 9-byte VINT
+        // exists, and writing one would corrupt the Info element.
+        bail!("title header too wide to rewrite in place");
+    }
     let mut header = vec![0xECu8];
     header.extend(encode_vint(element.data_len, new_size_len)?);
     file.seek(SeekFrom::Start(element.offset))?;

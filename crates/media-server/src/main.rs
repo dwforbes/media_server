@@ -79,6 +79,7 @@ async fn main() -> Result<()> {
             let _ = std::fs::create_dir_all(&dir);
             dir
         },
+        probes: tokio::sync::Semaphore::new(2),
         tls: cfg.tls.as_ref().map(|t| http::TlsInfo {
             hostname: t.hostname.clone(),
             port: t.bind.port(),

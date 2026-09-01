@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Extension, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
 use axum::Router;
 use media_db::mime::{AUDIO_EXTENSIONS, VIDEO_EXTENSIONS};
 use media_db::queries::{self, files, music, tv};
+use media_db::sidecar;
 use rusqlite::Connection;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
@@ -195,6 +196,9 @@ pub struct AppState {
     /// another ffmpeg. The entry is removed (after the cache file lands)
     /// just before the sender is dropped, which is what wakes the waiters.
     pub subs_inflight: std::sync::Mutex<std::collections::HashMap<i64, tokio::sync::watch::Receiver<()>>>,
+    /// Permits for ffprobe/ffmpeg children (see text_sub_stream): the
+    /// cap on how many a flood of requests can have running at once.
+    pub probes: tokio::sync::Semaphore,
 }
 
 pub struct TlsInfo {
@@ -305,7 +309,76 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/play/{id}", get(play_page))
         .route("/subs/{id}", get(serve_subs))
         .layer(middleware::from_fn_with_state(state.clone(), redirect_pages))
+        .layer(middleware::from_fn(security_headers))
         .with_state(state)
+}
+
+/// Defence in depth on every response: no MIME sniffing (a share file
+/// served as an image can never be reinterpreted as a document), no
+/// framing, no referrer leakage, and a Content-Security-Policy that
+/// permits exactly one inline script — the player's, by hash — so an
+/// escaping slip anywhere in the format!-built pages cannot run script.
+/// On XML and media responses the headers are inert.
+async fn security_headers(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    if let Ok(value) = HeaderValue::from_str(csp()) {
+        h.insert(header::CONTENT_SECURITY_POLICY, value);
+    }
+    res
+}
+
+/// The policy, built once: the SHA-256 of the player script's body is
+/// what lets it run; inline styles stay allowed (the pages lean on
+/// style attributes, which cannot execute anything); blob: covers the
+/// subtitle track attached from an extraction fetch.
+fn csp() -> &'static str {
+    static CSP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CSP.get_or_init(|| {
+        use base64::Engine;
+        let body = PLAYER_SCRIPT
+            .strip_prefix("<script>")
+            .and_then(|s| s.strip_suffix("</script>"))
+            .unwrap_or(PLAYER_SCRIPT);
+        let digest = ring::digest::digest(&ring::digest::SHA256, body.as_bytes());
+        let hash = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
+        format!(
+            "default-src 'self'; script-src 'sha256-{hash}'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self'; media-src 'self' blob:; connect-src 'self'; object-src 'none'; \
+             base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        )
+    })
+}
+
+/// An IMDb title id fit to print and link: "tt" plus 7–9 digits and
+/// nothing else. Sidecar .nfo files are writable by anything that can
+/// reach the share, so the id is validated where it is rendered.
+fn imdb_title_id(id: &str) -> Option<&str> {
+    let digits = id.strip_prefix("tt")?;
+    ((7..=9).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())).then_some(id)
+}
+
+/// The image types the art routes serve, told apart by magic bytes: the
+/// MIME comes from the bytes, never from a tag or a file extension that
+/// something on the share chose (an APIC frame declaring text/html would
+/// otherwise have a browser render its payload on this origin).
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"BM") {
+        Some("image/bmp")
+    } else {
+        None
+    }
 }
 
 fn xml_response(body: String) -> Response {
@@ -412,8 +485,20 @@ fn search_scope(
     Ok(hits)
 }
 
+/// How many distinct terms a search honours. Every item in scope is
+/// checked against every term, so a request with thousands of quoted
+/// literals must not multiply into thousands of passes over the catalog.
+const MAX_TERMS: usize = 12;
+
+fn limit_terms(mut terms: Vec<String>) -> Vec<String> {
+    terms.sort();
+    terms.dedup();
+    terms.truncate(MAX_TERMS);
+    terms
+}
+
 fn query_terms(q: &str) -> Vec<String> {
-    q.split_whitespace().map(|t| t.to_lowercase()).collect()
+    limit_terms(q.split_whitespace().map(|t| t.to_lowercase()).collect())
 }
 
 /// Extract terms and a class constraint from a ContentDirectory
@@ -453,7 +538,7 @@ fn parse_search_criteria(criteria: &str) -> (Vec<String>, ClassFilter) {
         last_end = end + 1;
         cursor = end + 1;
     }
-    (terms, class)
+    (limit_terms(terms), class)
 }
 
 /// The search box shown on browse pages, scoped to the current container.
@@ -858,7 +943,7 @@ fn series_meta_html(meta: &media_db::queries::tv::SeriesMeta) -> String {
     if let Some(plot) = &meta.plot {
         out.push_str(&format!("<p style=\"max-width:38em\">{}</p>", xml_escape(plot)));
     }
-    let imdb = meta.imdb_id.as_deref().filter(|id| id.starts_with("tt"));
+    let imdb = meta.imdb_id.as_deref().and_then(imdb_title_id);
     let line = match (meta.rating, imdb) {
         (Some(rating), Some(id)) => Some(format!(
             "IMDb {rating:.1} / 10 — <a href=\"https://www.imdb.com/title/{id}/\">{id}</a>"
@@ -901,8 +986,21 @@ fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
 /// showing — full English captions, SDH preferred, forced tracks last (see
 /// media_db::subtitles). None when the file has no text subtitles (bitmap
 /// PGS/VobSub can't become WebVTT).
-async fn text_sub_stream(ffprobe: &str, path: &std::path::Path) -> Option<usize> {
-    let out = tokio::process::Command::new(ffprobe)
+///
+/// "None" is remembered as `{id}.nosubs` beside the VTT cache (good while
+/// newer than the media file), so a program without captions costs one
+/// probe rather than one per page view; and probes take a permit from
+/// `state.probes`, the small semaphore every ffmpeg/ffprobe spawn shares,
+/// so a burst of requests queues instead of forking a process apiece.
+async fn text_sub_stream(state: &AppState, id: i64, path: &std::path::Path) -> Option<usize> {
+    let marker = state.vtt_cache.join(format!("{id}.nosubs"));
+    if let (Some(marker_time), Some(media_time)) = (file_mtime(&marker), file_mtime(path)) {
+        if marker_time >= media_time {
+            return None;
+        }
+    }
+    let _permit = state.probes.acquire().await.ok()?;
+    let out = tokio::process::Command::new(&state.ffprobe)
         .args(media_db::subtitles::ffprobe_args())
         .arg(path)
         .output()
@@ -912,7 +1010,11 @@ async fn text_sub_stream(ffprobe: &str, path: &std::path::Path) -> Option<usize>
         return None;
     }
     let tracks = media_db::subtitles::parse_ffprobe(&String::from_utf8_lossy(&out.stdout));
-    media_db::subtitles::best_text_track(&tracks).map(|t| t.ordinal)
+    let found = media_db::subtitles::best_text_track(&tracks).map(|t| t.ordinal);
+    if found.is_none() {
+        let _ = std::fs::write(&marker, b"");
+    }
+    found
 }
 
 /// Subtitles as WebVTT: the .srt sidecar when present, else the embedded
@@ -931,7 +1033,7 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
 
     // 1. Sidecar .srt, converted on the fly.
     let srt_path = servable.abs_path.with_extension("srt");
-    if let Ok(bytes) = std::fs::read(&srt_path) {
+    if let Ok(bytes) = sidecar::read_capped(&srt_path, sidecar::MAX_TEXT) {
         if let Some(text) = media_db::textenc::decode_subtitle_text(&bytes) {
             return vtt_response(srt_to_vtt(&text));
         }
@@ -989,10 +1091,11 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
 /// partial file. Files with only bitmap tracks (PGS/VobSub) have nothing
 /// extractable and leave no cache file.
 async fn extract_subs(state: &AppState, id: i64, path: &std::path::Path, cache: &std::path::Path) {
-    let Some(ordinal) = text_sub_stream(&state.ffprobe, path).await else {
+    let Some(ordinal) = text_sub_stream(state, id, path).await else {
         tracing::debug!("no text subtitle track in {id}");
         return;
     };
+    let _permit = state.probes.acquire().await;
     let output = tokio::process::Command::new(&state.ffmpeg)
         .args(["-v", "error", "-nostdin", "-i"])
         .arg(path)
@@ -1859,7 +1962,7 @@ async fn play_page(
     let mut facts: Vec<String> = Vec::new();
     // The rating links to the IMDb entry when we know it — the episode's
     // own tconst for TV, the film's for movies.
-    let imdb = detail.imdb_id.as_deref().filter(|id| id.starts_with("tt"));
+    let imdb = detail.imdb_id.as_deref().and_then(imdb_title_id);
     match (detail.rating, imdb) {
         (Some(rating), Some(id)) => facts.push(format!(
             "<a href=\"https://www.imdb.com/title/{id}/\">IMDb {rating:.1}</a>"
@@ -1920,7 +2023,7 @@ async fn play_page(
     // cache yet) can take a minute of ffmpeg demuxing on a big file — so
     // the video starts immediately and a few lines of script fetch the
     // track asynchronously with a visible status, attaching it when ready.
-    let instant_subs = servable.abs_path.with_extension("srt").is_file()
+    let instant_subs = sidecar::is_regular_within(&servable.abs_path.with_extension("srt"), sidecar::MAX_TEXT)
         || state.vtt_cache.join(format!("{id}.vtt")).is_file();
     let subs_note = |extract: bool, text: &str| {
         format!(
@@ -1942,7 +2045,7 @@ async fn play_page(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .contains_key(&id)
-        || text_sub_stream(&state.ffprobe, &servable.abs_path).await.is_some()
+        || text_sub_stream(&state, id, &servable.abs_path).await.is_some()
     {
         (
             String::new(),
@@ -2222,10 +2325,7 @@ async fn item_page(
     };
 
     let mut facts: Vec<(&str, String)> = Vec::new();
-    let imdb = detail
-        .imdb_id
-        .as_deref()
-        .filter(|id| id.starts_with("tt"));
+    let imdb = detail.imdb_id.as_deref().and_then(imdb_title_id);
     match (detail.rating, imdb) {
         (Some(rating), Some(id)) => facts.push((
             "IMDb",
@@ -2549,7 +2649,7 @@ async fn browse(state: &AppState, body: &str, update_id: u32) -> Response {
                 let end = if requested_count == 0 {
                     total
                 } else {
-                    (starting_index + requested_count).min(total)
+                    starting_index.saturating_add(requested_count).min(total)
                 };
                 let start = starting_index.min(total);
                 let page = &entries[start..end.max(start)];
@@ -2608,7 +2708,7 @@ async fn search_action(state: &AppState, body: &str, update_id: u32) -> Response
     let end = if requested_count == 0 {
         total
     } else {
-        (starting_index + requested_count).min(total)
+        starting_index.saturating_add(requested_count).min(total)
     };
     let start = starting_index.min(total);
     let page: Vec<media_db::BrowseItem> = found[start..end.max(start)].to_vec();
@@ -2678,15 +2778,8 @@ async fn cms_control(headers: HeaderMap, _body: String) -> Response {
 /// The raw art bytes and their MIME type for an art source. Blocking
 /// (file reads, tag parsing) — call from spawn_blocking.
 fn read_art(source: files::ArtSource) -> anyhow::Result<(Vec<u8>, String)> {
-    match source {
-        files::ArtSource::File(path) => {
-            let mime = if path.extension().and_then(|e| e.to_str()) == Some("png") {
-                "image/png"
-            } else {
-                "image/jpeg"
-            };
-            Ok((std::fs::read(path)?, mime.to_string()))
-        }
+    let bytes = match source {
+        files::ArtSource::File(path) => sidecar::read_capped(&path, sidecar::MAX_IMAGE)?,
         files::ArtSource::Embedded(media_path) => {
             use lofty::file::TaggedFileExt;
             let tagged = lofty::read_from_path(&media_path)?;
@@ -2698,13 +2791,13 @@ fn read_art(source: files::ArtSource) -> anyhow::Result<(Vec<u8>, String)> {
                 .pictures()
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("no embedded picture"))?;
-            let mime = picture
-                .mime_type()
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_else(|| "image/jpeg".to_string());
-            Ok((picture.data().to_vec(), mime))
+            let data = picture.data();
+            anyhow::ensure!(data.len() as u64 <= sidecar::MAX_IMAGE, "embedded picture too large");
+            data.to_vec()
         }
-    }
+    };
+    let mime = image_mime(&bytes).ok_or_else(|| anyhow::anyhow!("art is not an image"))?;
+    Ok((bytes, mime.to_string()))
 }
 
 /// Art downscaled for link-preview cards: a JPEG capped at 900px on the
@@ -2714,7 +2807,20 @@ fn read_art(source: files::ArtSource) -> anyhow::Result<(Vec<u8>, String)> {
 /// through unchanged.
 fn og_art(bytes: Vec<u8>, mime: String) -> (Vec<u8>, String) {
     const MAX_EDGE: u32 = 900;
-    let Ok(img) = image::load_from_memory(&bytes) else {
+    // Decode under limits: a crafted poster (a 40000×40000 PNG is a few
+    // KB on disk) must not turn a preview fetch into a multi-GB decode.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(12_000);
+    limits.max_image_height = Some(12_000);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    let decoded = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|mut reader| {
+            reader.limits(limits);
+            reader.decode().ok()
+        });
+    let Some(img) = decoded else {
         return (bytes, mime);
     };
     let img = if img.width().max(img.height()) > MAX_EDGE {
@@ -2819,12 +2925,9 @@ async fn serve_media(
     if let Ok(value) = servable.mime.parse() {
         headers.insert(header::CONTENT_TYPE, value);
     }
-    headers.insert(
-        "contentFeatures.dlna.org",
-        format!("http-get:*:{}:{}", servable.mime, DLNA_FEATURES)
-            .parse()
-            .unwrap(),
-    );
+    if let Ok(value) = format!("http-get:*:{}:{}", servable.mime, DLNA_FEATURES).parse() {
+        headers.insert("contentFeatures.dlna.org", value);
+    }
     headers.insert("transferMode.dlna.org", "Streaming".parse().unwrap());
     response
 }

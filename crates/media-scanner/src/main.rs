@@ -350,6 +350,16 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         return Ok(false);
     }
 
+    // Symlinks are never catalogued (the reconcile walker skips them as
+    // well): a link planted on the share could point at anything on this
+    // host, and the server would stream it.
+    if std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+
     if path.is_dir() {
         return scan_subtree(conn, cfg, root, path);
     }
@@ -447,10 +457,15 @@ fn refresh_art_siblings(conn: &mut Connection, cfg: &Config, root: &Root, rel: &
     let dir_prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
 
     let known = files::known_files(conn, root.id)?;
-    let poster_stem = lower
-        .strip_suffix("-poster.jpg")
-        .or_else(|| lower.strip_suffix("-poster.png"))
-        .map(|s| format!("{dir_prefix}{}.", &name[..s.len()]));
+    // Indexed on `name` itself: lowercasing can change byte length (İ
+    // becomes two chars), so a stem length taken from the lowercase copy
+    // would slice `name` wrong — or out of bounds, which panics.
+    let poster_stem = ["-poster.jpg", "-poster.png"].iter().find_map(|suffix| {
+        let n = name.len().checked_sub(suffix.len())?;
+        name.get(n..)
+            .filter(|tail| tail.eq_ignore_ascii_case(suffix))
+            .map(|_| format!("{dir_prefix}{}.", &name[..n]))
+    });
 
     for (rel2, kf) in known {
         if kf.status != "ready" {

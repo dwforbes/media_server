@@ -520,6 +520,43 @@ stem and stay valid, and the catalog carries the original's added-at date across
 change so Recently Added doesn't fill with conversions. `--dry-run` shows the full plan
 (it only probes). Opt-in; needs `ffmpeg` (`ffmpeg_path`) and `ffprobe`.
 
+## Security posture
+
+Everything here is unauthenticated by design — it is a LAN media server — so the
+threat model is a compromised device on the LAN (any HTTP, SOAP or SSDP traffic) and
+hostile content on the share (crafted media files, sidecars and filenames written by
+anything that can reach it). The controls that follow from that:
+
+- **Pages.** Every catalog-derived string is escaped into HTML/XML; the IMDb id is
+  additionally validated (`tt` + digits) at ingest and at render. Every response
+  carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer` and a Content-Security-Policy that allows exactly one
+  inline script — the player's, by SHA-256 hash — so an escaping slip cannot run
+  script. Art is served with a MIME type sniffed from the bytes (JPEG/PNG/GIF/WebP/BMP),
+  never from a tag or extension; anything else is refused.
+- **Share content.** Sidecars (.nfo, .srt, .edl, music.toml, posters) are read through
+  `media_db::sidecar`: bounded in size (8 MiB text, 32 MiB images) and never through
+  symlinks; the enricher writes them atomically (temp + rename) and refuses a symlink
+  at the target; the watcher never catalogs a symlinked media file. NFO values are
+  stripped of control characters and bounded; the MP4/Matroska title parser reads at
+  most 64 KiB of a title and walks boxes with overflow-safe arithmetic; per-file
+  extraction is wrapped so a parser panic marks the row error instead of stopping the
+  scanner; preview-image decoding runs under pixel and allocation limits.
+- **Requests.** SOAP bodies are capped at 2 MiB by the framework and parsed by a
+  pull parser with no entity expansion; paging arithmetic saturates; search honours at
+  most 12 distinct terms; object ids reject control characters; ffprobe/ffmpeg spawns
+  share a two-permit semaphore and a "no captions" result is cached, so a burst of
+  requests cannot fork a process apiece.
+- **SSDP.** M-SEARCH is answered only for sources on a directly attached network (so a
+  forged source cannot use the responder as an amplifier) and within a reply budget
+  (25/s, bursts of 100); the announcer also validates the UUID it relays and caps the
+  device.xml it reads.
+- **Services.** The systemd units in `deploy/` run as an unprivileged user with
+  `ProtectSystem=strict`, no capabilities, a syscall allow-list, no device or kernel
+  access, and a memory ceiling. Re-copy them after pulling this change. Run
+  `cargo audit` now and then; the RustSec advisories against quick-xml 0.37 are what
+  prompted the move to 0.41.
+
 ## Not implemented (v1)
 
 - GENA eventing (clients poll instead).

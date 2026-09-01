@@ -87,13 +87,13 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
         return Ok(Outcome::Skipped("not mp4"));
     }
     let srt = media.with_extension("srt");
-    if !srt.is_file() {
+    if !media_db::sidecar::is_regular_within(&srt, media_db::sidecar::MAX_TEXT) {
         return Ok(Outcome::Skipped("no .srt sidecar"));
     }
     // mov_text needs clean UTF-8 text. Decode the unambiguous encodings
     // (UTF-16 via BOM, mostly-ASCII Windows-1252/Latin-1) rather than
     // embedding mojibake; anything unclear is skipped.
-    let srt_bytes = std::fs::read(&srt)?;
+    let srt_bytes = media_db::sidecar::read_capped(&srt, media_db::sidecar::MAX_TEXT)?;
     if srt_bytes.is_empty() {
         return Ok(Outcome::Skipped("srt is empty"));
     }

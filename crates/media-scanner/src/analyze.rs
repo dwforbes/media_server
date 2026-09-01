@@ -365,7 +365,10 @@ fn decode_window(ffmpeg: &str, path: &str, head: bool) -> Result<Vec<i16>> {
     if head {
         cmd.args(["-t", &HEAD_SECS.to_string()]);
     } else {
-        cmd.args(["-sseof", &format!("-{TAIL_SECS}")]);
+        // -t as well: -sseof trusts the container's declared duration, and
+        // a file whose real audio runs far past it would otherwise decode
+        // to the true end into memory.
+        cmd.args(["-sseof", &format!("-{TAIL_SECS}"), "-t", &(TAIL_SECS + 30).to_string()]);
     }
     cmd.arg("-i").arg(path).args([
         "-map", "0:a:0", "-ac", "1", "-ar", &SAMPLE_RATE.to_string(), "-f", "s16le", "-",

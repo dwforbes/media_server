@@ -21,13 +21,23 @@ pub fn extract_file(
     rel_path: &str,
     file_id: i64,
 ) -> Result<()> {
-    match try_extract(conn, ffprobe, root, rel_path, file_id) {
-        Ok(()) => {
+    // A crafted file that trips a panic inside a tag or container parser
+    // must cost that file its row, not the daemon its life.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        try_extract(conn, ffprobe, root, rel_path, file_id)
+    }));
+    match outcome {
+        Ok(Ok(())) => {
             tracing::info!("extracted {}/{}", root.path, rel_path);
             Ok(())
         }
-        Err(err) => {
+        Ok(Err(err)) => {
             tracing::warn!("extraction failed for {}/{}: {err:#}", root.path, rel_path);
+            files::mark_error(conn, file_id)?;
+            Ok(())
+        }
+        Err(_) => {
+            tracing::error!("extraction panicked on {}/{}; marked error", root.path, rel_path);
             files::mark_error(conn, file_id)?;
             Ok(())
         }
@@ -222,7 +232,9 @@ fn ancestor_meta_paths(abs: &Path, root: &Path) -> Vec<std::path::PathBuf> {
 pub fn nearest_music_meta(abs: &Path, root: &Path) -> Option<DirMusicMeta> {
     let mut merged: Option<DirMusicMeta> = None;
     for candidate in ancestor_meta_paths(abs, root) {
-        let Ok(text) = std::fs::read_to_string(&candidate) else { continue };
+        let Ok(text) = media_db::sidecar::read_text_capped(&candidate, media_db::sidecar::MAX_TEXT) else {
+            continue;
+        };
         let parsed: DirMusicMeta = match toml::from_str(&text) {
             Ok(meta) => meta,
             Err(err) => {

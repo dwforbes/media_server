@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -74,17 +75,61 @@ pub fn make_senders(interfaces: &[Ipv4Addr]) -> Result<Arc<Vec<(Ipv4Addr, UdpSoc
     Ok(Arc::new(senders))
 }
 
+/// Directly attached IPv4 networks, as (address, netmask). SSDP is
+/// link-scoped, so M-SEARCH is answered only for sources on one of them:
+/// a datagram forged with some other source would otherwise turn the
+/// responder into an amplifier aimed at that address (five replies of
+/// ~300 bytes for one ~120-byte request).
+pub fn local_networks() -> Vec<(Ipv4Addr, Ipv4Addr)> {
+    if_addrs::get_if_addrs()
+        .map(|ifs| {
+            ifs.into_iter()
+                .filter_map(|i| match i.addr {
+                    if_addrs::IfAddr::V4(a) => Some((a.ip, a.netmask)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn on_link(nets: &[(Ipv4Addr, Ipv4Addr)], src: IpAddr) -> bool {
+    let IpAddr::V4(src) = src else { return false };
+    let s = u32::from(src);
+    nets.iter().any(|(ip, mask)| {
+        let m = u32::from(*mask);
+        (u32::from(*ip) & m) == (s & m)
+    })
+}
+
+/// Replies per second the responder will send, and the burst it allows:
+/// SSDP has no handshake, so a flood of M-SEARCH (forged or not) must not
+/// become a flood of replies. Normal discovery is a handful of packets.
+const REPLY_RATE: f64 = 25.0;
+const REPLY_BURST: f64 = 100.0;
+
 /// Answer M-SEARCH queries forever.
 pub async fn respond_loop(socket: Arc<UdpSocket>, uuid: String, location: String) {
+    let nets = local_networks();
+    if nets.is_empty() {
+        tracing::warn!("no local networks found; answering M-SEARCH from any source");
+    }
     let mut buf = [0u8; 2048];
+    let mut tokens = REPLY_BURST;
+    let mut last = Instant::now();
     loop {
         let (len, src) = match socket.recv_from(&mut buf).await {
             Ok(x) => x,
             Err(err) => {
                 tracing::warn!("SSDP recv error: {err}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
         };
+        if !nets.is_empty() && !on_link(&nets, src.ip()) {
+            tracing::debug!("ignoring M-SEARCH from off-link {src}");
+            continue;
+        }
         let Ok(text) = std::str::from_utf8(&buf[..len]) else { continue };
         if !text.starts_with("M-SEARCH") {
             continue;
@@ -94,16 +139,48 @@ pub async fn respond_loop(socket: Arc<UdpSocket>, uuid: String, location: String
             .find_map(|l| l.strip_prefix("ST:").or_else(|| l.strip_prefix("st:")))
             .map(str::trim)
             .unwrap_or("");
-        for (nt, usn) in targets(&uuid) {
-            if st == "ssdp:all" || st == nt {
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age={MAX_AGE}\r\nEXT:\r\nLOCATION: {location}\r\nSERVER: {SERVER_ID}\r\nST: {nt}\r\nUSN: {usn}\r\n\r\n"
-                );
-                if let Err(err) = socket.send_to(response.as_bytes(), src).await {
-                    tracing::debug!("SSDP response to {src} failed: {err}");
-                }
+        let replies: Vec<(String, String)> = targets(&uuid)
+            .into_iter()
+            .filter(|(nt, _)| st == "ssdp:all" || st == nt)
+            .collect();
+        if replies.is_empty() {
+            continue;
+        }
+        let now = Instant::now();
+        tokens = (tokens + now.duration_since(last).as_secs_f64() * REPLY_RATE).min(REPLY_BURST);
+        last = now;
+        if tokens < replies.len() as f64 {
+            tracing::debug!("M-SEARCH from {src} dropped: reply budget spent");
+            continue;
+        }
+        tokens -= replies.len() as f64;
+        for (nt, usn) in replies {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age={MAX_AGE}\r\nEXT:\r\nLOCATION: {location}\r\nSERVER: {SERVER_ID}\r\nST: {nt}\r\nUSN: {usn}\r\n\r\n"
+            );
+            if let Err(err) = socket.send_to(response.as_bytes(), src).await {
+                tracing::debug!("SSDP response to {src} failed: {err}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::on_link;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn on_link_matches_attached_subnets_only() {
+        let nets = vec![
+            (Ipv4Addr::new(192, 168, 0, 171), Ipv4Addr::new(255, 255, 255, 0)),
+            (Ipv4Addr::new(172, 17, 0, 5), Ipv4Addr::new(255, 255, 0, 0)),
+        ];
+        assert!(on_link(&nets, IpAddr::V4(Ipv4Addr::new(192, 168, 0, 9))));
+        assert!(on_link(&nets, IpAddr::V4(Ipv4Addr::new(172, 17, 200, 1))));
+        assert!(!on_link(&nets, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9))));
+        assert!(!on_link(&nets, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!on_link(&nets, "::1".parse().unwrap()));
     }
 }
 

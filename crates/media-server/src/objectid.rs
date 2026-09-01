@@ -54,7 +54,11 @@ fn enc(s: &str) -> String {
 
 fn dec(s: &str) -> Option<String> {
     let bytes = B64.decode(s.as_bytes()).ok()?;
-    String::from_utf8(bytes).ok()
+    let text = String::from_utf8(bytes).ok()?;
+    // Names come from the filesystem and tags, never with control
+    // characters — and a NUL would truncate the SQL LIKE pattern a
+    // directory id turns into, matching rows the caller never expected.
+    (!text.chars().any(char::is_control)).then_some(text)
 }
 
 impl ObjectId {

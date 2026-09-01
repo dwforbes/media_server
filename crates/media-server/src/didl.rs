@@ -11,6 +11,10 @@ pub fn xml_escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            // Not characters in XML 1.0: one of these in a title would
+            // make the whole DIDL/SOAP document unparseable for a strict
+            // client, taking the container with it.
+            '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}' | '\u{FFFE}' | '\u{FFFF}' => {}
             _ => out.push(c),
         }
     }
@@ -105,7 +109,9 @@ fn render_item(out: &mut String, id: &str, parent: &str, item: &BrowseItem, base
 fn render_res(out: &mut String, r: &media_db::Rendition, base_url: &str) {
     let mut attrs = format!(
         r#"protocolInfo="http-get:*:{}:{}" size="{}""#,
-        r.mime, DLNA_FEATURES, r.size
+        xml_escape(&r.mime),
+        DLNA_FEATURES,
+        r.size
     );
     if let Some(ms) = r.duration_ms {
         attrs.push_str(&format!(r#" duration="{}""#, didl_duration(ms)));
@@ -113,7 +119,7 @@ fn render_res(out: &mut String, r: &media_db::Rendition, base_url: &str) {
     if let (Some(w), Some(h)) = (r.width, r.height) {
         attrs.push_str(&format!(r#" resolution="{w}x{h}""#));
     }
-    out.push_str(&format!("<res {attrs}>{base_url}/media/{}</res>", r.file_id));
+    out.push_str(&format!("<res {attrs}>{}/media/{}</res>", xml_escape(base_url), r.file_id));
 }
 
 fn render_container(

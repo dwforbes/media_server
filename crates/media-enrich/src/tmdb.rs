@@ -72,7 +72,12 @@ impl Tmdb {
         } else {
             request = request.query(&[("api_key", self.key.as_str())]);
         }
-        let response = request.send().context("TMDB request failed")?;
+        // without_url: reqwest's error text carries the request URL, and
+        // with a v3 key that is the key itself, headed for the journal.
+        let response = request
+            .send()
+            .map_err(reqwest::Error::without_url)
+            .context("TMDB request failed")?;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             bail!("TMDB rejected the API key (401) — check TMDB_API_KEY");
@@ -83,7 +88,11 @@ impl Tmdb {
         if !status.is_success() {
             bail!("TMDB {path} returned {status}");
         }
-        response.json().map(Some).context("parsing TMDB response")
+        response
+            .json()
+            .map(Some)
+            .map_err(reqwest::Error::without_url)
+            .context("parsing TMDB response")
     }
 
     /// Best match for (title, year). Search precision matters: TMDB's
@@ -282,14 +291,20 @@ impl Tmdb {
     /// Download a poster (w500 rendition, ~500x750) to `dest`.
     pub fn download_poster(&self, poster_path: &str, dest: &std::path::Path) -> Result<()> {
         let url = format!("https://image.tmdb.org/t/p/w500{poster_path}");
-        let bytes = self
-            .client
+        // A w500 poster is ~50 KB; read no more than this from the CDN.
+        const MAX_POSTER_BYTES: u64 = 16 * 1024 * 1024;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        self.client
             .get(url)
             .send()
             .context("downloading poster")?
             .error_for_status()?
-            .bytes()?;
-        std::fs::write(dest, &bytes).with_context(|| format!("writing {}", dest.display()))?;
+            .take(MAX_POSTER_BYTES)
+            .read_to_end(&mut bytes)
+            .context("reading poster")?;
+        media_db::sidecar::write_atomic(dest, &bytes)
+            .with_context(|| format!("writing {}", dest.display()))?;
         Ok(())
     }
 

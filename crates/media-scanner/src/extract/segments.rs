@@ -16,7 +16,7 @@ pub fn discover(
     duration_ms: Option<i64>,
     chapters: &[Chapter],
 ) -> (&'static str, Vec<Segment>) {
-    if let Ok(text) = std::fs::read_to_string(edl_path(abs)) {
+    if let Ok(text) = media_db::sidecar::read_text_capped(&edl_path(abs), media_db::sidecar::MAX_TEXT) {
         return ("edl", parse_edl(&text, duration_ms));
     }
     ("chapters", from_chapters(chapters, duration_ms))

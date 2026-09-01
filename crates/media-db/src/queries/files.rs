@@ -595,7 +595,9 @@ pub fn dir_children(
     let mut items = Vec::new();
     for row in rows {
         let (rel, item) = row?;
-        let remainder = &rel[prefix.len()..];
+        // LIKE matched on SQLite's terms (ASCII case-insensitive, C-string
+        // semantics); only rows that really carry the prefix belong here.
+        let Some(remainder) = rel.strip_prefix(&prefix) else { continue };
         match remainder.split_once('/') {
             Some((first, _)) => {
                 if !subdirs.iter().any(|d| d == first) {

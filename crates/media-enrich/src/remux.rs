@@ -334,7 +334,7 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
     // Usable means the same bar the embed step sets: non-empty and in a
     // recognizable encoding (mov_text needs clean UTF-8; see subtitles.rs).
     let srt = media.with_extension("srt");
-    let srt_bytes = std::fs::read(&srt).unwrap_or_default();
+    let srt_bytes = media_db::sidecar::read_capped(&srt, media_db::sidecar::MAX_TEXT).unwrap_or_default();
     let srt_text = if srt_bytes.is_empty() { None } else { decode_subtitle_text(&srt_bytes) };
 
     let before = probe(ffprobe, media)?;

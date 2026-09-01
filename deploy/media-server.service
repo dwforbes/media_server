@@ -46,6 +46,31 @@ ReadWritePaths=/home/pi/.local/state/mediaserver
 # else as tight as before:
 #AmbientCapabilities=CAP_NET_BIND_SERVICE
 #CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# (and then drop the empty CapabilityBoundingSet= line below).
+
+# Sandboxing beyond the basics above: no capabilities, only the socket
+# families the binaries use (NETLINK is how interfaces are enumerated),
+# no namespaces/kernel knobs/devices/other processes' /proc, a native
+# syscall allow-list, and a memory ceiling so a crafted media file cannot
+# take the whole box down with it.
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+PrivateDevices=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=1G
+TasksMax=512
 
 [Install]
 WantedBy=multi-user.target

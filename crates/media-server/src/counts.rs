@@ -60,7 +60,15 @@ pub fn for_children(
         tracing::warn!("counting children of {parent_key}: {err:#}");
         HashMap::new()
     }));
-    cache.per_parent.insert(parent_key, map.clone());
+    // Only containers with something to count are worth remembering: any
+    // string parses as a series or artist id, so an empty result would
+    // otherwise add an entry per request until the next catalog change.
+    if !map.is_empty() {
+        if cache.per_parent.len() >= 4096 {
+            cache.per_parent.clear();
+        }
+        cache.per_parent.insert(parent_key, map.clone());
+    }
     map
 }
 
