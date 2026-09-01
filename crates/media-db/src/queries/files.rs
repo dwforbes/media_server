@@ -297,7 +297,7 @@ pub fn update_tech(conn: &Connection, id: i64, tech: &TechInfo) -> Result<()> {
         "UPDATE files SET container = ?2, duration_ms = ?3, width = ?4, height = ?5,
                           video_codec = ?6, audio_codec = ?7, audio_profile = ?8,
                           audio_bitrate = ?9, audio_sample_rate = ?10, audio_bit_depth = ?11,
-                          audio_channels = ?12, updated_at = unixepoch()
+                          audio_channels = ?12, frame_rate = ?13, updated_at = unixepoch()
          WHERE id = ?1",
         params![
             id,
@@ -311,7 +311,8 @@ pub fn update_tech(conn: &Connection, id: i64, tech: &TechInfo) -> Result<()> {
             tech.audio_bitrate,
             tech.audio_sample_rate,
             tech.audio_bit_depth,
-            tech.audio_channels
+            tech.audio_channels,
+            tech.frame_rate
         ],
     )?;
     Ok(())
@@ -386,6 +387,7 @@ pub struct ItemDetail {
     pub duration_ms: Option<i64>,
     pub width: Option<i64>,
     pub height: Option<i64>,
+    pub frame_rate: Option<f64>,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub audio_profile: Option<String>,
@@ -430,7 +432,7 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                   JOIN genres g ON g.id = tg.genre_id WHERE tg.file_id = f.id),
                 t.rating, t.imdb_id, m.collection, mu.album_artist,
                 f.audio_profile, f.audio_bitrate, f.audio_sample_rate, f.audio_bit_depth,
-                f.audio_channels
+                f.audio_channels, f.frame_rate
          FROM files f
          LEFT JOIN movies m        ON m.file_id  = f.id
          LEFT JOIN tv_episodes t   ON t.file_id  = f.id
@@ -461,6 +463,7 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 duration_ms: r.get(6)?,
                 width: r.get(7)?,
                 height: r.get(8)?,
+                frame_rate: r.get(40)?,
                 video_codec: r.get(9)?,
                 audio_codec: r.get(10)?,
                 audio_profile: r.get(35)?,

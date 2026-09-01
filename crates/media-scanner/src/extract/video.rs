@@ -67,6 +67,14 @@ pub fn probe(ffprobe: &str, path: &Path) -> Result<(TechInfo, Option<String>, Ve
                     tech.video_codec = codec_name;
                     tech.width = stream.get("width").and_then(|w| w.as_i64());
                     tech.height = stream.get("height").and_then(|h| h.as_i64());
+                    // avg_frame_rate is the honest figure for VFR files;
+                    // r_frame_rate (the base rate) fills in when the
+                    // average is unknown ("0/0" on some streams).
+                    tech.frame_rate = ["avg_frame_rate", "r_frame_rate"]
+                        .iter()
+                        .find_map(|key| {
+                            parse_frame_rate(stream.get(*key).and_then(|v| v.as_str())?)
+                        });
                 }
                 Some("audio") if tech.audio_codec.is_none() => {
                     let profile = stream.get("profile").and_then(|p| p.as_str());
@@ -90,6 +98,20 @@ pub fn probe(ffprobe: &str, path: &Path) -> Result<(TechInfo, Option<String>, Ve
             }
         }
     }
+    let chapters = parse_chapters(&json);
+    Ok((tech, genre, chapters))
+}
+
+/// ffprobe frame rates are rationals ("24000/1001", "25/1"); "0/0" means
+/// unknown. Rejects the nonsensical (zero, or beyond any real video).
+fn parse_frame_rate(text: &str) -> Option<f64> {
+    let (num, den) = text.split_once('/').unwrap_or((text, "1"));
+    let (num, den) = (num.trim().parse::<f64>().ok()?, den.trim().parse::<f64>().ok()?);
+    let fps = num / den;
+    (fps.is_finite() && fps > 0.0 && fps <= 1000.0).then_some(fps)
+}
+
+fn parse_chapters(json: &Value) -> Vec<Chapter> {
     let mut chapters = Vec::new();
     if let Some(list) = json.get("chapters").and_then(|c| c.as_array()) {
         for chapter in list {
@@ -111,5 +133,5 @@ pub fn probe(ffprobe: &str, path: &Path) -> Result<(TechInfo, Option<String>, Ve
             chapters.push(Chapter { start_ms, end_ms, title });
         }
     }
-    Ok((tech, genre, chapters))
+    chapters
 }

@@ -104,6 +104,8 @@ pub struct TechInfo {
     pub duration_ms: Option<i64>,
     pub width: Option<i64>,
     pub height: Option<i64>,
+    /// Average frames per second of the video stream (23.976, 25, ...).
+    pub frame_rate: Option<f64>,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     /// Human codec label for the (first) audio stream: "AAC LC", "FLAC".

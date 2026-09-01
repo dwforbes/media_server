@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 15;
+pub const SCHEMA_VERSION: i32 = 16;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -215,5 +215,15 @@ pub const MIGRATIONS: &[&str] = &[
         (SELECT DISTINCT file_id FROM segments WHERE source = 'chapters');
     UPDATE files SET edl_mtime = -1 WHERE id IN
         (SELECT DISTINCT file_id FROM segments WHERE source = 'chapters');
+    "#,
+    // 15 -> 16: video frame rate (average fps, from ffprobe). The
+    // nfo-stale poke re-extracts every video file on the next reconcile
+    // without taking it out of 'ready' (the library stays browsable
+    // meanwhile), filling the column in; -1 never matches a real or
+    // absent sidecar mtime, so files with and without an .nfo both look
+    // stale exactly once.
+    r#"
+    ALTER TABLE files ADD COLUMN frame_rate REAL;
+    UPDATE files SET nfo_mtime = -1 WHERE kind IN ('movies','tv');
     "#,
 ];

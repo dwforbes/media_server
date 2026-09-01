@@ -1703,6 +1703,15 @@ async fn play_page(
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
+/// "24" for whole rates, "23.976" for the NTSC-style fractions.
+fn fps_label(fps: f64) -> String {
+    if (fps - fps.round()).abs() < 0.005 {
+        format!("{:.0}", fps.round())
+    } else {
+        format!("{fps:.3}").trim_end_matches('0').to_string()
+    }
+}
+
 fn is_uhd(width: Option<i64>, height: Option<i64>) -> bool {
     width.unwrap_or(0) > 1920 || height.unwrap_or(0) > 1080
 }
@@ -1938,7 +1947,11 @@ async fn item_page(
         facts.push(("Duration", human_duration(ms)));
     }
     if let (Some(w), Some(h)) = (detail.width, detail.height) {
-        facts.push(("Resolution", format!("{w} × {h}")));
+        let fps = detail
+            .frame_rate
+            .map(|fps| format!(" @ {} fps", fps_label(fps)))
+            .unwrap_or_default();
+        facts.push(("Resolution", format!("{w} × {h}{fps}")));
     }
     let audio = detail.audio_profile.as_deref().or(detail.audio_codec.as_deref());
     match (&detail.video_codec, audio) {

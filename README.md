@@ -205,7 +205,8 @@ routers/APs mistreat multicast in creative ways. Two escape hatches:
   link shows how many playable items live beneath it, and listing rows carry a 4K
   chip and the IMDb rating as a colour-coded box. Every item links to a **detail
   page** (`/item/<id>`) showing the poster, plot, IMDb rating, genres, director,
-  duration, resolution, codecs, container, file size, and when it was added.
+  duration, resolution and frame rate ("1920 × 1080 @ 23.976 fps"), codecs,
+  container, file size, and when it was added.
   Series and season pages are decorated too: the poster (promoted from an
   episode's artwork), the description from a Kodi-style `tvshow.nfo` /
   `season.nfo` (series pages add the IMDb rating and a link to the IMDb entry),

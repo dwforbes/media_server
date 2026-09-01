@@ -4,15 +4,28 @@ use rusqlite::{params, Connection};
 use crate::models::{Segment, SegmentKind};
 
 /// Replace every stored segment for a file with `segments`, all from one
-/// `source` ('chapters' or 'edl'; later detectors add their own). Called
-/// on every extraction, so a vanished sidecar or renamed chapter clears
-/// its segments.
+/// `source` ('chapters', 'edl', or the detector's 'audio'). Called on
+/// every extraction, so a vanished sidecar or renamed chapter clears its
+/// segments — with one carve-out: a deliberate source with nothing to say
+/// leaves 'audio' rows alone. Extraction re-runs for reasons unrelated to
+/// segments (a changed .nfo, a schema poke), and the file's fingerprints
+/// stay current through it, so wiped detector segments would never be
+/// re-derived. Deliberate rows still take the file over when present:
+/// the detector refuses such files, so stale 'audio' rows can't linger
+/// beside them.
 pub fn replace_for_file(
     conn: &Connection,
     file_id: i64,
     source: &str,
     segments: &[Segment],
 ) -> Result<()> {
+    if segments.is_empty() && source != "audio" {
+        conn.execute(
+            "DELETE FROM segments WHERE file_id = ?1 AND source != 'audio'",
+            [file_id],
+        )?;
+        return Ok(());
+    }
     conn.execute("DELETE FROM segments WHERE file_id = ?1", [file_id])?;
     let mut stmt = conn.prepare(
         "INSERT OR REPLACE INTO segments (file_id, start_ms, end_ms, kind, source)
@@ -145,4 +158,40 @@ pub fn store_prints(
         params![file_id, size, mtime, ver, encode_print(head), encode_print(tail)],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::MediaKind;
+    use crate::queries::files;
+
+    fn seg(start_ms: i64, kind: SegmentKind) -> Segment {
+        Segment { kind, start_ms, end_ms: start_ms + 60_000 }
+    }
+
+    #[test]
+    fn empty_deliberate_writes_spare_detector_segments() {
+        let dir = std::env::temp_dir().join(format!("media-db-segtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = crate::open::open_rw(&dir.join("t.db")).unwrap();
+        let roots = files::sync_roots(&conn, &[("/t".to_string(), MediaKind::Tv)]).unwrap();
+        let id = files::upsert_pending(&conn, roots[0].id, "e1.mkv", 1, 1, MediaKind::Tv, "video/x-matroska").unwrap();
+
+        // Detector found an intro; a later re-extraction sees no chapters.
+        replace_for_file(&conn, id, "audio", &[seg(0, SegmentKind::Intro)]).unwrap();
+        replace_for_file(&conn, id, "chapters", &[]).unwrap();
+        assert_eq!(for_file(&conn, id).unwrap().len(), 1, "audio segment survives");
+
+        // A sidecar with content takes the file over completely.
+        replace_for_file(&conn, id, "edl", &[seg(300_000, SegmentKind::Commercial)]).unwrap();
+        let segs = for_file(&conn, id).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].kind, SegmentKind::Commercial);
+
+        // The detector's own empty write still clears stale audio rows.
+        replace_for_file(&conn, id, "audio", &[seg(0, SegmentKind::Intro)]).unwrap();
+        replace_for_file(&conn, id, "audio", &[]).unwrap();
+        assert!(for_file(&conn, id).unwrap().is_empty());
+    }
 }
