@@ -309,7 +309,15 @@ skip credits" below), and stamps the
 playback position into the URL fragment once a second while playing (and on pause or
 scrub) — `…/play/596#128s` — so the address bar is always a resumable, shareable link; opening such a URL seeks
 there once metadata loads and offers a "start from the beginning" link. Fragments are
-never sent to the server, so this is purely client side and nothing is stored.
+never sent to the server, so this is purely client side and nothing is stored
+server-side. The position is also stashed in the browser's sessionStorage per file,
+covering the return trip the fragment cannot: leaving through links and coming back to
+the program some way other than Back. In that case a "resume at m:ss" link appears
+beside the skip hint for 30 seconds — while it shows, the stored position is protected
+from being overwritten by the fresh playback, and clicking it jumps there; unclicked,
+it removes itself and normal position tracking resumes. Finishing a program clears its
+stored position, and sessionStorage means it is per-tab and gone when the browser
+closes.
 
 Episodes and album tracks auto-play into the next one when they end ("Auto-play next
 episode", a checkbox under the player, remembered per browser; a "Next up" link sits

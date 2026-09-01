@@ -1062,7 +1062,9 @@ body.player a:hover, body.player a:active,
 /// The player's script: resume (the playback position rides in the URL
 /// fragment, so a paused or scrubbed player yields a bookmarkable link
 /// that picks up where it left off — fragments never reach the server, so
-/// this is client side), ← / → skipping 10 seconds, asynchronous subtitle
+/// this is client side; the position is also stashed in sessionStorage
+/// per file, backing a 30-second "resume at m:ss" offer for viewers who
+/// come back via links instead of Back), ← / → skipping 10 seconds, asynchronous subtitle
 /// extraction, and auto-play of the next episode. That last one swaps the
 /// next episode's page pieces into this one instead of navigating: the
 /// <video> element survives, so a fullscreen player stays fullscreen, and
@@ -1086,6 +1088,7 @@ const PLAYER_SCRIPT: &str = r#"<script>
     var t = Math.floor(v.currentTime || 0);
     if (t === last) return;
     last = t;
+    if (!rejoinHold) savePos(v.dataset.id, t);
     history.replaceState(null, '', location.pathname + (t > 0 ? '#' + t + 's' : ''));
   }
   v.addEventListener('timeupdate', stamp);
@@ -1128,6 +1131,67 @@ const PLAYER_SCRIPT: &str = r#"<script>
     });
   }
   attachSubs();
+
+  // Second, ephemeral resume path: the URL fragment is lost when the
+  // viewer wanders off through links and returns some other way than
+  // Back, so the position is also stashed in sessionStorage per file id.
+  // A stored position surfaces as a "resume at m:ss" link beside the
+  // skip hint for 30 seconds; while the offer stands, stamping leaves
+  // the stored position alone so playback from 0:00 cannot clobber it,
+  // and clicking seeks there. sessionStorage can be walled off (private
+  // windows): every access is guarded and the feature sits out.
+  function loadPos(id) {
+    try { return parseFloat(sessionStorage.getItem('playpos:' + id)) || 0; } catch (e) { return 0; }
+  }
+  function savePos(id, t) {
+    try {
+      if (t > 0) sessionStorage.setItem('playpos:' + id, String(t));
+      else sessionStorage.removeItem('playpos:' + id);
+    } catch (e) {}
+  }
+  function mmss(t) {
+    var m = Math.floor(t / 60), s = Math.floor(t % 60);
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+  var rejoin = document.getElementById('rejoin');
+  var rejoinTimer = null, rejoinHold = false;
+  function dropRejoin() {
+    if (rejoinTimer) { clearTimeout(rejoinTimer); rejoinTimer = null; }
+    rejoinHold = false;
+    if (rejoin) { rejoin.hidden = true; rejoin.textContent = ''; }
+  }
+  function offerRejoin() {
+    dropRejoin();
+    if (!rejoin) return;
+    var t = loadPos(v.dataset.id);
+    if (!(t > 9)) return;   // trivial positions are not worth an offer
+    var id = v.dataset.id;
+    var a = document.createElement('a');
+    a.href = location.pathname + '#' + Math.floor(t) + 's';
+    a.textContent = 'resume at ' + mmss(t);
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      dropRejoin();
+      // Metadata may still be loading; seeking before it throws away the
+      // position, so defer like the fragment path (id-checked: the page
+      // may have swapped to another episode by then).
+      var seekBack = function () {
+        if (v.dataset.id === id) { try { v.currentTime = t; } catch (err) {} }
+      };
+      if (v.readyState >= 1) seekBack();
+      else v.addEventListener('loadedmetadata', seekBack, { once: true });
+      var p = v.play();
+      if (p && p.catch) p.catch(function () {});
+    });
+    rejoin.appendChild(a);
+    rejoin.hidden = false;
+    rejoinHold = true;
+    rejoinTimer = setTimeout(dropRejoin, 30000);
+  }
+  // Catch positions the 1-second stamping missed on the way out.
+  addEventListener('pagehide', function () {
+    if (!rejoinHold && honoured) savePos(v.dataset.id, Math.floor(v.currentTime || 0));
+  });
 
   // Skip intro / credits: segments the catalog knows (named chapter
   // markers or .edl sidecars) surface as a button over the player while
@@ -1206,11 +1270,13 @@ const PLAYER_SCRIPT: &str = r#"<script>
       var p = v.play();
       if (p && p.catch) p.catch(function () {});
       attachSubs();
+      offerRejoin();   // the incoming episode may have its own stored position
     }).catch(function () {
       location.href = prefix + id;   // plain navigation as the fallback
     });
   }
   v.addEventListener('ended', function () {
+    savePos(v.dataset.id, 0);   // finished: no resume offer next time
     if (box && box.checked && v.dataset.next) swapTo(v.dataset.next);
   });
   // Prior / next / next-up links: swap in place (plain clicks only —
@@ -1225,7 +1291,11 @@ const PLAYER_SCRIPT: &str = r#"<script>
   window.addEventListener('popstate', function () { location.reload(); });
 
   var start = parseFloat((location.hash || '').replace(/[^0-9.]/g, ''));
-  if (!(start > 0)) return;
+  if (!(start > 0)) {
+    // No fragment resume in motion: offer the stored position instead.
+    offerRejoin();
+    return;
+  }
   honoured = false;
   function seek() {
     try { v.currentTime = start; } catch (e) {}
@@ -1235,8 +1305,7 @@ const PLAYER_SCRIPT: &str = r#"<script>
   else v.addEventListener('loadedmetadata', seek, { once: true });
   var note = document.getElementById('resume');
   if (note) {
-    var m = Math.floor(start / 60), sec = Math.floor(start % 60);
-    note.innerHTML = 'Resuming at ' + m + ':' + (sec < 10 ? '0' : '') + sec +
+    note.innerHTML = 'Resuming at ' + mmss(start) +
       ' — <a href="' + location.pathname + '">start from the beginning</a>';
   }
 })();
@@ -1604,7 +1673,8 @@ async fn play_page(
           font-size:1em;padding:.55em 1.1em;background:rgba(15,15,15,.85);color:#fff;\
           border:1px solid #999;border-radius:4px;cursor:pointer\">Skip</button></div>\
          <p id=\"resume\" style=\"color:#9c9;font-size:.9em\"></p>\
-         <p style=\"color:#666;font-size:.8em\">← / → skip 10 seconds</p>\
+         <p style=\"color:#666;font-size:.8em\">← / → skip 10 seconds\
+         <span id=\"rejoin\" hidden style=\"margin-left:2em;font-size:1.15em\"></span></p>\
          {autonext}{subs_async}{PLAYER_SCRIPT}{PAGE_CLOSE}",
         xml_escape(&servable.mime),
         segments_attr = xml_escape(&segments_json)
