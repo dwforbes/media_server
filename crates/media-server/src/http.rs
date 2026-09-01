@@ -1063,7 +1063,15 @@ body.player a:hover, body.player a:active,
    back as right padding keeps the content box centred in the free
    region; the full-bleed video wrap does the same sum for its breakout. */
 :root { --ccw: min(24rem, 40vw); }   /* rem: the panel's own font is smaller */
-#cc { margin-left: auto; font: inherit; font-size: .85em; font-weight: bold; letter-spacing: .06em;
+/* The hint line under the video: skip hint left, resume notes centred,
+   CC at the right border — three equal flex sections so the centre stays
+   centred whatever the other two hold (the note collapses when hidden,
+   leaving the halves still aligned outward). */
+p.hint { display: flex; align-items: center; gap: 1em; color: #666; font-size: .8em; }
+p.hint > * { flex: 1 1 0; }
+p.hint > .right { text-align: right; }
+#rejoin { text-align: center; font-size: 1.15em; }
+#cc { font: inherit; font-size: .75rem; font-weight: bold; letter-spacing: .06em;
   padding: .1em .5em; background: none; color: #aaa; border: 1px solid #666; border-radius: 3px;
   cursor: pointer; }
 #cc[aria-pressed="true"] { background: #9cf; color: #111; border-color: #9cf; }
@@ -1102,6 +1110,10 @@ body.cc div.videowrap { width: calc(100vw - var(--ccw)); margin-left: calc(50% -
   body.cc div.videowrap { width: 100vw; margin-left: calc(50% - 50vw); }
   #cc-panel { position: static; width: auto; height: 45vh; margin-top: 1em;
     border: 1px solid #333; border-radius: 6px; }
+  /* Equal thirds are too tight here: the button takes only its width,
+     the hint its own, and the note gets the rest (centred within it). */
+  p.hint > * { flex: 0 1 auto; }
+  p.hint > #rejoin { flex: 1 1 0; }
 }
 </style>"#;
 
@@ -1313,7 +1325,7 @@ const PLAYER_SCRIPT: &str = r#"<script>
       try { localStorage.setItem('autonext', box.checked ? '1' : '0'); } catch (e) {}
     });
   }
-  // Captions panel ("CC" at the right end of the controls line): every
+  // Captions panel ("CC" at the right end of the hint line): every
   // line of the subtitle track down a column at the right edge, placed
   // along the running time — a line sits at its start time on a
   // pixels-per-second scale, pushed down only as far as the line above
@@ -1937,27 +1949,22 @@ async fn play_page(
             None => format!("This is the last {noun} available."),
         };
         format!(
-            "<label><input type=\"checkbox\" id=\"autonext\" checked> Auto-play next {noun}</label>\
-             <span id=\"next-note\" data-swap>{next_note}</span>"
+            "<p class=\"controls\" style=\"color:#aaa;font-size:.9em\"><label><input type=\"checkbox\" \
+             id=\"autonext\" checked> Auto-play next {noun}</label>\
+             <span id=\"next-note\" data-swap>{next_note}</span></p>"
         )
     };
-    // The controls line: auto-play for serial programs, and at its right
-    // end the "CC" toggle for the captions panel (PLAYER_SCRIPT fills the
-    // panel from the subtitle track). A program without captions keeps
-    // the button hidden rather than absent, so an in-place episode swap
-    // has an element to replace either way. The panel itself is fixed to
-    // the right edge on desktop; on phones it flows here, below the line.
-    let controls = format!(
-        "<p class=\"controls\" style=\"color:#aaa;font-size:.9em\">{autonext}\
-         <button id=\"cc\" type=\"button\" data-swap aria-pressed=\"false\" \
-          aria-controls=\"cc-panel\" title=\"Captions panel: every line along the \
-          running time — click one to jump there\"{}>CC</button></p>\
-         <aside id=\"cc-panel\" hidden aria-label=\"Captions\">\
+    // The "CC" toggle for the captions panel rides at the right border of
+    // the hint line (skip hint left, resume notes centred); PLAYER_SCRIPT
+    // fills the panel from the subtitle track. A program without captions
+    // keeps the button hidden rather than absent, so an in-place episode
+    // swap has an element to replace either way. The panel is fixed to
+    // the right edge on desktop; on phones it flows in below the controls.
+    let cc_hidden = if has_subs { "" } else { " hidden" };
+    let panel = "<aside id=\"cc-panel\" hidden aria-label=\"Captions\">\
          <div class=\"head\"><span>Captions</span>\
          <button type=\"button\" id=\"cc-close\" aria-label=\"Close the captions panel\">×</button></div>\
-         <div id=\"cc-list\"><div id=\"cc-track\"></div></div></aside>",
-        if has_subs { "" } else { " hidden" }
-    );
+         <div id=\"cc-list\"><div id=\"cc-track\"></div></div></aside>";
     let og = item_og_meta(
         &request_base_url(&state, &headers, https.is_some()),
         &format!("/play/{id}"),
@@ -1995,9 +2002,12 @@ async fn play_page(
          <button id=\"skipseg\" hidden style=\"position:absolute;right:1.2em;bottom:3.4em;\
           font-size:1em;padding:.55em 1.1em;background:rgba(15,15,15,.85);color:#fff;\
           border:1px solid #999;border-radius:4px;cursor:pointer\">Skip</button></div>\
-         <p style=\"color:#666;font-size:.8em\">← / → skip 10 seconds\
-         <span id=\"rejoin\" hidden style=\"margin-left:2em;font-size:1.15em\"></span></p>\
-         {controls}{subs_async}{PLAYER_SCRIPT}{PAGE_CLOSE}",
+         <p class=\"hint\"><span>← / → skip 10 seconds</span>\
+         <span id=\"rejoin\" hidden></span>\
+         <span class=\"right\"><button id=\"cc\" type=\"button\" data-swap aria-pressed=\"false\" \
+          aria-controls=\"cc-panel\" title=\"Captions panel: every line along the \
+          running time — click one to jump there\"{cc_hidden}>CC</button></span></p>\
+         {autonext}{panel}{subs_async}{PLAYER_SCRIPT}{PAGE_CLOSE}",
         xml_escape(&servable.mime),
         segments_attr = xml_escape(&segments_json)
     );

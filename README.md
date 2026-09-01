@@ -332,8 +332,9 @@ page itself — an `<audio>` player sits under the title, and the same in-place
 hand-over steps through the album — and with a player on the page the "Prior" /
 "Next" / "Next up" links swap the neighbour in the same way instead of reloading.
 
-A **CC** button at the right end of that auto-play line (present whenever the program
-has captions — an `.srt` sidecar or an embedded text track) opens a captions panel down
+A **CC** button at the right border of the skip-hint line under the video — the line
+whose centre carries the resume notes — (present whenever the program has captions: an
+`.srt` sidecar or an embedded text track) opens a captions panel down
 the right side of the page, the video narrowing to make room; on phones it sits below
 the controls instead. Every line of the subtitle track is listed with its time, but
 placed along the program's running time rather than simply stacked: each line sits at
