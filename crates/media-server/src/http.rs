@@ -1190,9 +1190,35 @@ const PLAYER_SCRIPT: &str = r#"<script>
     rejoinHold = true;
     rejoinTimer = setTimeout(dropRejoin, 30000);
   }
-  // Catch positions the 1-second stamping missed on the way out.
+  // "Resuming at m:ss — start from the beginning", 30 seconds in the
+  // rejoin slot. No hold: this resume is already in motion.
+  function showResuming(t) {
+    if (!rejoin) return;
+    dropRejoin();
+    rejoin.innerHTML = 'Resuming at ' + mmss(t) +
+      ' — <a href="' + location.pathname + '">start from the beginning</a>';
+    rejoin.hidden = false;
+    rejoinTimer = setTimeout(dropRejoin, 30000);
+  }
+  // Catch positions the 1-second stamping missed on the way out, and
+  // remember whether playback was running for the pageshow handler.
+  var wasPlaying = false;
   addEventListener('pagehide', function () {
+    wasPlaying = !v.paused && !v.ended;
     if (!rejoinHold && honoured) savePos(v.dataset.id, Math.floor(v.currentTime || 0));
+  });
+  // Back to a page the browser kept in its back/forward cache: nothing
+  // re-runs and media is paused on entry, so the video sits silent at the
+  // right position with no note. Restore what a fresh fragment load would
+  // have done: the resuming note, and playback if it was running.
+  addEventListener('pageshow', function (e) {
+    if (!e.persisted) return;
+    var t = Math.floor(v.currentTime || 0);
+    if (t > 0) showResuming(t);
+    if (wasPlaying) {
+      var p = v.play();
+      if (p && p.catch) p.catch(function () {});
+    }
   });
 
   // Skip intro / credits: segments the catalog knows (named chapter
@@ -1303,14 +1329,7 @@ const PLAYER_SCRIPT: &str = r#"<script>
   }
   if (v.readyState >= 1) seek();
   else v.addEventListener('loadedmetadata', seek, { once: true });
-  // Same slot and 30-second lifetime as the stored-position offer, but no
-  // hold: the fragment resume is already in motion, so tracking proceeds.
-  if (rejoin) {
-    rejoin.innerHTML = 'Resuming at ' + mmss(start) +
-      ' — <a href="' + location.pathname + '">start from the beginning</a>';
-    rejoin.hidden = false;
-    rejoinTimer = setTimeout(dropRejoin, 30000);
-  }
+  showResuming(start);
 })();
 </script>"#;
 
