@@ -325,12 +325,32 @@ Episodes and album tracks auto-play into the next one when they end ("Auto-play 
 episode", a checkbox under the player, remembered per browser; a "Next up" link sits
 beside it). Rather than navigating — which would drop a fullscreen player — the page
 fetches the next episode's page and swaps its pieces into place: source, poster,
-subtitle track, heading, hover card and next-up note, with the URL updated via
-`pushState` so reload, bookmark and resume keep working. The `<video>` element itself
-never changes, so fullscreen survives the hand-over. Music plays on the detail page
-itself — an `<audio>` player sits under the title, and the same in-place hand-over
-steps through the album — and with a player on the page the "Prior" / "Next" /
-"Next up" links swap the neighbour in the same way instead of reloading.
+subtitle track, heading, hover card, next-up note and CC button, with the URL updated
+via `pushState` so reload, bookmark and resume keep working. The `<video>` element
+itself never changes, so fullscreen survives the hand-over. Music plays on the detail
+page itself — an `<audio>` player sits under the title, and the same in-place
+hand-over steps through the album — and with a player on the page the "Prior" /
+"Next" / "Next up" links swap the neighbour in the same way instead of reloading.
+
+A **CC** button at the right end of that auto-play line (present whenever the program
+has captions — an `.srt` sidecar or an embedded text track) opens a captions panel down
+the right side of the page, the video narrowing to make room; on phones it sits below
+the controls instead. Every line of the subtitle track is listed with its time, but
+placed along the program's running time rather than simply stacked: each line sits at
+its start time on a pixels-per-second scale and is pushed down only as far as the line
+above it needs, so a silent stretch is blank space and a fast exchange packs solid —
+the column is the program's timeline, with a rule running on through the gaps. The
+scale is the program's own (the median of line height over seconds to the next line,
+so a typical pair of lines just touches). A bar marks the current position, drifting
+through the silent stretches; the current line is highlighted; the list follows
+playback unless you have just scrolled it yourself (it resumes after six seconds); and
+clicking a line seeks there and plays (a modifier-click opens the same `#position`
+resume link in a new tab). The lines come from the WebVTT track the browser already
+loaded for the `<track>` element — the same conversion the on-video captions use,
+embedded tracks included once their extraction finishes — so nothing is fetched twice
+and no parsing happens in the page. The panel is remembered per browser like
+auto-play: it re-opens on the next program with captions and follows in-place episode
+swaps, hiding itself for a program that has none.
 
 The same stripping runs automatically as part of enrichment when `strip_titles = true`
 is set in the scanner config's `[enrich]` section (or with `media-enrich

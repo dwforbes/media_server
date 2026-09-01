@@ -1057,6 +1057,52 @@ body.player a:link, body.player a:visited,
 .infowrap .card a:link, .infowrap .card a:visited { color: #9cf; }
 body.player a:hover, body.player a:active,
 .infowrap .card a:hover, .infowrap .card a:active { color: #cef; }
+/* Captions panel ("CC"): a fixed column down the right edge, the page
+   re-centred in what remains. The body is centred by auto margins, so
+   widening its max-width by the panel's width and handing that width
+   back as right padding keeps the content box centred in the free
+   region; the full-bleed video wrap does the same sum for its breakout. */
+:root { --ccw: min(24rem, 40vw); }   /* rem: the panel's own font is smaller */
+#cc { margin-left: auto; font: inherit; font-size: .85em; font-weight: bold; letter-spacing: .06em;
+  padding: .1em .5em; background: none; color: #aaa; border: 1px solid #666; border-radius: 3px;
+  cursor: pointer; }
+#cc[aria-pressed="true"] { background: #9cf; color: #111; border-color: #9cf; }
+body.cc { max-width: calc(60em + var(--ccw)); padding-right: calc(1.25rem + var(--ccw)); }
+body.cc div.videowrap { width: calc(100vw - var(--ccw)); margin-left: calc(50% - 50vw + var(--ccw) / 2); }
+#cc-panel { position: fixed; top: 0; right: 0; bottom: 0; width: var(--ccw); box-sizing: border-box;
+  display: flex; flex-direction: column; background: #161616; border-left: 1px solid #333;
+  font-size: .85rem; }
+#cc-panel[hidden] { display: none; }
+#cc-panel .head { flex: none; display: flex; justify-content: space-between; align-items: center;
+  padding: .45em .8em; border-bottom: 1px solid #333; color: #aaa; }
+#cc-panel .head button { font: inherit; font-size: 1.2em; line-height: 1; padding: 0 .3em;
+  background: none; color: #aaa; border: 0; cursor: pointer; }
+#cc-list { position: relative; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+/* flow-root: the first line's top margin (its lead-in gap) must not
+   collapse through the track, which anchors the playhead and the rule. */
+#cc-track { position: relative; display: flow-root; margin: .4em 0; }
+/* The timeline: a rule that runs on through the gaps, so a stretch with
+   nothing said still reads as time passing. */
+#cc-track::before { content: ""; position: absolute; top: 0; bottom: 0; left: 4em;
+  border-left: 1px solid #2c2c2c; }
+#cc-track a.cue { position: relative; display: flex; gap: .7em; padding: .12em .8em .12em .6em;
+  line-height: 1.35; text-decoration: none; }
+#cc-track a.cue, #cc-track a.cue:link, #cc-track a.cue:visited { color: #c8c8c8; }
+#cc-track a.cue:hover { background: #222; color: #fff; }
+#cc-track a.cue.on { background: #26313f; color: #fff; }
+#cc-track a.cue time { flex: none; width: 3.4em; text-align: right; color: #777;
+  font-size: .9em; font-variant-numeric: tabular-nums; }
+#cc-track a.cue.on time { color: #9cf; }
+#cc-now { position: absolute; left: 0; right: 0; height: 2px; background: #9cf; opacity: .6;
+  pointer-events: none; }
+#cc-panel .empty { padding: 1em .9em; color: #888; }
+/* Phones: no room beside the video, so the panel sits below the controls. */
+@media (max-width: 40em) {
+  body.cc { max-width: none; padding-right: 1rem; }
+  body.cc div.videowrap { width: 100vw; margin-left: calc(50% - 50vw); }
+  #cc-panel { position: static; width: auto; height: 45vh; margin-top: 1em;
+    border: 1px solid #333; border-radius: 6px; }
+}
 </style>"#;
 
 /// The player's script: resume (the playback position rides in the URL
@@ -1065,7 +1111,9 @@ body.player a:hover, body.player a:active,
 /// this is client side; the position is also stashed in sessionStorage
 /// per file, backing a 30-second "resume at m:ss" offer for viewers who
 /// come back via links instead of Back), ← / → skipping 10 seconds, asynchronous subtitle
-/// extraction, and auto-play of the next episode. That last one swaps the
+/// extraction, the captions panel (every subtitle line down a column at the
+/// right, laid out along the running time, click to seek — see the CC block
+/// inside), and auto-play of the next episode. That last one swaps the
 /// next episode's page pieces into this one instead of navigating: the
 /// <video> element survives, so a fullscreen player stays fullscreen, and
 /// pushState keeps the URL truthful for reload/bookmark/resume. The same
@@ -1126,6 +1174,7 @@ const PLAYER_SCRIPT: &str = r#"<script>
       t.src = URL.createObjectURL(b); t.default = true;
       v.appendChild(t); t.track.mode = 'showing';
       note.textContent = 'Subtitles ready.';
+      ccRefresh();   // the captions panel can fill in now
     }).catch(function () {
       if (v.dataset.id === id) note.textContent = 'Subtitles could not be extracted.';
     });
@@ -1264,6 +1313,238 @@ const PLAYER_SCRIPT: &str = r#"<script>
       try { localStorage.setItem('autonext', box.checked ? '1' : '0'); } catch (e) {}
     });
   }
+  // Captions panel ("CC" at the right end of the controls line): every
+  // line of the subtitle track down a column at the right edge, placed
+  // along the running time — a line sits at its start time on a
+  // pixels-per-second scale, pushed down only as far as the line above
+  // needs, so silence is blank space, quick exchanges pack solid, and
+  // the column as a whole is the program's timeline. A bar marks the
+  // playhead, the current line is highlighted, the list follows playback
+  // (unless the viewer just scrolled it), and clicking a line seeks
+  // there. The cues are read from the <track> the browser already parsed
+  // — the .srt sidecar as WebVTT, or the extracted embedded track — so
+  // nothing is fetched twice and there is no parser here. Remembered per
+  // browser like auto-play; shown only while the program has captions
+  // (the button is hidden otherwise, and swapped with the episode).
+  var panel = document.getElementById('cc-panel');
+  var ccList = document.getElementById('cc-list');
+  var ccTrack = document.getElementById('cc-track');
+  var ccOn = false, ccGen = 0, ccKey = '', ccNow = null, ccActive = -1;
+  var cues = [], cueEls = [], tops = [], bottoms = [];
+  var ccUserUntil = 0;   // the viewer scrolled the list: no following until then
+  try { ccOn = localStorage.getItem('cc') === '1'; } catch (e) {}
+  function setCc(on) {
+    ccOn = on;
+    try { localStorage.setItem('cc', on ? '1' : '0'); } catch (e) {}
+    ccRefresh();
+  }
+  function ccEmpty(text) {
+    cues = []; cueEls = []; tops = []; bottoms = []; ccNow = null; ccKey = '';
+    ccTrack.innerHTML = '';
+    var d = document.createElement('div');
+    d.className = 'empty'; d.textContent = text;
+    ccTrack.appendChild(d);
+  }
+  // Sync the button, the page layout and the panel with the state and
+  // whatever track the player carries right now. Called on toggle, after
+  // an episode swap, and when an extracted track arrives.
+  function ccRefresh() {
+    var btn = document.getElementById('cc');
+    if (!panel || !ccTrack) return;
+    var show = ccOn && !!btn && !btn.hidden;
+    if (btn) btn.setAttribute('aria-pressed', ccOn ? 'true' : 'false');
+    document.body.classList.toggle('cc', show);
+    panel.hidden = !show;
+    if (!show) return;
+    var gen = ++ccGen, id = v.dataset.id;
+    var trackEl = v.querySelector('track');
+    if (!trackEl) {
+      var note = document.getElementById('subs');
+      ccEmpty(note && note.dataset.extract ? 'Extracting captions from the file…' : 'No captions for this program.');
+      return;
+    }
+    var key = id + '|' + trackEl.src;
+    if (key === ccKey && cues.length) { ccLayout(); ccFollow(true); return; }
+    ccEmpty('Loading captions…');
+    readCues(trackEl, function (list) {
+      if (gen !== ccGen || v.dataset.id !== id) return;
+      if (!list.length) { ccEmpty('No captions for this program.'); return; }
+      ccKey = key;
+      ccRender(list);
+    });
+  }
+  // Plain text of a cue: the browser's own rendering of the WebVTT markup
+  // (<i>, <c>, entities), then any ASS-style {\an8} positioning the sidecar
+  // carried through, newlines folded.
+  function cueText(c) {
+    var s;
+    try { s = c.getCueAsHTML().textContent; } catch (e) { s = String(c.text || '').replace(/<[^>]*>/g, ''); }
+    return s.replace(/\{\\[^}]*\}/g, '').replace(/\s+/g, ' ').trim();
+  }
+  // A track exposes its cues only once loaded and while not disabled (a
+  // viewer may have switched captions off in the native controls);
+  // 'hidden' loads them without drawing them.
+  function readCues(trackEl, cb) {
+    var tt = trackEl.track;
+    function snap() {
+      if (tt.mode === 'disabled') tt.mode = 'hidden';
+      var out = [], list = tt.cues || [];
+      for (var i = 0; i < list.length; i++) {
+        var text = cueText(list[i]);
+        if (text) out.push({ start: list[i].startTime, end: list[i].endTime, text: text });
+      }
+      cb(out);
+    }
+    if (trackEl.readyState === 2) return snap();
+    if (trackEl.readyState === 3) return cb([]);
+    trackEl.addEventListener('load', snap, { once: true });
+    trackEl.addEventListener('error', function () { cb([]); }, { once: true });
+    if (tt.mode === 'disabled') tt.mode = 'hidden';
+  }
+  function ccRender(list) {
+    cues = list; cueEls = []; ccActive = -1;
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < list.length; i++) {
+      var a = document.createElement('a');
+      a.className = 'cue';
+      a.href = location.pathname + '#' + Math.floor(list[i].start) + 's';
+      a.dataset.i = i;
+      var t = document.createElement('time');
+      t.textContent = mmss(list[i].start);
+      var s = document.createElement('span');
+      s.textContent = list[i].text;
+      a.appendChild(t); a.appendChild(s);
+      frag.appendChild(a);
+      cueEls.push(a);
+    }
+    ccNow = document.createElement('div');
+    ccNow.id = 'cc-now';
+    frag.appendChild(ccNow);
+    ccTrack.innerHTML = '';
+    ccTrack.appendChild(frag);
+    ccLayout();
+    ccFollow(true);
+  }
+  // Each line goes at its start time × scale, or straight under the line
+  // above when that would overlap. The scale is the program's own: the
+  // median of (line height ÷ seconds to the next line), so a typical pair
+  // of lines just touches — quicker exchanges pack, and any longer pause
+  // opens up in proportion. All writes, then all reads, then all writes:
+  // interleaving them would force a reflow per line.
+  function ccLayout() {
+    var n = cueEls.length;
+    if (!n) return;
+    var i, heights = [];
+    for (i = 0; i < n; i++) cueEls[i].style.marginTop = '0';
+    for (i = 0; i < n; i++) heights.push(cueEls[i].offsetHeight);
+    var ratios = [];
+    for (i = 1; i < n; i++) {
+      var gap = cues[i].start - cues[i - 1].start;
+      if (gap > 0.2) ratios.push(heights[i - 1] / gap);
+    }
+    ratios.sort(function (a, b) { return a - b; });
+    var scale = ratios.length ? ratios[ratios.length >> 1] : 6;
+    scale = Math.max(1, Math.min(12, scale));
+    var bottom = 0;
+    for (i = 0; i < n; i++) {
+      var top = Math.max(cues[i].start * scale, bottom);
+      cueEls[i].style.marginTop = Math.round((top - bottom) * 10) / 10 + 'px';
+      bottom = top + heights[i];
+    }
+    var end = isFinite(v.duration) ? v.duration : cues[n - 1].end;
+    ccTrack.style.minHeight = (Math.max(bottom, end * scale) + 24) + 'px';
+    // The playhead is placed against what the browser actually laid out.
+    tops = []; bottoms = [];
+    for (i = 0; i < n; i++) {
+      tops.push(cueEls[i].offsetTop);
+      bottoms.push(cueEls[i].offsetTop + heights[i]);
+    }
+  }
+  // The last line that has started by t, or -1.
+  function ccIndex(t) {
+    var lo = 0, hi = cues.length - 1, i = -1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      if (cues[mid].start <= t) { i = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return i;
+  }
+  // The playhead's place in the column: part-way down the current line,
+  // or proportionally through the gap to the next one — continuous, so
+  // a long silence shows the bar drifting through the empty space.
+  function ccY(t, i) {
+    if (i < 0) return cues[0].start > 0 ? Math.min(1, t / cues[0].start) * tops[0] : 0;
+    var c = cues[i];
+    if (t < c.end) return tops[i] + Math.min(1, (t - c.start) / Math.max(0.1, c.end - c.start)) * (bottoms[i] - tops[i]);
+    var from = c.end, y0 = bottoms[i], to, y1;
+    if (i + 1 < cues.length) { to = cues[i + 1].start; y1 = tops[i + 1]; }
+    else { to = isFinite(v.duration) ? v.duration : from; y1 = ccTrack.offsetHeight; }
+    if (to <= from) return y0;
+    return y0 + Math.min(1, (t - from) / (to - from)) * (y1 - y0);
+  }
+  // Move the playhead and the highlight; scroll only when the playhead
+  // has left the comfortable band of the view (or on demand), so the
+  // list is not in constant motion.
+  function ccFollow(force) {
+    if (!ccOn || !cues.length || !ccNow || panel.hidden) return;
+    var t = v.currentTime || 0;
+    var i = ccIndex(t);
+    var y = ccY(t, i);
+    ccNow.style.top = y + 'px';
+    var active = i >= 0 && t < cues[i].end ? i : -1;
+    if (active !== ccActive) {
+      if (ccActive >= 0) cueEls[ccActive].classList.remove('on');
+      if (active >= 0) cueEls[active].classList.add('on');
+      ccActive = active;
+    }
+    if (!force && Date.now() < ccUserUntil) return;
+    var top = ccList.scrollTop, h = ccList.clientHeight;
+    var yy = y + ccTrack.offsetTop;
+    if (!force && yy >= top + h * 0.15 && yy <= top + h * 0.7) return;
+    var target = Math.max(0, yy - h * 0.3);
+    var smooth = !force && Math.abs(target - top) < 3 * h;
+    try { ccList.scrollTo({ top: target, behavior: smooth ? 'smooth' : 'auto' }); }
+    catch (e) { ccList.scrollTop = target; }
+  }
+  if (panel) {
+    v.addEventListener('timeupdate', function () { ccFollow(false); });
+    v.addEventListener('seeked', function () { ccFollow(false); });
+    ['wheel', 'touchmove', 'mousedown', 'keydown'].forEach(function (ev) {
+      ccList.addEventListener(ev, function () { ccUserUntil = Date.now() + 6000; }, { passive: true });
+    });
+    // Click a line: seek there and play (modifier clicks keep the link's
+    // own meaning — the href is a #position resume link).
+    ccTrack.addEventListener('click', function (e) {
+      var a = e.target && e.target.closest ? e.target.closest('a.cue') : null;
+      if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      var c = cues[+a.dataset.i];
+      if (!c) return;
+      dropRejoin();
+      ccUserUntil = 0;
+      try { v.currentTime = c.start; } catch (err) {}
+      var p = v.play();
+      if (p && p.catch) p.catch(function () {});
+      ccFollow(true);
+    });
+    // Delegated: the button is swapped along with the episode.
+    document.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t || !t.closest) return;
+      if (t.closest('#cc')) setCc(!ccOn);
+      else if (t.closest('#cc-close')) setCc(false);
+    });
+    var ccResize = null;
+    addEventListener('resize', function () {
+      if (panel.hidden || !cues.length) return;
+      clearTimeout(ccResize);
+      ccResize = setTimeout(function () {
+        if (panel.hidden) return;   // closed meanwhile: nothing to measure
+        ccLayout(); ccFollow(true);
+      }, 150);
+    });
+    ccRefresh();
+  }
   function replaceById(id, doc) {
     var mine = document.getElementById(id), theirs = doc.getElementById(id);
     if (mine && theirs) mine.replaceWith(document.importNode(theirs, true));
@@ -1296,6 +1577,7 @@ const PLAYER_SCRIPT: &str = r#"<script>
       var p = v.play();
       if (p && p.catch) p.catch(function () {});
       attachSubs();
+      ccRefresh();     // the captions panel follows the new track
       offerRejoin();   // the incoming episode may have its own stored position
     }).catch(function () {
       location.href = prefix + id;   // plain navigation as the fallback
@@ -1484,8 +1766,9 @@ fn neighbour_nav_html(
     )
 }
 
-/// In-browser player: native <video> controls, poster art, and the .srt
-/// sidecar as a selectable subtitle track.
+/// In-browser player: native <video> controls, poster art, the .srt
+/// sidecar as a selectable subtitle track, and the "CC" captions panel
+/// that lists the track's lines along the running time.
 async fn play_page(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -1610,13 +1893,14 @@ async fn play_page(
             if extract { id.to_string() } else { String::new() }
         )
     };
-    let (track, subs_async) = if instant_subs {
+    let (track, subs_async, has_subs) = if instant_subs {
         (
             format!(
                 "<track kind=\"subtitles\" src=\"/subs/{id}.vtt\" \
                  srclang=\"en\" label=\"Subtitles\" default>"
             ),
             subs_note(false, ""),
+            true,
         )
     } else if state
         .subs_inflight
@@ -1632,9 +1916,10 @@ async fn play_page(
                 "⏳ Extracting subtitles from the file — the video can play meanwhile; \
                  captions appear when ready (may take a minute for large files)…",
             ),
+            true,
         )
     } else {
-        (String::new(), subs_note(false, ""))
+        (String::new(), subs_note(false, ""), false)
     };
     // Episodes and album tracks continue into the next one when it ends;
     // the script swaps the player's contents in place (see PLAYER_SCRIPT).
@@ -1652,11 +1937,27 @@ async fn play_page(
             None => format!("This is the last {noun} available."),
         };
         format!(
-            "<p class=\"controls\" style=\"color:#aaa;font-size:.9em\"><label><input type=\"checkbox\" \
-             id=\"autonext\" checked> Auto-play next {noun}</label>\
-             <span id=\"next-note\" data-swap>{next_note}</span></p>"
+            "<label><input type=\"checkbox\" id=\"autonext\" checked> Auto-play next {noun}</label>\
+             <span id=\"next-note\" data-swap>{next_note}</span>"
         )
     };
+    // The controls line: auto-play for serial programs, and at its right
+    // end the "CC" toggle for the captions panel (PLAYER_SCRIPT fills the
+    // panel from the subtitle track). A program without captions keeps
+    // the button hidden rather than absent, so an in-place episode swap
+    // has an element to replace either way. The panel itself is fixed to
+    // the right edge on desktop; on phones it flows here, below the line.
+    let controls = format!(
+        "<p class=\"controls\" style=\"color:#aaa;font-size:.9em\">{autonext}\
+         <button id=\"cc\" type=\"button\" data-swap aria-pressed=\"false\" \
+          aria-controls=\"cc-panel\" title=\"Captions panel: every line along the \
+          running time — click one to jump there\"{}>CC</button></p>\
+         <aside id=\"cc-panel\" hidden aria-label=\"Captions\">\
+         <div class=\"head\"><span>Captions</span>\
+         <button type=\"button\" id=\"cc-close\" aria-label=\"Close the captions panel\">×</button></div>\
+         <div id=\"cc-list\"><div id=\"cc-track\"></div></div></aside>",
+        if has_subs { "" } else { " hidden" }
+    );
     let og = item_og_meta(
         &request_base_url(&state, &headers, https.is_some()),
         &format!("/play/{id}"),
@@ -1696,7 +1997,7 @@ async fn play_page(
           border:1px solid #999;border-radius:4px;cursor:pointer\">Skip</button></div>\
          <p style=\"color:#666;font-size:.8em\">← / → skip 10 seconds\
          <span id=\"rejoin\" hidden style=\"margin-left:2em;font-size:1.15em\"></span></p>\
-         {autonext}{subs_async}{PLAYER_SCRIPT}{PAGE_CLOSE}",
+         {controls}{subs_async}{PLAYER_SCRIPT}{PAGE_CLOSE}",
         xml_escape(&servable.mime),
         segments_attr = xml_escape(&segments_json)
     );
