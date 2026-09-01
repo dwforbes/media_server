@@ -11,15 +11,22 @@
 //!
 //! Like subtitle embedding this replaces a whole media file, so the same
 //! discipline applies: strict preconditions (only codecs MP4 carries
-//! natively, no bitmap subtitles, no Dolby Vision), mux into a temp file in
-//! the same directory, ffprobe verification, then rename into place and
-//! remove the original. Sidecars (.nfo, -poster.jpg, .srt) share the stem
-//! and remain valid.
+//! natively, no Dolby Vision), mux into a temp file in the same directory,
+//! ffprobe verification, then rename into place and remove the original.
+//! Sidecars (.nfo, -poster.jpg, .srt) share the stem and remain valid.
+//!
+//! Bitmap subtitles (PGS/VobSub) cannot live in MP4 and normally
+//! disqualify a file — unless a usable same-stem .srt sidecar exists, in
+//! which case the bitmap tracks are dropped and the sidecar takes over.
+//! Whenever no text subtitle track survives and a sidecar exists, the
+//! remux embeds it as the mov_text track in the same pass (the separate
+//! embed step would otherwise rewrite the new .mp4 a second time).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use media_db::textenc::decode_subtitle_text;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamKind {
@@ -124,13 +131,16 @@ const AUDIO_TWIN: &[&str] = &["ac3", "eac3"];
 const TEXT_SUBS: &[&str] = &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text", "subviewer"];
 const BITMAP_SUBS: &[&str] = &["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"];
 
-/// What the remux will do, decided entirely from the probe.
+/// What the remux will do, decided from the probe (and whether a usable
+/// .srt sidecar sits beside the file).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Plan {
     pub video: Vec<usize>,
     /// (input index, gets an AAC twin)
     pub audio: Vec<(usize, bool)>,
     pub subtitles: Vec<usize>,
+    /// Mux the .srt sidecar in as the mov_text subtitle track.
+    pub embed_srt: bool,
     pub hevc: bool,
     /// Human-readable caveats worth a line in the log (styling lost, ...).
     pub notes: Vec<String>,
@@ -143,8 +153,10 @@ impl Plan {
 }
 
 /// Decide whether the file is a clean remux candidate. Err carries the
-/// reason it is not.
-pub fn plan(probe: &Probe) -> std::result::Result<Plan, String> {
+/// reason it is not. `srt_sidecar` says a usable same-stem .srt exists:
+/// with one, bitmap subtitle tracks are dropped instead of disqualifying
+/// the file, and it is embedded whenever no text track would survive.
+pub fn plan(probe: &Probe, srt_sidecar: bool) -> std::result::Result<Plan, String> {
     let mut plan = Plan::default();
     for s in &probe.streams {
         match s.kind {
@@ -166,7 +178,12 @@ pub fn plan(probe: &Probe) -> std::result::Result<Plan, String> {
             }
             StreamKind::Subtitle => {
                 if BITMAP_SUBS.contains(&s.codec.as_str()) {
-                    return Err(format!("bitmap subtitles ({}) cannot live in MP4", s.codec));
+                    if !srt_sidecar {
+                        return Err(format!("bitmap subtitles ({}) cannot live in MP4", s.codec));
+                    }
+                    plan.notes
+                        .push(format!("{} bitmap subtitles dropped, .srt sidecar covers them", s.codec));
+                    continue;
                 }
                 if !TEXT_SUBS.contains(&s.codec.as_str()) {
                     return Err(format!("subtitle codec {} unknown", s.codec));
@@ -185,19 +202,29 @@ pub fn plan(probe: &Probe) -> std::result::Result<Plan, String> {
     if plan.audio.is_empty() {
         return Err("no audio stream".into());
     }
+    if srt_sidecar && plan.subtitles.is_empty() {
+        plan.embed_srt = true;
+        plan.notes.push(".srt sidecar embedded as the subtitle track".into());
+    }
     plan.notes.dedup();
     Ok(plan)
 }
 
 /// The ffmpeg invocation for a plan. Output streams are ordered video,
 /// audio (each AAC twin immediately before its original), subtitles.
-pub fn ffmpeg_args(plan: &Plan, input: &Path, output: &Path) -> Vec<std::ffi::OsString> {
+/// `srt` is the sidecar to mux in when the plan says embed_srt — a second
+/// input, mapped as the only subtitle track.
+pub fn ffmpeg_args(plan: &Plan, input: &Path, srt: Option<&Path>, output: &Path) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = Vec::new();
     let mut push = |a: &str| args.push(a.into());
     for a in ["-v", "error", "-nostdin", "-y", "-i"] {
         push(a);
     }
     args.push(input.into());
+    if let Some(srt) = srt {
+        args.push("-i".into());
+        args.push(srt.into());
+    }
     let mut push = |a: String| args.push(a.into());
     for idx in &plan.video {
         push("-map".into());
@@ -234,8 +261,18 @@ pub fn ffmpeg_args(plan: &Plan, input: &Path, output: &Path) -> Vec<std::ffi::Os
         push("-map".into());
         push(format!("0:{idx}"));
     }
+    if srt.is_some() {
+        push("-map".into());
+        push("1:0".into());
+    }
     for a in ["-c", "copy", "-c:s", "mov_text"] {
         push(a.into());
+    }
+    if srt.is_some() {
+        // Same convention as the embed step: the sidecar collection is
+        // English, and an untagged track shows as "Unknown" in menus.
+        push("-metadata:s:s:0".into());
+        push("language=eng".into());
     }
     for a in twin_opts {
         push(a);
@@ -292,8 +329,16 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
     if target.exists() {
         return Ok(Outcome::Skipped("an .mp4 with this name already exists".into()));
     }
+    // A usable .srt sidecar lets bitmap subtitles be dropped rather than
+    // disqualify the file, and is embedded when no text track survives.
+    // Usable means the same bar the embed step sets: non-empty and in a
+    // recognizable encoding (mov_text needs clean UTF-8; see subtitles.rs).
+    let srt = media.with_extension("srt");
+    let srt_bytes = std::fs::read(&srt).unwrap_or_default();
+    let srt_text = if srt_bytes.is_empty() { None } else { decode_subtitle_text(&srt_bytes) };
+
     let before = probe(ffprobe, media)?;
-    let plan = match plan(&before) {
+    let plan = match plan(&before, srt_text.is_some()) {
         Ok(plan) => plan,
         Err(why) => return Ok(Outcome::Skipped(why)),
     };
@@ -304,10 +349,25 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
     let dir = media.parent().unwrap_or_else(|| Path::new("."));
     let stem = media.file_stem().unwrap_or_default().to_string_lossy();
     let temp = temp_beside(dir, &stem, "remux-tmp", "mp4");
+    // Mux from a UTF-8 temp copy when the sidecar needed decoding; the
+    // original .srt is never modified.
+    let srt_input: Option<PathBuf> = match (plan.embed_srt, srt_text) {
+        (true, Some(text)) if text.as_bytes() != srt_bytes.as_slice() => {
+            let converted = temp.with_extension("srt");
+            std::fs::write(&converted, &text)
+                .with_context(|| format!("writing {}", converted.display()))?;
+            Some(converted)
+        }
+        (true, _) => Some(srt.clone()),
+        (false, _) => None,
+    };
     let status = Command::new(ffmpeg)
-        .args(ffmpeg_args(&plan, media, &temp))
+        .args(ffmpeg_args(&plan, media, srt_input.as_deref(), &temp))
         .status()
         .with_context(|| format!("running {ffmpeg}"))?;
+    if let Some(converted) = srt_input.filter(|p| *p != srt) {
+        let _ = std::fs::remove_file(converted);
+    }
     if !status.success() {
         let _ = std::fs::remove_file(&temp);
         bail!("ffmpeg remux failed ({status})");
@@ -327,9 +387,10 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
     };
     let count = |kind: StreamKind| after.streams.iter().filter(|s| s.kind == kind).count();
     let want_audio = plan.audio.len() + plan.twins();
+    let want_subs = plan.subtitles.len() + plan.embed_srt as usize;
     let sane = count(StreamKind::Video) == plan.video.len()
         && count(StreamKind::Audio) == want_audio
-        && count(StreamKind::Subtitle) == plan.subtitles.len()
+        && count(StreamKind::Subtitle) == want_subs
         && (after.duration - before.duration).abs() <= 1.0 + before.duration * 0.01;
     if !sane {
         let _ = std::fs::remove_file(&temp);
@@ -337,7 +398,7 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
             "remux verification failed (video {}/{}, audio {}/{}, subs {}/{}, duration {:.1}->{:.1}); original untouched",
             count(StreamKind::Video), plan.video.len(),
             count(StreamKind::Audio), want_audio,
-            count(StreamKind::Subtitle), plan.subtitles.len(),
+            count(StreamKind::Subtitle), want_subs,
             before.duration, after.duration
         );
     }
@@ -390,14 +451,14 @@ mod tests {
             ],
             duration: 1.0,
         };
-        let plan = plan(&p).unwrap();
+        let plan = plan(&p, false).unwrap();
         assert_eq!(plan.video, vec![0]);
         assert_eq!(plan.audio, vec![(1, true), (2, false)]);
         assert_eq!(plan.subtitles, vec![3]);
         assert_eq!(plan.twins(), 1);
         assert!(!plan.hevc);
 
-        let args = ffmpeg_args(&plan, Path::new("in.mkv"), Path::new("out.mp4"));
+        let args = ffmpeg_args(&plan, Path::new("in.mkv"), None, Path::new("out.mp4"));
         let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let joined = args.join(" ");
         // Twin mapped before its original, then the aac track, then subs.
@@ -413,7 +474,7 @@ mod tests {
 
     #[test]
     fn plan_refuses_what_mp4_cannot_carry() {
-        let refuse = |streams: Vec<Stream>| plan(&Probe { streams, duration: 1.0 }).unwrap_err();
+        let refuse = |streams: Vec<Stream>| plan(&Probe { streams, duration: 1.0 }, false).unwrap_err();
         assert!(refuse(vec![s(0, StreamKind::Video, "h264"), s(1, StreamKind::Audio, "dts")]).contains("dts"));
         assert!(refuse(vec![s(0, StreamKind::Video, "h264"), s(1, StreamKind::Audio, "flac")]).contains("flac"));
         assert!(refuse(vec![
@@ -430,14 +491,66 @@ mod tests {
     }
 
     #[test]
+    fn srt_sidecar_forgives_bitmap_subs_and_gets_embedded() {
+        let p = Probe {
+            streams: vec![
+                s(0, StreamKind::Video, "h264"),
+                s(1, StreamKind::Audio, "aac"),
+                s(2, StreamKind::Subtitle, "hdmv_pgs_subtitle"),
+            ],
+            duration: 1.0,
+        };
+        let plan = plan(&p, true).unwrap();
+        assert!(plan.subtitles.is_empty());
+        assert!(plan.embed_srt);
+        assert!(plan.notes.iter().any(|n| n.contains("bitmap subtitles dropped")), "{:?}", plan.notes);
+
+        let args = ffmpeg_args(&plan, Path::new("in.mkv"), Some(Path::new("in.srt")), Path::new("out.mp4"));
+        let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(joined.contains("-i in.mkv -i in.srt"), "{joined}");
+        // The bitmap track (0:2) is not mapped; the sidecar is the one sub.
+        assert!(joined.contains("-map 0:0 -map 0:1 -map 1:0"), "{joined}");
+        assert!(!joined.contains("-map 0:2"), "{joined}");
+        assert!(joined.contains("-c:s mov_text"), "{joined}");
+        assert!(joined.contains("-metadata:s:s:0 language=eng"), "{joined}");
+    }
+
+    #[test]
+    fn internal_text_subs_win_over_the_sidecar() {
+        // Bitmap dropped, subrip kept, nothing embedded on top of it.
+        let p = Probe {
+            streams: vec![
+                s(0, StreamKind::Video, "h264"),
+                s(1, StreamKind::Audio, "aac"),
+                s(2, StreamKind::Subtitle, "hdmv_pgs_subtitle"),
+                s(3, StreamKind::Subtitle, "subrip"),
+            ],
+            duration: 1.0,
+        };
+        let plan = plan(&p, true).unwrap();
+        assert_eq!(plan.subtitles, vec![3]);
+        assert!(!plan.embed_srt);
+    }
+
+    #[test]
+    fn sidecar_is_embedded_when_the_mkv_has_no_subs() {
+        let p = Probe {
+            streams: vec![s(0, StreamKind::Video, "h264"), s(1, StreamKind::Audio, "aac")],
+            duration: 1.0,
+        };
+        assert!(plan(&p, true).unwrap().embed_srt);
+        assert!(!plan(&p, false).unwrap().embed_srt);
+    }
+
+    #[test]
     fn hevc_gets_the_apple_tag_and_a_lone_original_stays_default() {
         let p = Probe {
             streams: vec![s(0, StreamKind::Video, "hevc"), s(1, StreamKind::Audio, "aac")],
             duration: 1.0,
         };
-        let plan = plan(&p).unwrap();
+        let plan = plan(&p, false).unwrap();
         assert!(plan.hevc);
-        let args = ffmpeg_args(&plan, Path::new("in.mkv"), Path::new("out.mp4"));
+        let args = ffmpeg_args(&plan, Path::new("in.mkv"), None, Path::new("out.mp4"));
         let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
         assert!(joined.contains("-tag:v hvc1"), "{joined}");
         assert!(joined.contains("-disposition:a:0 default"), "{joined}");

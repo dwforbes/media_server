@@ -474,7 +474,11 @@ and TVs still find the original Dolby Digital track behind it.
 Only clean candidates are converted; everything else is listed as "kept as-is" with
 the reason: video other than H.264/HEVC/AV1, audio MP4 can't carry natively (DTS,
 TrueHD, FLAC, PCM, Vorbis), bitmap subtitles (PGS/VobSub have no MP4 form), Dolby
-Vision, or a same-name `.mp4` already present. Text subtitles become `mov_text` (ASS
+Vision, or a same-name `.mp4` already present. Bitmap subtitles stop disqualifying a
+file when a usable same-stem `.srt` sidecar exists: the bitmap tracks are dropped
+(the sidecar covers them), and whenever no text subtitle track survives — that case,
+or an `.mkv` with no subtitles at all — the sidecar is embedded as the `mov_text`
+track in the same pass. Text subtitles become `mov_text` (ASS
 styling is flattened); attachments such as fonts and cover art are dropped; chapters
 and language tags carry over. The file is written beside the original, verified with
 ffprobe (stream counts, duration), given the original's mtime, renamed into place, and
