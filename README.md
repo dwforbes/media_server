@@ -308,7 +308,8 @@ every video detail page) skips 10 seconds on ← / →, offers a "Skip intro" /
 skip credits" below), and stamps the
 playback position into the URL fragment once a second while playing (and on pause or
 scrub) — `…/play/596#128s` — so the address bar is always a resumable, shareable link; opening such a URL seeks
-there once metadata loads and offers a "start from the beginning" link. Fragments are
+there once metadata loads and notes "Resuming at m:ss — start from the beginning"
+beside the skip hint for 30 seconds. Fragments are
 never sent to the server, so this is purely client side and nothing is stored
 server-side. The position is also stashed in the browser's sessionStorage per file,
 covering the return trip the fragment cannot: leaving through links and coming back to

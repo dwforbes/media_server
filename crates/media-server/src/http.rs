@@ -1153,7 +1153,9 @@ const PLAYER_SCRIPT: &str = r#"<script>
     var m = Math.floor(t / 60), s = Math.floor(t % 60);
     return m + ':' + (s < 10 ? '0' : '') + s;
   }
-  var rejoin = document.getElementById('rejoin');
+  // The video page hosts both resume notes in the #rejoin slot beside the
+  // skip hint; the music page has only its #resume line below the player.
+  var rejoin = document.getElementById('rejoin') || document.getElementById('resume');
   var rejoinTimer = null, rejoinHold = false;
   function dropRejoin() {
     if (rejoinTimer) { clearTimeout(rejoinTimer); rejoinTimer = null; }
@@ -1262,8 +1264,6 @@ const PLAYER_SCRIPT: &str = r#"<script>
       if (skipBtn) skipBtn.hidden = true;
       document.title = doc.title;
       each(document.querySelectorAll('[data-swap]'), function (el) { replaceById(el.id, doc); });
-      var resume = document.getElementById('resume');
-      if (resume) resume.textContent = '';
       last = -1;
       history.pushState({ id: id }, '', prefix + id);
       v.load();
@@ -1303,10 +1303,13 @@ const PLAYER_SCRIPT: &str = r#"<script>
   }
   if (v.readyState >= 1) seek();
   else v.addEventListener('loadedmetadata', seek, { once: true });
-  var note = document.getElementById('resume');
-  if (note) {
-    note.innerHTML = 'Resuming at ' + mmss(start) +
+  // Same slot and 30-second lifetime as the stored-position offer, but no
+  // hold: the fragment resume is already in motion, so tracking proceeds.
+  if (rejoin) {
+    rejoin.innerHTML = 'Resuming at ' + mmss(start) +
       ' — <a href="' + location.pathname + '">start from the beginning</a>';
+    rejoin.hidden = false;
+    rejoinTimer = setTimeout(dropRejoin, 30000);
   }
 })();
 </script>"#;
@@ -1672,7 +1675,6 @@ async fn play_page(
          <button id=\"skipseg\" hidden style=\"position:absolute;right:1.2em;bottom:3.4em;\
           font-size:1em;padding:.55em 1.1em;background:rgba(15,15,15,.85);color:#fff;\
           border:1px solid #999;border-radius:4px;cursor:pointer\">Skip</button></div>\
-         <p id=\"resume\" style=\"color:#9c9;font-size:.9em\"></p>\
          <p style=\"color:#666;font-size:.8em\">← / → skip 10 seconds\
          <span id=\"rejoin\" hidden style=\"margin-left:2em;font-size:1.15em\"></span></p>\
          {autonext}{subs_async}{PLAYER_SCRIPT}{PAGE_CLOSE}",
