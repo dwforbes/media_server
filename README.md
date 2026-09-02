@@ -361,9 +361,13 @@ back, and the window can be dragged to another monitor and resized. The two stay
 step over a same-origin BroadcastChannel keyed by a per-tab session — the player
 broadcasts its position and program, the window highlights, scrolls and, when auto-play
 moves to the next episode, loads that episode's captions; clicking a line in the window
-seeks the player. "dock" brings the panel back into the page. It is an ordinary window,
-not always-on-top (browsers don't allow that), so it lives best on a second monitor;
-touch devices, which have no floating windows, don't show the button.
+seeks the player. "dock" brings the panel back into the page. The captions are in one
+place at a time: the CC button stays lit while they are in the window (outlined rather
+than filled) and a click on it closes the window; closing the window any other way
+unlights the button; and a player page that reloads, or moves to another program in the
+same tab, finds its window again. It is an ordinary window, not always-on-top (browsers
+don't allow that), so it lives best on a second monitor; touch devices, which have no
+floating windows, don't show the button.
 
 The same stripping runs automatically as part of enrichment when `strip_titles = true`
 is set in the scanner config's `[enrich]` section (or with `media-enrich

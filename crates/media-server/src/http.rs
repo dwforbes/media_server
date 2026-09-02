@@ -1186,6 +1186,8 @@ p.hint > .right { text-align: right; }
   padding: .1em .5em; background: none; color: #aaa; border: 1px solid #666; border-radius: 3px;
   cursor: pointer; }
 #cc[aria-pressed="true"] { background: #9cf; color: #111; border-color: #9cf; }
+/* Lit, but the captions are in their own window: outlined, not filled. */
+#cc.detached { background: none; color: #9cf; border-color: #9cf; border-style: dashed; }
 body.cc { max-width: calc(60em + var(--ccw)); padding-right: calc(1.25rem + var(--ccw)); }
 body.cc div.videowrap { width: calc(100vw - var(--ccw)); margin-left: calc(50% - 50vw + var(--ccw) / 2); }
 /* Phones: no room beside the video, so the panel sits below the controls. */
@@ -1459,7 +1461,10 @@ const CAPTIONS_SCRIPT: &str = r#"<script>
   if (bc) {
     bc.onmessage = function (e) {
       var m = e.data;
-      if (!m || m.s !== session || m.type !== 'state') return;
+      if (!m || m.s !== session) return;
+      if (m.type === 'ping') { post({ type: 'pong' }); return; }   // the player asks if we are still here
+      if (m.type === 'close') { window.close(); return; }
+      if (m.type !== 'state') return;
       if (m.title && titleEl.textContent !== m.title) {
         titleEl.textContent = m.title;
         document.title = 'Captions — ' + m.title;
@@ -1475,6 +1480,9 @@ const CAPTIONS_SCRIPT: &str = r#"<script>
     post({ type: 'dock' });
     window.close();
   });
+  // Closed by any route (dock, the player's request, the window's own
+  // close box): the player unlights its button.
+  addEventListener('pagehide', function () { post({ type: 'bye' }); });
   load(id);
   post({ type: 'hello' });   // a paused player answers with its state
 })();
@@ -1721,9 +1729,19 @@ const PLAYER_SCRIPT: &str = r#"<script>
   // captions window over a BroadcastChannel keyed by a per-tab session
   // (position and program out, seeks in). Remembered per browser like
   // auto-play; shown only while the program has captions.
+  // Where the captions are: 'off', 'panel' (the column in this page) or
+  // 'window' (popped out). The button is lit for either of the last two
+  // and a click on it closes whichever is open; the two never coexist.
   var panelEl = document.getElementById('cc-panel');
-  var ccOn = false, ccGen = 0, ccKey = '';
-  try { ccOn = localStorage.getItem('cc') === '1'; } catch (e) {}
+  var ccMode = 'off', ccGen = 0, ccKey = '', popWin = null;
+  try {
+    var stored = localStorage.getItem('cc');
+    ccMode = stored === '1' ? 'panel' : stored === 'window' ? 'window' : 'off';
+  } catch (e) {}
+  // A remembered window has to prove it is still there: it is asked
+  // below and answers 'pong'; until then the captions count as off.
+  var windowExpected = ccMode === 'window';
+  if (windowExpected) ccMode = 'off';
   function seekTo(t) {
     dropRejoin();
     try { v.currentTime = t; } catch (err) {}
@@ -1762,14 +1780,30 @@ const PLAYER_SCRIPT: &str = r#"<script>
       var m = e.data;
       if (!m || m.s !== session) return;
       if (m.type === 'seek') seekTo(m.t);
-      else if (m.type === 'hello') ccPost();
-      else if (m.type === 'dock') setCc(true);
+      else if (m.type === 'hello' || m.type === 'pong') {
+        // A window for this tab is alive (just opened, or found again
+        // after this page reloaded): the captions are there.
+        if (ccMode !== 'window') setMode('window');
+        if (m.type === 'hello') ccPost();
+      }
+      else if (m.type === 'dock') setMode('panel');
+      else if (m.type === 'bye' && ccMode === 'window') setMode('off');
     };
+    if (windowExpected) bc.postMessage({ s: session, type: 'ping' });
   }
-  function setCc(on) {
-    ccOn = on;
-    try { localStorage.setItem('cc', on ? '1' : '0'); } catch (e) {}
+  function setMode(mode) {
+    ccMode = mode;
+    try { localStorage.setItem('cc', mode === 'panel' ? '1' : mode === 'window' ? 'window' : '0'); } catch (e) {}
     ccRefresh();
+  }
+  // The window closes on request — by message (this page may have
+  // reloaded since it opened the window and lost its handle) and by the
+  // handle when there is one.
+  function closeWindow() {
+    if (bc) bc.postMessage({ s: session, type: 'close' });
+    if (popWin && !popWin.closed) { try { popWin.close(); } catch (e) {} }
+    popWin = null;
+    setMode('off');
   }
   // Sync the button, the page layout and the panel with the state and
   // whatever track the player carries right now. Called on toggle, after
@@ -1777,8 +1811,14 @@ const PLAYER_SCRIPT: &str = r#"<script>
   function ccRefresh() {
     var btn = document.getElementById('cc');
     if (!panelEl || !panel) return;
-    var show = ccOn && !!btn && !btn.hidden;
-    if (btn) btn.setAttribute('aria-pressed', ccOn ? 'true' : 'false');
+    var show = ccMode === 'panel' && !!btn && !btn.hidden;
+    if (btn) {
+      btn.setAttribute('aria-pressed', ccMode === 'off' ? 'false' : 'true');
+      btn.classList.toggle('detached', ccMode === 'window');
+      btn.title = ccMode === 'window'
+        ? 'The captions are in their own window — click to close it'
+        : 'Captions panel: every line along the running time — click one to jump there';
+    }
     document.body.classList.toggle('cc', show);
     panelEl.hidden = !show;
     if (!show) return;
@@ -1835,7 +1875,7 @@ const PLAYER_SCRIPT: &str = r#"<script>
   function popOut() {
     var w = window.open('/captions/' + v.dataset.id + '?s=' + encodeURIComponent(session),
       'mediaserver-captions', 'popup=yes,width=440,height=820');
-    if (w) setCc(false);
+    if (w) { popWin = w; setMode('window'); }
   }
   if (panelEl && panel) {
     v.addEventListener('timeupdate', function () { panel.follow(false); });
@@ -1844,8 +1884,11 @@ const PLAYER_SCRIPT: &str = r#"<script>
     document.addEventListener('click', function (e) {
       var t = e.target;
       if (!t || !t.closest) return;
-      if (t.closest('#cc')) setCc(!ccOn);
-      else if (t.closest('#cc-close')) setCc(false);
+      if (t.closest('#cc')) {
+        if (ccMode === 'window') closeWindow();
+        else setMode(ccMode === 'panel' ? 'off' : 'panel');
+      }
+      else if (t.closest('#cc-close')) setMode('off');
       else if (t.closest('#cc-pop')) popOut();
     });
     ccRefresh();
