@@ -1147,6 +1147,9 @@ async fn extract_subs(state: &AppState, id: i64, path: &std::path::Path, cache: 
 /// crossing a dead zone that would dismiss it.
 const PLAYER_STYLE: &str = r#"<style>
 #heading { position: relative; }
+/* The way home, small and to the left of the title — the same weight and
+   size as the "details" link on its right. */
+#heading a.top { font-size: 1rem; font-weight: normal; margin-right: .9em; white-space: nowrap; }
 .infowrap { display: inline; font-size: 1rem; font-weight: normal;
   margin-left: 1em; padding-bottom: 1em; }
 .infowrap .card { display: none; position: absolute; left: 0; top: 100%; z-index: 10;
@@ -2332,7 +2335,8 @@ async fn play_page(
     let head = page_head(&xml_escape(&tab_title(&detail)), &format!("{CC_STYLE}{PLAYER_STYLE}{og}"));
     let html = format!(
         "{head}<body class=\"player\">\
-         <h2 id=\"heading\" data-swap style=\"margin-bottom:.1em\">{heading}\
+         <h2 id=\"heading\" data-swap style=\"margin-bottom:.1em\">\
+         <a href=\"/\" class=\"top\">⌂ top</a>{heading}\
          <span class=\"infowrap\"><a href=\"/item/{id}\">details</a>\
          <span class=\"card\">{card}</span></span></h2>{context_line}\
          <div class=\"videowrap\">\
