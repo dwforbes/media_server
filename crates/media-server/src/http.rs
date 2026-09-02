@@ -254,6 +254,7 @@ async fn redirect_pages(State(state): State<Arc<AppState>>, req: Request, next: 
             || path.starts_with("/browse/")
             || path.starts_with("/item/")
             || path.starts_with("/play/")
+            || path.starts_with("/captions/")
             || path == "/search";
         if is_page && req.method() == Method::GET && req.extensions().get::<Https>().is_none() {
             let rest = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
@@ -307,6 +308,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/search", get(search_page))
         .route("/playlist/search", get(search_playlist))
         .route("/play/{id}", get(play_page))
+        .route("/captions/{id}", get(captions_page))
         .route("/subs/{id}", get(serve_subs))
         .layer(middleware::from_fn_with_state(state.clone(), redirect_pages))
         .layer(middleware::from_fn(security_headers))
@@ -316,7 +318,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// Defence in depth on every response: no MIME sniffing (a share file
 /// served as an image can never be reinterpreted as a document), no
 /// framing, no referrer leakage, and a Content-Security-Policy that
-/// permits exactly one inline script — the player's, by hash — so an
+/// permits exactly the inline scripts the pages carry — by hash — so an
 /// escaping slip anywhere in the format!-built pages cannot run script.
 /// On XML and media responses the headers are inert.
 async fn security_headers(req: Request, next: Next) -> Response {
@@ -339,16 +341,22 @@ fn csp() -> &'static str {
     static CSP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CSP.get_or_init(|| {
         use base64::Engine;
-        let body = PLAYER_SCRIPT
-            .strip_prefix("<script>")
-            .and_then(|s| s.strip_suffix("</script>"))
-            .unwrap_or(PLAYER_SCRIPT);
-        let digest = ring::digest::digest(&ring::digest::SHA256, body.as_bytes());
-        let hash = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
+        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT]
+            .iter()
+            .map(|script| {
+                let body = script
+                    .strip_prefix("<script>")
+                    .and_then(|s| s.strip_suffix("</script>"))
+                    .unwrap_or(script);
+                let digest = ring::digest::digest(&ring::digest::SHA256, body.as_bytes());
+                format!("'sha256-{}'", base64::engine::general_purpose::STANDARD.encode(digest.as_ref()))
+            })
+            .collect();
         format!(
-            "default-src 'self'; script-src 'sha256-{hash}'; style-src 'self' 'unsafe-inline'; \
+            "default-src 'self'; script-src {}; style-src 'self' 'unsafe-inline'; \
              img-src 'self'; media-src 'self' blob:; connect-src 'self'; object-src 'none'; \
-             base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+             base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+            hashes.join(" ")
         )
     })
 }
@@ -1180,14 +1188,34 @@ p.hint > .right { text-align: right; }
 #cc[aria-pressed="true"] { background: #9cf; color: #111; border-color: #9cf; }
 body.cc { max-width: calc(60em + var(--ccw)); padding-right: calc(1.25rem + var(--ccw)); }
 body.cc div.videowrap { width: calc(100vw - var(--ccw)); margin-left: calc(50% - 50vw + var(--ccw) / 2); }
-#cc-panel { position: fixed; top: 0; right: 0; bottom: 0; width: var(--ccw); box-sizing: border-box;
+/* Phones: no room beside the video, so the panel sits below the controls. */
+@media (max-width: 40em) {
+  body.cc { max-width: none; padding-right: 1rem; }
+  body.cc div.videowrap { width: 100vw; margin-left: calc(50% - 50vw); }
+  #cc-panel { position: static; width: auto; height: 45vh; margin-top: 1em;
+    border: 1px solid #333; border-radius: 6px; }
+  /* Equal thirds are too tight here: the button takes only its width,
+     the hint its own, and the note gets the rest (centred within it). */
+  p.hint > * { flex: 0 1 auto; }
+  p.hint > #rejoin { flex: 1 1 0; }
+}
+</style>"#;
+
+/// The captions panel's own styles, shared by the player page (where it
+/// is a column down the right edge) and the pop-out window (where it is
+/// the whole page — see CAPTIONS_STYLE).
+const CC_STYLE: &str = concat!("<style>\n", r#"#cc-panel { position: fixed; top: 0; right: 0; bottom: 0; width: var(--ccw); box-sizing: border-box;
   display: flex; flex-direction: column; background: #161616; border-left: 1px solid #333;
   font-size: .85rem; }
 #cc-panel[hidden] { display: none; }
 #cc-panel .head { flex: none; display: flex; justify-content: space-between; align-items: center;
-  padding: .45em .8em; border-bottom: 1px solid #333; color: #aaa; }
-#cc-panel .head button { font: inherit; font-size: 1.2em; line-height: 1; padding: 0 .3em;
-  background: none; color: #aaa; border: 0; cursor: pointer; }
+  gap: .5em; padding: .45em .8em; border-bottom: 1px solid #333; color: #aaa; }
+#cc-panel .head .tools { display: flex; gap: .15em; flex: none; }
+#cc-panel .head button { font: inherit; font-size: 1.1em; line-height: 1; padding: .1em .4em;
+  background: none; color: #aaa; border: 0; border-radius: 3px; cursor: pointer; }
+#cc-panel .head button:hover { background: #2a2a2a; color: #fff; }
+/* Touch devices have no floating windows to pop out into. */
+@media (hover: none) { #cc-pop { display: none; } }
 #cc-list { position: relative; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
 /* flow-root: the first line's top margin (its lead-in gap) must not
    collapse through the track, which anchors the playhead and the rule. */
@@ -1207,18 +1235,250 @@ body.cc div.videowrap { width: calc(100vw - var(--ccw)); margin-left: calc(50% -
 #cc-now { position: absolute; left: 0; right: 0; height: 2px; background: #9cf; opacity: .6;
   pointer-events: none; }
 #cc-panel .empty { padding: 1em .9em; color: #888; }
-/* Phones: no room beside the video, so the panel sits below the controls. */
-@media (max-width: 40em) {
-  body.cc { max-width: none; padding-right: 1rem; }
-  body.cc div.videowrap { width: 100vw; margin-left: calc(50% - 50vw); }
-  #cc-panel { position: static; width: auto; height: 45vh; margin-top: 1em;
-    border: 1px solid #333; border-radius: 6px; }
-  /* Equal thirds are too tight here: the button takes only its width,
-     the hint its own, and the note gets the rest (centred within it). */
-  p.hint > * { flex: 0 1 auto; }
-  p.hint > #rejoin { flex: 1 1 0; }
-}
+"#, "</style>");
+
+/// The pop-out captions window: the panel is the page.
+const CAPTIONS_STYLE: &str = r#"<style>
+body.captions { max-width: none; margin: 0; padding: 0; background: #161616; color: #ddd; overflow: hidden; }
+body.captions #cc-panel { position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: auto; border: 0;
+  font-size: .95rem; }
+body.captions #cc-panel .head { color: #ddd; }
+body.captions #cc-panel .head #cc-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cc-dock { font-size: .8em !important; border: 1px solid #555 !important; }
 </style>"#;
+
+/// The captions panel, shared by the player page and the pop-out window:
+/// a program's cues down a column, placed along the running time (a line
+/// sits at its start time on a pixels-per-second scale, pushed down only
+/// as far as the line above needs, so silence is blank space and quick
+/// exchanges pack solid), with a playhead bar, the current line
+/// highlighted, the list following playback unless the viewer just
+/// scrolled it, and a click seeking. The host supplies the clock
+/// (opts.time, opts.duration), the seek (opts.seek) and a line's link
+/// target (opts.href), and calls follow() as the clock moves.
+const CC_PANEL_SCRIPT: &str = r#"<script>
+window.ccPanel = function (list, track, opts) {
+  var cues = [], cueEls = [], tops = [], bottoms = [], now = null, active = -1;
+  var userUntil = 0;   // the viewer scrolled the list: no following until then
+  function mmss(t) {
+    var m = Math.floor(t / 60), s = Math.floor(t % 60);
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+  function visible() { return list.clientHeight > 0; }
+  function empty(text) {
+    cues = []; cueEls = []; tops = []; bottoms = []; now = null; active = -1;
+    track.innerHTML = '';
+    var d = document.createElement('div');
+    d.className = 'empty'; d.textContent = text;
+    track.appendChild(d);
+  }
+  function render(newCues) {
+    cues = newCues; cueEls = []; active = -1;
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < cues.length; i++) {
+      var a = document.createElement('a');
+      a.className = 'cue';
+      a.href = opts.href ? opts.href(cues[i].start) : '#';
+      a.dataset.i = i;
+      var t = document.createElement('time');
+      t.textContent = mmss(cues[i].start);
+      var s = document.createElement('span');
+      s.textContent = cues[i].text;
+      a.appendChild(t); a.appendChild(s);
+      frag.appendChild(a);
+      cueEls.push(a);
+    }
+    now = document.createElement('div');
+    now.id = 'cc-now';
+    frag.appendChild(now);
+    track.innerHTML = '';
+    track.appendChild(frag);
+    layout();
+    follow(true);
+  }
+  // Each line goes at its start time × scale, or straight under the line
+  // above when that would overlap. The scale is the program's own: the
+  // median of (line height ÷ seconds to the next line), so a typical pair
+  // of lines just touches. All writes, then all reads, then all writes:
+  // interleaving them would force a reflow per line.
+  function layout() {
+    var n = cueEls.length;
+    if (!n) return;
+    var i, heights = [];
+    for (i = 0; i < n; i++) cueEls[i].style.marginTop = '0';
+    for (i = 0; i < n; i++) heights.push(cueEls[i].offsetHeight);
+    var ratios = [];
+    for (i = 1; i < n; i++) {
+      var gap = cues[i].start - cues[i - 1].start;
+      if (gap > 0.2) ratios.push(heights[i - 1] / gap);
+    }
+    ratios.sort(function (a, b) { return a - b; });
+    var scale = ratios.length ? ratios[ratios.length >> 1] : 6;
+    scale = Math.max(1, Math.min(12, scale));
+    var bottom = 0;
+    for (i = 0; i < n; i++) {
+      var top = Math.max(cues[i].start * scale, bottom);
+      cueEls[i].style.marginTop = Math.round((top - bottom) * 10) / 10 + 'px';
+      bottom = top + heights[i];
+    }
+    var d = opts.duration();
+    var end = isFinite(d) && d > 0 ? d : cues[n - 1].end;
+    track.style.minHeight = (Math.max(bottom, end * scale) + 24) + 'px';
+    tops = []; bottoms = [];
+    for (i = 0; i < n; i++) {
+      tops.push(cueEls[i].offsetTop);
+      bottoms.push(cueEls[i].offsetTop + heights[i]);
+    }
+  }
+  function index(t) {
+    var lo = 0, hi = cues.length - 1, i = -1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      if (cues[mid].start <= t) { i = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return i;
+  }
+  // The playhead's place in the column: part-way down the current line,
+  // or proportionally through the gap to the next one.
+  function y(t, i) {
+    if (i < 0) return cues[0].start > 0 ? Math.min(1, t / cues[0].start) * tops[0] : 0;
+    var c = cues[i];
+    if (t < c.end) return tops[i] + Math.min(1, (t - c.start) / Math.max(0.1, c.end - c.start)) * (bottoms[i] - tops[i]);
+    var from = c.end, y0 = bottoms[i], to, y1;
+    if (i + 1 < cues.length) { to = cues[i + 1].start; y1 = tops[i + 1]; }
+    else { var d = opts.duration(); to = isFinite(d) ? d : from; y1 = track.offsetHeight; }
+    if (to <= from) return y0;
+    return y0 + Math.min(1, (t - from) / (to - from)) * (y1 - y0);
+  }
+  function follow(force) {
+    if (!cues.length || !now || !visible()) return;
+    var t = opts.time() || 0;
+    var i = index(t);
+    var yy = y(t, i);
+    now.style.top = yy + 'px';
+    var cur = i >= 0 && t < cues[i].end ? i : -1;
+    if (cur !== active) {
+      if (active >= 0) cueEls[active].classList.remove('on');
+      if (cur >= 0) cueEls[cur].classList.add('on');
+      active = cur;
+    }
+    if (!force && Date.now() < userUntil) return;
+    var top = list.scrollTop, h = list.clientHeight;
+    var pos = yy + track.offsetTop;
+    if (!force && pos >= top + h * 0.15 && pos <= top + h * 0.7) return;
+    var target = Math.max(0, pos - h * 0.3);
+    var smooth = !force && Math.abs(target - top) < 3 * h;
+    try { list.scrollTo({ top: target, behavior: smooth ? 'smooth' : 'auto' }); }
+    catch (e) { list.scrollTop = target; }
+  }
+  ['wheel', 'touchmove', 'mousedown', 'keydown'].forEach(function (ev) {
+    list.addEventListener(ev, function () { userUntil = Date.now() + 6000; }, { passive: true });
+  });
+  // Click a line: seek there (modifier clicks keep the link's own meaning).
+  track.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest ? e.target.closest('a.cue') : null;
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    var c = cues[+a.dataset.i];
+    if (!c) return;
+    userUntil = 0;
+    opts.seek(c.start);
+    follow(true);
+  });
+  var resizeTimer = null;
+  addEventListener('resize', function () {
+    if (!cues.length || !visible()) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () { if (visible()) { layout(); follow(true); } }, 150);
+  });
+  return { setCues: render, empty: empty, follow: follow, layout: layout,
+           hasCues: function () { return cues.length > 0; } };
+};
+</script>"#;
+
+/// The pop-out window's script: it shows one program's captions (fetched
+/// as the same WebVTT the player uses) and follows the player tab that
+/// opened it over a BroadcastChannel, by session id — position and
+/// program in, seeks out. When the player moves to the next episode, the
+/// window loads that one's captions. "Dock" asks the player to show its
+/// own panel again and closes the window.
+const CAPTIONS_SCRIPT: &str = r#"<script>
+(function () {
+  var list = document.getElementById('cc-list'), track = document.getElementById('cc-track');
+  var titleEl = document.getElementById('cc-title');
+  var session = new URLSearchParams(location.search).get('s') || '';
+  var id = location.pathname.replace(/.*\//, '');
+  var state = { t: 0, duration: NaN };
+  var bc = null;
+  try { bc = new BroadcastChannel('mediaserver-player'); } catch (e) {}
+  function post(m) { if (bc) { m.s = session; bc.postMessage(m); } }
+  var panel = ccPanel(list, track, {
+    time: function () { return state.t; },
+    duration: function () { return state.duration; },
+    href: function (t) { return '/play/' + id + '#' + Math.floor(t) + 's'; },
+    seek: function (t) { state.t = t; post({ type: 'seek', t: t }); }
+  });
+  // WebVTT to cues: blocks with a timing line; tags and ASS-style
+  // positioning stripped, entities decoded, whitespace folded.
+  function decode(s) { var ta = document.createElement('textarea'); ta.innerHTML = s; return ta.value; }
+  function ts(s) {
+    var p = s.trim().split(' ')[0].split(':');
+    var sec = parseFloat(p.pop()), m = parseInt(p.pop() || '0', 10), h = parseInt(p.pop() || '0', 10);
+    return h * 3600 + m * 60 + sec;
+  }
+  function parseVtt(text) {
+    var out = [], blocks = text.replace(/\r/g, '').split(/\n\n+/);
+    for (var i = 0; i < blocks.length; i++) {
+      var lines = blocks[i].split('\n'), ti = -1;
+      for (var j = 0; j < lines.length; j++) if (lines[j].indexOf('-->') >= 0) { ti = j; break; }
+      if (ti < 0) continue;
+      var times = lines[ti].split('-->');
+      var start = ts(times[0]), end = ts(times[1] || '');
+      if (isNaN(start) || isNaN(end)) continue;
+      var body = lines.slice(ti + 1).join(' ').replace(/<[^>]*>/g, '').replace(/\{\\[^}]*\}/g, '');
+      body = decode(body).replace(/\s+/g, ' ').trim();
+      if (body) out.push({ start: start, end: end, text: body });
+    }
+    out.sort(function (a, b) { return a.start - b.start; });
+    return out;
+  }
+  function load(newId) {
+    id = newId;
+    panel.empty('Loading captions…');
+    fetch('/subs/' + newId + '.vtt').then(function (r) {
+      if (!r.ok) throw 0;
+      return r.text();
+    }).then(function (text) {
+      if (id !== newId) return;
+      var cues = parseVtt(text);
+      if (cues.length) panel.setCues(cues); else panel.empty('No captions for this program.');
+    }).catch(function () {
+      if (id === newId) panel.empty('No captions for this program.');
+    });
+  }
+  if (bc) {
+    bc.onmessage = function (e) {
+      var m = e.data;
+      if (!m || m.s !== session || m.type !== 'state') return;
+      if (m.title && titleEl.textContent !== m.title) {
+        titleEl.textContent = m.title;
+        document.title = 'Captions — ' + m.title;
+      }
+      state.t = m.t; state.duration = m.duration;
+      if (m.id && m.id !== id) load(m.id);
+      panel.follow(false);
+    };
+  } else {
+    titleEl.textContent = 'This browser cannot follow the player from a second window.';
+  }
+  document.getElementById('cc-dock').addEventListener('click', function () {
+    post({ type: 'dock' });
+    window.close();
+  });
+  load(id);
+  post({ type: 'hello' });   // a paused player answers with its state
+})();
+</script>"#;
 
 /// The player's script: resume (the playback position rides in the URL
 /// fragment, so a paused or scrubbed player yields a bookmarkable link
@@ -1451,64 +1711,94 @@ const PLAYER_SCRIPT: &str = r#"<script>
       try { localStorage.setItem('autonext', box.checked ? '1' : '0'); } catch (e) {}
     });
   }
-  // Captions panel ("CC" at the right end of the hint line): every
-  // line of the subtitle track down a column at the right edge, placed
-  // along the running time — a line sits at its start time on a
-  // pixels-per-second scale, pushed down only as far as the line above
-  // needs, so silence is blank space, quick exchanges pack solid, and
-  // the column as a whole is the program's timeline. A bar marks the
-  // playhead, the current line is highlighted, the list follows playback
-  // (unless the viewer just scrolled it), and clicking a line seeks
-  // there. The cues are read from the <track> the browser already parsed
-  // — the .srt sidecar as WebVTT, or the extracted embedded track — so
-  // nothing is fetched twice and there is no parser here. Remembered per
-  // browser like auto-play; shown only while the program has captions
-  // (the button is hidden otherwise, and swapped with the episode).
-  var panel = document.getElementById('cc-panel');
-  var ccList = document.getElementById('cc-list');
-  var ccTrack = document.getElementById('cc-track');
-  var ccOn = false, ccGen = 0, ccKey = '', ccNow = null, ccActive = -1;
-  var cues = [], cueEls = [], tops = [], bottoms = [];
-  var ccUserUntil = 0;   // the viewer scrolled the list: no following until then
+  // Captions panel ("CC" at the right end of the hint line): every line
+  // of the subtitle track down a column at the right edge, laid out along
+  // the running time by the shared panel code (CC_PANEL_SCRIPT — the
+  // pop-out window uses it too). This side reads the cues from the
+  // <track> the browser already parsed — the .srt sidecar as WebVTT, or
+  // the extracted embedded track — so nothing is fetched twice; keeps
+  // the page layout and the button in step; and talks to a popped-out
+  // captions window over a BroadcastChannel keyed by a per-tab session
+  // (position and program out, seeks in). Remembered per browser like
+  // auto-play; shown only while the program has captions.
+  var panelEl = document.getElementById('cc-panel');
+  var ccOn = false, ccGen = 0, ccKey = '';
   try { ccOn = localStorage.getItem('cc') === '1'; } catch (e) {}
+  function seekTo(t) {
+    dropRejoin();
+    try { v.currentTime = t; } catch (err) {}
+    var p = v.play();
+    if (p && p.catch) p.catch(function () {});
+  }
+  var panel = panelEl && window.ccPanel ? ccPanel(
+    document.getElementById('cc-list'), document.getElementById('cc-track'), {
+      time: function () { return v.currentTime || 0; },
+      duration: function () { return v.duration; },
+      href: function (t) { return location.pathname + '#' + Math.floor(t) + 's'; },
+      seek: seekTo
+    }) : null;
+  // The session id a pop-out window follows; sessionStorage is per tab
+  // and survives reloads, so the window keeps following.
+  var session = '';
+  try {
+    session = sessionStorage.getItem('ccsession') || '';
+    if (!session) {
+      session = Math.random().toString(36).slice(2, 12);
+      sessionStorage.setItem('ccsession', session);
+    }
+  } catch (e) { session = String(Date.now()); }
+  var bc = null;
+  try { bc = new BroadcastChannel('mediaserver-player'); } catch (e) {}
+  function ccPost() {
+    if (!bc) return;
+    bc.postMessage({ s: session, type: 'state', id: v.dataset.id, title: document.title,
+      t: v.currentTime || 0, duration: v.duration, paused: v.paused });
+  }
+  if (bc) {
+    ['timeupdate', 'seeked', 'play', 'pause', 'loadedmetadata'].forEach(function (ev) {
+      v.addEventListener(ev, ccPost);
+    });
+    bc.onmessage = function (e) {
+      var m = e.data;
+      if (!m || m.s !== session) return;
+      if (m.type === 'seek') seekTo(m.t);
+      else if (m.type === 'hello') ccPost();
+      else if (m.type === 'dock') setCc(true);
+    };
+  }
   function setCc(on) {
     ccOn = on;
     try { localStorage.setItem('cc', on ? '1' : '0'); } catch (e) {}
     ccRefresh();
-  }
-  function ccEmpty(text) {
-    cues = []; cueEls = []; tops = []; bottoms = []; ccNow = null; ccKey = '';
-    ccTrack.innerHTML = '';
-    var d = document.createElement('div');
-    d.className = 'empty'; d.textContent = text;
-    ccTrack.appendChild(d);
   }
   // Sync the button, the page layout and the panel with the state and
   // whatever track the player carries right now. Called on toggle, after
   // an episode swap, and when an extracted track arrives.
   function ccRefresh() {
     var btn = document.getElementById('cc');
-    if (!panel || !ccTrack) return;
+    if (!panelEl || !panel) return;
     var show = ccOn && !!btn && !btn.hidden;
     if (btn) btn.setAttribute('aria-pressed', ccOn ? 'true' : 'false');
     document.body.classList.toggle('cc', show);
-    panel.hidden = !show;
+    panelEl.hidden = !show;
     if (!show) return;
     var gen = ++ccGen, id = v.dataset.id;
     var trackEl = v.querySelector('track');
     if (!trackEl) {
       var note = document.getElementById('subs');
-      ccEmpty(note && note.dataset.extract ? 'Extracting captions from the file…' : 'No captions for this program.');
+      ccKey = '';
+      panel.empty(note && note.dataset.extract ? 'Extracting captions from the file…' : 'No captions for this program.');
       return;
     }
     var key = id + '|' + trackEl.src;
-    if (key === ccKey && cues.length) { ccLayout(); ccFollow(true); return; }
-    ccEmpty('Loading captions…');
+    if (key === ccKey && panel.hasCues()) { panel.layout(); panel.follow(true); return; }
+    ccKey = '';
+    panel.empty('Loading captions…');
     readCues(trackEl, function (list) {
       if (gen !== ccGen || v.dataset.id !== id) return;
-      if (!list.length) { ccEmpty('No captions for this program.'); return; }
+      if (!list.length) { panel.empty('No captions for this program.'); return; }
       ccKey = key;
-      ccRender(list);
+      panel.setCues(list);
     });
   }
   // Plain text of a cue: the browser's own rendering of the WebVTT markup
@@ -1539,147 +1829,24 @@ const PLAYER_SCRIPT: &str = r#"<script>
     trackEl.addEventListener('error', function () { cb([]); }, { once: true });
     if (tt.mode === 'disabled') tt.mode = 'hidden';
   }
-  function ccRender(list) {
-    cues = list; cueEls = []; ccActive = -1;
-    var frag = document.createDocumentFragment();
-    for (var i = 0; i < list.length; i++) {
-      var a = document.createElement('a');
-      a.className = 'cue';
-      a.href = location.pathname + '#' + Math.floor(list[i].start) + 's';
-      a.dataset.i = i;
-      var t = document.createElement('time');
-      t.textContent = mmss(list[i].start);
-      var s = document.createElement('span');
-      s.textContent = list[i].text;
-      a.appendChild(t); a.appendChild(s);
-      frag.appendChild(a);
-      cueEls.push(a);
-    }
-    ccNow = document.createElement('div');
-    ccNow.id = 'cc-now';
-    frag.appendChild(ccNow);
-    ccTrack.innerHTML = '';
-    ccTrack.appendChild(frag);
-    ccLayout();
-    ccFollow(true);
+  // Pop out: the captions in a window of their own (draggable to another
+  // monitor), and the page gets its width back. Reusing the window name
+  // brings an existing one forward instead of opening a second.
+  function popOut() {
+    var w = window.open('/captions/' + v.dataset.id + '?s=' + encodeURIComponent(session),
+      'mediaserver-captions', 'popup=yes,width=440,height=820');
+    if (w) setCc(false);
   }
-  // Each line goes at its start time × scale, or straight under the line
-  // above when that would overlap. The scale is the program's own: the
-  // median of (line height ÷ seconds to the next line), so a typical pair
-  // of lines just touches — quicker exchanges pack, and any longer pause
-  // opens up in proportion. All writes, then all reads, then all writes:
-  // interleaving them would force a reflow per line.
-  function ccLayout() {
-    var n = cueEls.length;
-    if (!n) return;
-    var i, heights = [];
-    for (i = 0; i < n; i++) cueEls[i].style.marginTop = '0';
-    for (i = 0; i < n; i++) heights.push(cueEls[i].offsetHeight);
-    var ratios = [];
-    for (i = 1; i < n; i++) {
-      var gap = cues[i].start - cues[i - 1].start;
-      if (gap > 0.2) ratios.push(heights[i - 1] / gap);
-    }
-    ratios.sort(function (a, b) { return a - b; });
-    var scale = ratios.length ? ratios[ratios.length >> 1] : 6;
-    scale = Math.max(1, Math.min(12, scale));
-    var bottom = 0;
-    for (i = 0; i < n; i++) {
-      var top = Math.max(cues[i].start * scale, bottom);
-      cueEls[i].style.marginTop = Math.round((top - bottom) * 10) / 10 + 'px';
-      bottom = top + heights[i];
-    }
-    var end = isFinite(v.duration) ? v.duration : cues[n - 1].end;
-    ccTrack.style.minHeight = (Math.max(bottom, end * scale) + 24) + 'px';
-    // The playhead is placed against what the browser actually laid out.
-    tops = []; bottoms = [];
-    for (i = 0; i < n; i++) {
-      tops.push(cueEls[i].offsetTop);
-      bottoms.push(cueEls[i].offsetTop + heights[i]);
-    }
-  }
-  // The last line that has started by t, or -1.
-  function ccIndex(t) {
-    var lo = 0, hi = cues.length - 1, i = -1;
-    while (lo <= hi) {
-      var mid = (lo + hi) >> 1;
-      if (cues[mid].start <= t) { i = mid; lo = mid + 1; } else hi = mid - 1;
-    }
-    return i;
-  }
-  // The playhead's place in the column: part-way down the current line,
-  // or proportionally through the gap to the next one — continuous, so
-  // a long silence shows the bar drifting through the empty space.
-  function ccY(t, i) {
-    if (i < 0) return cues[0].start > 0 ? Math.min(1, t / cues[0].start) * tops[0] : 0;
-    var c = cues[i];
-    if (t < c.end) return tops[i] + Math.min(1, (t - c.start) / Math.max(0.1, c.end - c.start)) * (bottoms[i] - tops[i]);
-    var from = c.end, y0 = bottoms[i], to, y1;
-    if (i + 1 < cues.length) { to = cues[i + 1].start; y1 = tops[i + 1]; }
-    else { to = isFinite(v.duration) ? v.duration : from; y1 = ccTrack.offsetHeight; }
-    if (to <= from) return y0;
-    return y0 + Math.min(1, (t - from) / (to - from)) * (y1 - y0);
-  }
-  // Move the playhead and the highlight; scroll only when the playhead
-  // has left the comfortable band of the view (or on demand), so the
-  // list is not in constant motion.
-  function ccFollow(force) {
-    if (!ccOn || !cues.length || !ccNow || panel.hidden) return;
-    var t = v.currentTime || 0;
-    var i = ccIndex(t);
-    var y = ccY(t, i);
-    ccNow.style.top = y + 'px';
-    var active = i >= 0 && t < cues[i].end ? i : -1;
-    if (active !== ccActive) {
-      if (ccActive >= 0) cueEls[ccActive].classList.remove('on');
-      if (active >= 0) cueEls[active].classList.add('on');
-      ccActive = active;
-    }
-    if (!force && Date.now() < ccUserUntil) return;
-    var top = ccList.scrollTop, h = ccList.clientHeight;
-    var yy = y + ccTrack.offsetTop;
-    if (!force && yy >= top + h * 0.15 && yy <= top + h * 0.7) return;
-    var target = Math.max(0, yy - h * 0.3);
-    var smooth = !force && Math.abs(target - top) < 3 * h;
-    try { ccList.scrollTo({ top: target, behavior: smooth ? 'smooth' : 'auto' }); }
-    catch (e) { ccList.scrollTop = target; }
-  }
-  if (panel) {
-    v.addEventListener('timeupdate', function () { ccFollow(false); });
-    v.addEventListener('seeked', function () { ccFollow(false); });
-    ['wheel', 'touchmove', 'mousedown', 'keydown'].forEach(function (ev) {
-      ccList.addEventListener(ev, function () { ccUserUntil = Date.now() + 6000; }, { passive: true });
-    });
-    // Click a line: seek there and play (modifier clicks keep the link's
-    // own meaning — the href is a #position resume link).
-    ccTrack.addEventListener('click', function (e) {
-      var a = e.target && e.target.closest ? e.target.closest('a.cue') : null;
-      if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-      e.preventDefault();
-      var c = cues[+a.dataset.i];
-      if (!c) return;
-      dropRejoin();
-      ccUserUntil = 0;
-      try { v.currentTime = c.start; } catch (err) {}
-      var p = v.play();
-      if (p && p.catch) p.catch(function () {});
-      ccFollow(true);
-    });
+  if (panelEl && panel) {
+    v.addEventListener('timeupdate', function () { panel.follow(false); });
+    v.addEventListener('seeked', function () { panel.follow(false); });
     // Delegated: the button is swapped along with the episode.
     document.addEventListener('click', function (e) {
       var t = e.target;
       if (!t || !t.closest) return;
       if (t.closest('#cc')) setCc(!ccOn);
       else if (t.closest('#cc-close')) setCc(false);
-    });
-    var ccResize = null;
-    addEventListener('resize', function () {
-      if (panel.hidden || !cues.length) return;
-      clearTimeout(ccResize);
-      ccResize = setTimeout(function () {
-        if (panel.hidden) return;   // closed meanwhile: nothing to measure
-        ccLayout(); ccFollow(true);
-      }, 150);
+      else if (t.closest('#cc-pop')) popOut();
     });
     ccRefresh();
   }
@@ -1716,6 +1883,7 @@ const PLAYER_SCRIPT: &str = r#"<script>
       if (p && p.catch) p.catch(function () {});
       attachSubs();
       ccRefresh();     // the captions panel follows the new track
+      ccPost();        // and so does a popped-out window
       offerRejoin();   // the incoming episode may have its own stored position
     }).catch(function () {
       location.href = prefix + id;   // plain navigation as the fallback
@@ -2088,8 +2256,11 @@ async fn play_page(
     // the right edge on desktop; on phones it flows in below the controls.
     let cc_hidden = if has_subs { "" } else { " hidden" };
     let panel = "<aside id=\"cc-panel\" hidden aria-label=\"Captions\">\
-         <div class=\"head\"><span>Captions</span>\
-         <button type=\"button\" id=\"cc-close\" aria-label=\"Close the captions panel\">×</button></div>\
+         <div class=\"head\"><span id=\"cc-title\">Captions</span><span class=\"tools\">\
+         <button type=\"button\" id=\"cc-pop\" title=\"Open the captions in a window of their own\" \
+          aria-label=\"Pop the captions out into a window\">⧉</button>\
+         <button type=\"button\" id=\"cc-close\" aria-label=\"Close the captions panel\">×</button>\
+         </span></div>\
          <div id=\"cc-list\"><div id=\"cc-track\"></div></div></aside>";
     let og = item_og_meta(
         &request_base_url(&state, &headers, https.is_some()),
@@ -2114,7 +2285,7 @@ async fn play_page(
             .collect::<Vec<_>>()
             .join(",")
     );
-    let head = page_head(&xml_escape(&tab_title(&detail)), &format!("{PLAYER_STYLE}{og}"));
+    let head = page_head(&xml_escape(&tab_title(&detail)), &format!("{CC_STYLE}{PLAYER_STYLE}{og}"));
     let html = format!(
         "{head}<body class=\"player\">\
          <h2 id=\"heading\" data-swap style=\"margin-bottom:.1em\">{heading}\
@@ -2133,9 +2304,33 @@ async fn play_page(
          <span class=\"right\"><button id=\"cc\" type=\"button\" data-swap aria-pressed=\"false\" \
           aria-controls=\"cc-panel\" title=\"Captions panel: every line along the \
           running time — click one to jump there\"{cc_hidden}>CC</button></span></p>\
-         {autonext}{panel}{subs_async}{PLAYER_SCRIPT}{PAGE_CLOSE}",
+         {autonext}{panel}{subs_async}{CC_PANEL_SCRIPT}{PLAYER_SCRIPT}{PAGE_CLOSE}",
         xml_escape(&servable.mime),
         segments_attr = xml_escape(&segments_json)
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+/// The pop-out captions window for a program: the panel as a page of its
+/// own, following the player tab that opened it (see CAPTIONS_SCRIPT).
+async fn captions_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    let detail = {
+        let conn = state.db.lock().await;
+        files::detail(&conn, id)
+    };
+    let Ok(Some(detail)) = detail else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let title = xml_escape(&tab_title(&detail));
+    let head = page_head(&format!("Captions — {title}"), &format!("{CC_STYLE}{CAPTIONS_STYLE}"));
+    let html = format!(
+        "{head}<body class=\"captions\">\
+         <aside id=\"cc-panel\" aria-label=\"Captions\">\
+         <div class=\"head\"><span id=\"cc-title\">{title}</span><span class=\"tools\">\
+         <button type=\"button\" id=\"cc-dock\" title=\"Back into the player page\">dock</button>\
+         </span></div>\
+         <div id=\"cc-list\"><div id=\"cc-track\"></div></div></aside>\
+         {CC_PANEL_SCRIPT}{CAPTIONS_SCRIPT}{PAGE_CLOSE}"
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }

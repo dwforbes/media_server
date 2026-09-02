@@ -355,6 +355,16 @@ and no parsing happens in the page. The panel is remembered per browser like
 auto-play: it re-opens on the next program with captions and follows in-place episode
 swaps, hiding itself for a program that has none.
 
+The panel can also leave the page: the ⧉ button in its header pops the captions out
+into a browser window of their own (`/captions/{id}`), the page gets its full width
+back, and the window can be dragged to another monitor and resized. The two stay in
+step over a same-origin BroadcastChannel keyed by a per-tab session — the player
+broadcasts its position and program, the window highlights, scrolls and, when auto-play
+moves to the next episode, loads that episode's captions; clicking a line in the window
+seeks the player. "dock" brings the panel back into the page. It is an ordinary window,
+not always-on-top (browsers don't allow that), so it lives best on a second monitor;
+touch devices, which have no floating windows, don't show the button.
+
 The same stripping runs automatically as part of enrichment when `strip_titles = true`
 is set in the scanner config's `[enrich]` section (or with `media-enrich
 --strip-titles`), so newly added releases are cleaned without a manual step. It is
