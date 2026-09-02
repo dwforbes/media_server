@@ -785,7 +785,7 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
     let head = page_head("Search", "");
     let html = format!(
         "{head}<body>\
-         <p><a href=\"/\" class=\"home\" title=\"Home\" aria-label=\"Home\">⌂</a></p><h1>Search</h1>\
+         <h1>Search</h1>\
          <p><a href=\"/browse/{}\">← Back to {}</a></p>{}\
          <p>{summary}</p>\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{PAGE_CLOSE}",
@@ -938,7 +938,7 @@ async fn browse_page(
     let head = page_head(&xml_escape(&title), &og);
     let html = format!(
         "{head}<body>\
-         <p><a href=\"/\" class=\"home\" title=\"Home\" aria-label=\"Home\">⌂</a></p>{art}<h1>{}</h1>{description}\
+         {art}<h1>{}</h1>{description}\
          <div style=\"clear:both\"></div>{back_link}{search_box}\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
         xml_escape(&title)
