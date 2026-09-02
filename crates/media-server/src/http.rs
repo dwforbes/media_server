@@ -47,6 +47,9 @@ body.player{max-width:60em;margin:1.5em auto;background:#111;color:#ddd;overflow
 div.videowrap{position:relative;width:100vw;margin-left:calc(50% - 50vw)}\
 div.videowrap video{display:block;width:100%;max-height:85vh;background:#000}\
 img.art{float:right;max-width:220px;margin:0 0 1em 1.5em;border-radius:6px}\
+div.hdr{display:grid;grid-template-columns:1fr auto;grid-template-areas:\"top art\" \"desc art\";column-gap:1.5em;row-gap:.4em;align-items:start}\
+div.hdr-top{grid-area:top}div.hdr-desc{grid-area:desc}\
+div.hdr img.art{grid-area:art;float:none;margin:0 0 1em}\
 table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
 p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
 html a.home,html a.home:link,html a.home:visited,html a.home:hover,html a.home:active{color:inherit;text-decoration:none;font-size:1.15em;line-height:1}\
@@ -56,6 +59,8 @@ p.controls input[type=checkbox]{vertical-align:middle;margin:0 .3em 0 0;position
 body{margin:1em auto;padding:0 1rem 1.5rem}\
 body.player{margin:.5em auto}\
 img.art{float:none;display:block;max-width:55%;margin:0 auto 1em}\
+div.hdr{grid-template-columns:1fr;grid-template-areas:\"top\" \"art\" \"desc\"}\
+div.hdr img.art{justify-self:center;margin:0 0 .5em}\
 h1{font-size:1.5em}}\
 </style>";
 
@@ -919,11 +924,18 @@ async fn browse_page(
         }
     }
     // A container with representative art (a series or season, borrowing
-    // an episode's poster) shows it floated beside the listing, same
-    // placement as the detail page.
+    // an episode's poster) shows it to the right of the header block —
+    // title, way up, search, then the description — the same shape every
+    // container page has, art or not; on narrow screens the art slots in
+    // between search and description (div.hdr in BASE_STYLE).
     let art = art_item
         .map(|id| format!("<img src=\"/art/{id}\" alt=\"\" class=\"art\">"))
         .unwrap_or_default();
+    let description = if description.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"hdr-desc\">{description}</div>")
+    };
     // Shared links unfurl into a poster/description card. Series and
     // season pages have both; other containers at least name themselves.
     let og = og_meta(
@@ -938,8 +950,8 @@ async fn browse_page(
     let head = page_head(&xml_escape(&title), &og);
     let html = format!(
         "{head}<body>\
-         {art}<h1>{}</h1>{description}\
-         <div style=\"clear:both\"></div>{back_link}{search_box}\
+         <div class=\"hdr\"><div class=\"hdr-top\"><h1>{}</h1>{back_link}{search_box}</div>\
+         {art}{description}</div>\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
         xml_escape(&title)
     );
