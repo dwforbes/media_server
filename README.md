@@ -389,6 +389,19 @@ it once to re-anchor the record; and a plain `ffmpeg -c copy` of the file elsewh
 replaces the atom with ffmpeg's own name, after which the captions count as unknown
 provenance. The remux step records the same thing when it embeds a sidecar.
 
+None of this polls. The check runs inside an enrichment run, and a run is what the
+scanner starts when new media settles — or, new with this feature, when an `.srt` is
+written (after the same quiet period; sidecars a run itself writes, such as extracted
+ones, do not re-trigger it). Within a run the embed step keeps a memory beside the
+catalog, `enrich-captions.json`: for every video with a same-name `.srt`, the size and
+mtime of both files at the last look and what was concluded. A pair whose stamps have
+not moved is skipped without reading, hashing or probing anything, so a run over an
+untouched library costs its directory walk and nothing more; a corrected sidecar, a
+remux or a title strip moves a stamp and earns one fresh look. Dry runs read the memory
+but never write it, and a file that fails is not recorded, so it is retried. A sidecar
+the extraction step regenerates is recorded as it stands, so it is not re-embedded
+merely for having been regenerated — only if you then change it.
+
 ### Extracting embedded subtitles to sidecars
 
 The reverse direction runs by default: for every video that has **no** same-name

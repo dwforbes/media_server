@@ -1,5 +1,6 @@
 mod imdb;
 mod remux;
+mod captions_state;
 mod subtitles;
 mod tmdb;
 
@@ -7,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use captions_state::{CaptionsState, Stamp};
 use clap::Parser;
 use media_db::mime::VIDEO_EXTENSIONS;
 use media_db::nameparse;
@@ -272,7 +274,7 @@ fn strip_embedded_titles(config: &ScannerConfig) {
 
 /// Extract embedded text subtitles to .srt sidecars wherever one is
 /// missing. Dry run: probe and report only.
-fn extract_embedded_subtitles(config: &ScannerConfig, dry_run: bool) {
+fn extract_embedded_subtitles(config: &ScannerConfig, dry_run: bool, captions: &mut CaptionsState) {
     let mut extracted = 0usize;
     let mut planned = 0usize;
     for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
@@ -305,6 +307,11 @@ fn extract_embedded_subtitles(config: &ScannerConfig, dry_run: bool) {
                         path.with_extension("srt").display()
                     );
                     extracted += 1;
+                    // Remember the pair as it now stands: the embed step
+                    // need not probe a video for the sidecar it just got.
+                    if let (Some(m), Some(s)) = (Stamp::of(path), Stamp::of(&path.with_extension("srt"))) {
+                        captions.record(path, m, s, "extracted");
+                    }
                 }
                 Ok(subtitles::ExtractOutcome::WouldExtract(track)) => {
                     println!(
@@ -435,8 +442,8 @@ fn describe_plan(plan: &remux::Plan) -> String {
 
 /// Embed same-name .srt sidecars into MP4 files lacking a subtitle stream,
 /// and replace captions embedded earlier whose sidecar has since changed.
-fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool) {
-    let (mut embedded, mut replaced, mut planned) = (0usize, 0usize, 0usize);
+fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool, captions: &mut CaptionsState) {
+    let (mut embedded, mut replaced, mut planned, mut unchanged) = (0usize, 0usize, 0usize, 0usize);
     for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
         if !root.path.is_dir() {
             continue;
@@ -449,11 +456,21 @@ fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool) {
             .filter(|e| e.file_type().is_file() && is_video(e.path()))
         {
             let path = entry.path();
+            let srt = path.with_extension("srt");
             // Cheap pre-check before spending an ffprobe call.
-            if !path.with_extension("srt").is_file() {
+            if !srt.is_file() {
                 continue;
             }
-            match subtitles::embed_if_applicable(
+            // Cheaper still: a pair that looks exactly as it did at the
+            // last look (size and mtime of both files) would conclude the
+            // same thing, so it is not read, hashed or probed again.
+            if let (Some(m), Some(s)) = (Stamp::of(path), Stamp::of(&srt)) {
+                if captions.unchanged(path, m, s) {
+                    unchanged += 1;
+                    continue;
+                }
+            }
+            let note: Option<&str> = match subtitles::embed_if_applicable(
                 &config.enrich.ffmpeg_path,
                 &config.ffprobe_path,
                 path,
@@ -462,18 +479,22 @@ fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool) {
                 Ok(subtitles::Outcome::Embedded) => {
                     println!("embedded subtitles into {}", path.display());
                     embedded += 1;
+                    Some("embedded")
                 }
                 Ok(subtitles::Outcome::Replaced) => {
                     println!("replaced embedded captions from the updated sidecar in {}", path.display());
                     replaced += 1;
+                    Some("replaced")
                 }
                 Ok(subtitles::Outcome::WouldEmbed) => {
                     println!("would embed subtitles into {}", path.display());
                     planned += 1;
+                    None
                 }
                 Ok(subtitles::Outcome::WouldReplace) => {
                     println!("would replace embedded captions (sidecar changed) in {}", path.display());
                     planned += 1;
+                    None
                 }
                 // "not mp4", "already has subtitles" and "up to date" are
                 // the expected, common skips; the rest mean an .srt exists
@@ -485,10 +506,24 @@ fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool) {
                     } else {
                         println!("{}: subtitles not embedded ({why})", path.display());
                     }
+                    Some(why)
                 }
-                Err(err) => eprintln!("{}: subtitle embedding failed: {err:#}", path.display()),
+                Err(err) => {
+                    eprintln!("{}: subtitle embedding failed: {err:#}", path.display());
+                    None
+                }
+            };
+            // Recorded as the pair now stands (an embed just rewrote the
+            // video). Dry runs and failures record nothing.
+            if let Some(note) = note.filter(|_| !dry_run) {
+                if let (Some(m), Some(s)) = (Stamp::of(path), Stamp::of(&srt)) {
+                    captions.record(path, m, s, note);
+                }
             }
         }
+    }
+    if unchanged > 0 {
+        println!("caption pairs unchanged since the last look: {unchanged} (not probed)");
     }
     if dry_run {
         if planned > 0 {
@@ -545,6 +580,17 @@ fn main() -> Result<()> {
         remove_stale_temps(&config);
     }
 
+    // Memory for the caption steps (see captions_state), beside the catalog.
+    let state_dir = config
+        .db_path
+        .clone()
+        .unwrap_or_else(media_db::open::default_db_path)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut captions = CaptionsState::load(&state_dir);
+    tracing::debug!("caption memory: {} pairs remembered", captions.len());
+
     let do_strip = args.strip_titles || config.enrich.strip_titles;
     let do_subs = args.embed_subtitles || config.enrich.embed_subtitles;
     let do_remux = args.remux_mkv || config.enrich.remux_mkv;
@@ -556,13 +602,13 @@ fn main() -> Result<()> {
             remux_mkv_files(&config, true);
         }
         if do_extract {
-            extract_embedded_subtitles(&config, true);
+            extract_embedded_subtitles(&config, true, &mut captions);
         }
         if do_strip {
             println!("(dry run: embedded-title stripping skipped)");
         }
         if do_subs {
-            embed_sidecar_subtitles(&config, true);
+            embed_sidecar_subtitles(&config, true, &mut captions);
         }
     } else {
         // Remux first so subtitle embedding sees the resulting MP4s, and
@@ -571,15 +617,29 @@ fn main() -> Result<()> {
             remux_mkv_files(&config, false);
         }
         if do_subs {
-            embed_sidecar_subtitles(&config, false);
+            embed_sidecar_subtitles(&config, false, &mut captions);
         }
         // After remux (the MP4 is what gets probed) and after embedding
         // (files that just gained a track from their sidecar keep it).
         if do_extract {
-            extract_embedded_subtitles(&config, false);
+            extract_embedded_subtitles(&config, false, &mut captions);
         }
         if do_strip {
             strip_embedded_titles(&config);
+        }
+        // Pairs the embed step did not meet under the roots it walked are
+        // gone (video or sidecar removed); only that step meets every pair.
+        if do_subs {
+            let walked: Vec<PathBuf> = config
+                .roots
+                .iter()
+                .filter(|r| (r.kind == "movies" || r.kind == "tv") && r.path.is_dir())
+                .map(|r| r.path.clone())
+                .collect();
+            captions.forget_unseen_under(&walked);
+        }
+        if let Err(err) = captions.save() {
+            eprintln!("could not save the caption memory: {err}");
         }
     }
 

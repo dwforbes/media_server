@@ -35,16 +35,27 @@ fn resolve_enrich_command(command: &str) -> PathBuf {
 }
 
 /// Debounced, serialized runner for the media-enrich subprocess. Triggered
-/// only by new/changed media files — never by sidecar events, which is what
-/// keeps enrichment's own .nfo writes from re-triggering it.
+/// by new/changed media files, and by a written .srt (so a corrected
+/// sidecar gets re-embedded) — never by other sidecar events, which is
+/// what keeps enrichment's own .nfo writes from re-triggering it. The
+/// .srt files a run writes itself (extracted tracks) are told apart by
+/// time: sidecar events while a run is in flight, or within a grace
+/// period after it ends, are ignored.
 struct EnrichRunner {
     cfg: EnrichConfig,
     config_path: PathBuf,
     pending: bool,
     last_add: Instant,
     last_run: Option<Instant>,
+    /// When the last child exited, for the sidecar grace period.
+    finished_at: Option<Instant>,
     child: Option<std::process::Child>,
 }
+
+/// How long after a run ends its own .srt writes may still surface as
+/// events (the debouncer holds them for settle_ms, and a rename lands
+/// last).
+const SIDECAR_GRACE: Duration = Duration::from_secs(60);
 
 impl EnrichRunner {
     fn new(cfg: EnrichConfig, config_path: PathBuf) -> Self {
@@ -54,11 +65,26 @@ impl EnrichRunner {
             pending: false,
             last_add: Instant::now(),
             last_run: None,
+            finished_at: None,
             child: None,
         }
     }
 
     fn note_media_added(&mut self) {
+        self.pending = true;
+        self.last_add = Instant::now();
+    }
+
+    /// An .srt was written. Scheduled like new media, unless a run is in
+    /// flight or just ended — then it is most likely the run's own doing.
+    fn note_caption_sidecar_changed(&mut self, path: &Path) {
+        let own_write = self.child.is_some()
+            || self.finished_at.is_some_and(|t| t.elapsed() < SIDECAR_GRACE);
+        if own_write {
+            tracing::debug!("{}: sidecar written during/after an enrichment run; ignoring", path.display());
+            return;
+        }
+        tracing::info!("{}: caption sidecar changed; enrichment scheduled", path.display());
         self.pending = true;
         self.last_add = Instant::now();
     }
@@ -78,11 +104,13 @@ impl EnrichRunner {
                         self.pending = true;
                     }
                     self.child = None;
+                    self.finished_at = Some(Instant::now());
                 }
                 Ok(None) => return, // still running
                 Err(err) => {
                     tracing::warn!("waiting on media-enrich: {err}");
                     self.child = None;
+                    self.finished_at = Some(Instant::now());
                 }
             }
         }
@@ -258,7 +286,7 @@ fn main() -> Result<()> {
                 }
                 for path in paths {
                     match handle_path(&mut conn, &cfg, &roots, &path) {
-                        Ok(true) => {
+                        Ok(Handled::Media) => {
                             if let Some(runner) = &mut enricher {
                                 runner.note_media_added();
                             }
@@ -266,7 +294,12 @@ fn main() -> Result<()> {
                                 runner.note_media_added();
                             }
                         }
-                        Ok(false) => {}
+                        Ok(Handled::CaptionSidecar) => {
+                            if let Some(runner) = &mut enricher {
+                                runner.note_caption_sidecar_changed(&path);
+                            }
+                        }
+                        Ok(Handled::Nothing) => {}
                         Err(err) => tracing::warn!("handling {}: {err:#}", path.display()),
                     }
                 }
@@ -319,14 +352,25 @@ fn reconcile_all(conn: &mut Connection, cfg: &Config, roots: &[Root]) -> Result<
 
 /// React to one filesystem event path. Returns true when a new/changed
 /// media file was catalogued (the auto-enrich trigger).
-fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path) -> Result<bool> {
+/// What an event under a root amounted to, for the runners: new/changed
+/// media (enrichment and analysis want to know), a caption sidecar (only
+/// enrichment does), or nothing. Ordered so a subtree scan can keep the
+/// strongest of its files' outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Handled {
+    Nothing,
+    CaptionSidecar,
+    Media,
+}
+
+fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path) -> Result<Handled> {
     // Longest matching root wins, in case one root nests inside another.
     let Some(root) = roots
         .iter()
         .filter(|r| path.starts_with(&r.path))
         .max_by_key(|r| r.path.len())
     else {
-        return Ok(false);
+        return Ok(Handled::Nothing);
     };
     let rel = path
         .strip_prefix(&root.path)
@@ -334,7 +378,7 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         .to_string_lossy()
         .to_string();
     if rel.is_empty() || rel.split('/').any(|c| c.starts_with('.')) {
-        return Ok(false);
+        return Ok(Handled::Nothing);
     }
 
     if !path.exists() {
@@ -347,7 +391,7 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         if n > 0 {
             tracing::info!("removed {n} catalog entries under {}/{}", root.path, rel);
         }
-        return Ok(false);
+        return Ok(Handled::Nothing);
     }
 
     // Symlinks are never catalogued (the reconcile walker skips them as
@@ -357,7 +401,7 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)
     {
-        return Ok(false);
+        return Ok(Handled::Nothing);
     }
 
     if path.is_dir() {
@@ -380,58 +424,64 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
                 extract::nfo_mtime(abs) == kf.nfo_mtime
             })?;
         }
-        return Ok(false);
+        return Ok(Handled::Nothing);
     }
     if ext == "edl" {
         refresh_sidecar_sibling(conn, cfg, root, &rel, "edl", |abs, kf| {
             extract::segments::edl_mtime(abs) == kf.edl_mtime
         })?;
-        return Ok(false);
+        return Ok(Handled::Nothing);
+    }
+    if ext == "srt" {
+        // Nothing to catalog — the server reads the sidecar at request
+        // time — but a corrected sidecar is a reason to run enrichment,
+        // which re-embeds it into the video it was embedded in before.
+        return Ok(Handled::CaptionSidecar);
     }
     if ext == "jpg" || ext == "png" {
         refresh_art_siblings(conn, cfg, root, &rel)?;
-        return Ok(false);
+        return Ok(Handled::Nothing);
     }
     if root.kind == media_db::MediaKind::Music
         && path.file_name().and_then(|n| n.to_str()) == Some(extract::MUSIC_META_FILE)
     {
         refresh_music_meta(conn, cfg, root, &rel)?;
-        return Ok(false);
+        return Ok(Handled::Nothing);
     }
 
     let Some(mime) = reconcile::media_mime(root, path) else {
-        return Ok(false);
+        return Ok(Handled::Nothing);
     };
 
     // Settle checks: a file still being copied grows between two stats, and
     // — the stronger signal, since network copies stall longer than any
     // stat window — carries a fresh mtime. The debouncer fires the final
     // event only after settle_ms of quiet, so a completed copy passes.
-    let Some((size, _)) = reconcile::stat(path) else { return Ok(false) };
+    let Some((size, _)) = reconcile::stat(path) else { return Ok(Handled::Nothing) };
     std::thread::sleep(Duration::from_millis(500));
-    let Some((size2, mtime)) = reconcile::stat(path) else { return Ok(false) };
+    let Some((size2, mtime)) = reconcile::stat(path) else { return Ok(Handled::Nothing) };
     if size != size2 || reconcile::too_fresh(mtime, cfg.settle_ms.min(2000)) {
         tracing::debug!("{} still changing; leaving for next event", path.display());
-        return Ok(false);
+        return Ok(Handled::Nothing);
     }
 
     // Overlapping events (directory + file) both land here; skip work the
     // catalog already reflects.
     if let Some((_, db_size, db_mtime, status)) = files::lookup(conn, root.id, &rel)? {
         if db_size == size2 && db_mtime == mtime && status == "ready" {
-            return Ok(false);
+            return Ok(Handled::Nothing);
         }
     }
 
     let id = files::upsert_pending(conn, root.id, &rel, size2, mtime, root.kind, mime)?;
     extract::extract_file(conn, &cfg.ffprobe_path, root, &rel, id)?;
-    Ok(true)
+    Ok(Handled::Media)
 }
 
 /// A directory appeared (new folder, or moved in): catalog its contents.
 /// Returns whether any media files were catalogued.
-fn scan_subtree(conn: &mut Connection, cfg: &Config, root: &Root, dir: &Path) -> Result<bool> {
-    let mut any = false;
+fn scan_subtree(conn: &mut Connection, cfg: &Config, root: &Root, dir: &Path) -> Result<Handled> {
+    let mut any = Handled::Nothing;
     for entry in WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
@@ -439,7 +489,7 @@ fn scan_subtree(conn: &mut Connection, cfg: &Config, root: &Root, dir: &Path) ->
         .flatten()
     {
         if entry.file_type().is_file() {
-            any |= handle_path(conn, cfg, &[root.clone()], entry.path())?;
+            any = any.max(handle_path(conn, cfg, &[root.clone()], entry.path())?);
         }
     }
     Ok(any)
