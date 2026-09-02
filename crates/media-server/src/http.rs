@@ -48,7 +48,8 @@ div.videowrap{position:relative;width:100vw;margin-left:calc(50% - 50vw)}\
 div.videowrap video{display:block;width:100%;max-height:85vh;background:#000}\
 img.art{float:right;max-width:220px;margin:0 0 1em 1.5em;border-radius:6px}\
 table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
-p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:center}\
+p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
+p.controls input[type=checkbox]{vertical-align:middle;margin:0 .3em 0 0;position:relative;top:-.08em}\
 @media (max-width:40em){\
 body{margin:1em auto;padding:0 1rem 1.5rem}\
 body.player{margin:.5em auto}\
