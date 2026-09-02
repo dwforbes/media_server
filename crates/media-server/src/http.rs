@@ -1477,9 +1477,19 @@ const CAPTIONS_SCRIPT: &str = r#"<script>
     });
   }
   if (bc) {
+    var goneTimer = null;
     bc.onmessage = function (e) {
       var m = e.data;
       if (!m || m.s !== session) return;
+      if (m.type === 'gone') {
+        // The player page is going away. A reload or a move to another
+        // program brings a player back within the grace period (its
+        // ping or state cancels this); otherwise this window is orphaned.
+        clearTimeout(goneTimer);
+        goneTimer = setTimeout(function () { window.close(); }, 4000);
+        return;
+      }
+      clearTimeout(goneTimer);
       if (m.type === 'ping') { post({ type: 'pong' }); return; }   // the player asks if we are still here
       if (m.type === 'close') { window.close(); return; }
       if (m.type !== 'state') return;
@@ -1808,6 +1818,10 @@ const PLAYER_SCRIPT: &str = r#"<script>
       else if (m.type === 'bye' && ccMode === 'window') setMode('off');
     };
     if (windowExpected) bc.postMessage({ s: session, type: 'ping' });
+    // Leaving (closing the tab, navigating away, reloading): tell the
+    // window, which closes unless a player page in this tab comes back
+    // within a few seconds — a reload, or a move to another program.
+    addEventListener('pagehide', function () { bc.postMessage({ s: session, type: 'gone' }); });
   }
   function setMode(mode) {
     ccMode = mode;
