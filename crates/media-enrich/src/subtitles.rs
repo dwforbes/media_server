@@ -21,8 +21,12 @@ pub enum Outcome {
     /// Not a candidate (wrong format, no .srt, already subtitled, ...).
     Skipped(&'static str),
     Embedded,
+    /// The sidecar changed since it was embedded: the track was replaced.
+    Replaced,
+    /// Dry run: what a real run would do.
+    WouldEmbed,
+    WouldReplace,
 }
-
 
 fn is_mp4(path: &Path) -> bool {
     path.extension()
@@ -31,13 +35,15 @@ fn is_mp4(path: &Path) -> bool {
         .is_some_and(|e| e == "mp4" || e == "m4v")
 }
 
-/// Stream census of a file.
-#[derive(Debug, Default, Clone, Copy)]
+/// Stream census of a file, plus its ©too "encoding tool" text — where
+/// media_db::captions records which sidecar an embedded track came from.
+#[derive(Debug, Default, Clone)]
 struct Probe {
     video: usize,
     audio: usize,
     subtitle: usize,
     duration: f64,
+    encoder: String,
 }
 
 const TEXT_SUB_CODECS: &[&str] =
@@ -47,7 +53,7 @@ fn probe(ffprobe: &str, path: &Path) -> Result<Probe> {
     let output = Command::new(ffprobe)
         .args([
             "-v", "error",
-            "-show_entries", "stream=codec_name,codec_type:format=duration",
+            "-show_entries", "stream=codec_name,codec_type:format=duration:format_tags=encoder",
             "-of", "default=nw=1",
         ])
         .arg(path)
@@ -56,7 +62,10 @@ fn probe(ffprobe: &str, path: &Path) -> Result<Probe> {
     if !output.status.success() {
         bail!("ffprobe failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_probe(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_probe(text: &str) -> Probe {
     let mut p = Probe::default();
     // Per stream, codec_name precedes codec_type in the output.
     let mut last_codec = String::new();
@@ -76,13 +85,32 @@ fn probe(ffprobe: &str, path: &Path) -> Result<Probe> {
             }
         } else if let Some(d) = line.strip_prefix("duration=") {
             p.duration = d.parse().unwrap_or(0.0);
+        } else if let Some(tool) = line.strip_prefix("TAG:encoder=") {
+            p.encoder = tool.to_string();
         }
     }
-    Ok(p)
+    p
 }
 
-/// Embed `<stem>.srt` into an MP4 with no subtitle stream.
-pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<Outcome> {
+/// SHA-256, as hex, of the text that gets embedded — the decoded UTF-8,
+/// so a sidecar re-saved in another encoding (or merely touched) is not
+/// a change; only different captions are.
+pub fn sidecar_hash(text: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, text.as_bytes());
+    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Embed `<stem>.srt` into an MP4 with no text subtitle stream — or, when
+/// the file's captions came from that sidecar earlier (the ©too record,
+/// see media_db::captions) and the sidecar has since changed, replace
+/// them with it. Captions of unknown provenance are never touched, and
+/// neither is a file whose subtitle layout changed since the embedding.
+pub fn embed_if_applicable(
+    ffmpeg: &str,
+    ffprobe: &str,
+    media: &Path,
+    dry_run: bool,
+) -> Result<Outcome> {
     if !is_mp4(media) {
         return Ok(Outcome::Skipped("not mp4"));
     }
@@ -103,13 +131,26 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
     // Mux from a UTF-8 temp sidecar when conversion was needed; the
     // original .srt is never modified.
     let needs_conversion = srt_text.as_bytes() != srt_bytes.as_slice();
+    let hash = sidecar_hash(&srt_text);
 
     let before = probe(ffprobe, media)?;
-    if before.subtitle > 0 {
-        return Ok(Outcome::Skipped("already has text subtitles"));
-    }
     if before.video == 0 {
         return Ok(Outcome::Skipped("no video stream"));
+    }
+    let replace = if before.subtitle == 0 {
+        false
+    } else {
+        match media_db::captions::recorded_hash(&before.encoder) {
+            None => return Ok(Outcome::Skipped("already has text subtitles")),
+            Some(recorded) if recorded == hash => return Ok(Outcome::Skipped("captions up to date")),
+            Some(_) if before.subtitle != 1 => {
+                return Ok(Outcome::Skipped("subtitle layout changed since embedding; not replacing"))
+            }
+            Some(_) => true,
+        }
+    };
+    if dry_run {
+        return Ok(if replace { Outcome::WouldReplace } else { Outcome::WouldEmbed });
     }
 
     // Mux to a temp file beside the original (same filesystem => atomic
@@ -125,24 +166,31 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
     } else {
         srt.clone()
     };
-    let status = Command::new(ffmpeg)
-        .args(["-v", "error", "-nostdin", "-i"])
+    // A plain single-pass stream copy, exactly like the manual recipe.
+    // No +faststart: it rewrites the whole file a second time to move
+    // the moov atom, doubling I/O and leaving a window where the output
+    // can lack its moov entirely; range-request streaming doesn't need it.
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-v", "error", "-nostdin", "-i"])
         .arg(media)
         .arg("-i")
         .arg(&srt_input)
-        // A plain single-pass stream copy, exactly like the manual recipe.
-        // No +faststart: it rewrites the whole file a second time to move
-        // the moov atom, doubling I/O and leaving a window where the output
-        // can lack its moov entirely; range-request streaming doesn't need it.
-        .args([
-            "-map", "0:v", "-map", "0:a?", "-map", "0:s?", "-map", "1",
-            "-c", "copy", "-c:s", "mov_text",
-            "-metadata:s:s:0", "language=eng",
-            "-y",
-        ])
-        .arg(&temp)
-        .status()
-        .with_context(|| format!("running {ffmpeg}"))?;
+        .args(["-map", "0:v", "-map", "0:a?"]);
+    if !replace {
+        // First embedding: whatever (non-text) subtitle streams the file
+        // has come along. A replacement drops the one text track, ours.
+        cmd.args(["-map", "0:s?"]);
+    }
+    cmd.args([
+        "-map", "1",
+        "-c", "copy", "-c:s", "mov_text",
+        "-metadata:s:s:0", "language=eng",
+        "-metadata",
+    ])
+    .arg(format!("encoding_tool={}", media_db::captions::tag(&hash)))
+    .arg("-y")
+    .arg(&temp);
+    let status = cmd.status().with_context(|| format!("running {ffmpeg}"))?;
     if needs_conversion {
         let _ = std::fs::remove_file(&srt_input);
     }
@@ -156,8 +204,9 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
     }
 
     // Verify before replacing anything: every video/audio stream preserved,
-    // a subtitle present, duration unchanged. Data/attachment streams are
-    // ignored on both sides — faithful copies of odd containers carry them.
+    // a subtitle present, duration unchanged, and the record written.
+    // Data/attachment streams are ignored on both sides — faithful copies
+    // of odd containers carry them.
     let after = match probe(ffprobe, &temp) {
         Ok(after) => after,
         Err(err) => {
@@ -168,20 +217,22 @@ pub fn embed_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path) -> Result<
     let sane = after.subtitle >= 1
         && after.video == before.video
         && after.audio == before.audio
-        && (after.duration - before.duration).abs() <= 1.0 + before.duration * 0.01;
+        && (after.duration - before.duration).abs() <= 1.0 + before.duration * 0.01
+        && media_db::captions::recorded_hash(&after.encoder) == Some(hash.as_str());
     if !sane {
         let _ = std::fs::remove_file(&temp);
         bail!(
             "mux verification failed (video {}->{}, audio {}->{}, subs {}, \
-             duration {:.1}->{:.1}); original untouched",
+             duration {:.1}->{:.1}, record {}); original untouched",
             before.video, after.video, before.audio, after.audio, after.subtitle,
-            before.duration, after.duration
+            before.duration, after.duration,
+            if media_db::captions::recorded_hash(&after.encoder).is_some() { "ok" } else { "missing" }
         );
     }
 
     std::fs::rename(&temp, media)
         .with_context(|| format!("replacing {}", media.display()))?;
-    Ok(Outcome::Embedded)
+    Ok(if replace { Outcome::Replaced } else { Outcome::Embedded })
 }
 
 pub enum ExtractOutcome {
@@ -239,4 +290,30 @@ pub fn extract_if_missing(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: bo
     }
     std::fs::rename(&temp, &srt).with_context(|| format!("placing {}", srt.display()))?;
     Ok(ExtractOutcome::Extracted(track))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_reads_streams_and_the_record() {
+        let p = parse_probe(
+            "codec_name=h264\ncodec_type=video\ncodec_name=aac\ncodec_type=audio\n\
+             codec_name=mov_text\ncodec_type=subtitle\nduration=3.0\n\
+             TAG:title=Scene.Release\nTAG:encoder=media-enrich; captions=srt:sha256:ab\n",
+        );
+        assert_eq!((p.video, p.audio, p.subtitle), (1, 1, 1));
+        assert_eq!(p.encoder, "media-enrich; captions=srt:sha256:ab");
+        assert_eq!(media_db::captions::recorded_hash(&p.encoder), None, "too short to be ours");
+    }
+
+    #[test]
+    fn hash_is_of_the_decoded_text() {
+        let a = sidecar_hash("1\n00:00:01,000 --> 00:00:02,000\nhi\n");
+        assert_eq!(a.len(), 64);
+        assert_eq!(a, sidecar_hash("1\n00:00:01,000 --> 00:00:02,000\nhi\n"));
+        assert_ne!(a, sidecar_hash("1\n00:00:01,500 --> 00:00:02,000\nhi\n"));
+        assert!(media_db::captions::recorded_hash(&media_db::captions::tag(&a)) == Some(a.as_str()));
+    }
 }

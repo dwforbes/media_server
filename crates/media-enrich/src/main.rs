@@ -46,7 +46,8 @@ struct Args {
     /// strip_titles = true in the config's [enrich] section).
     #[arg(long)]
     strip_titles: bool,
-    /// Embed same-name .srt sidecars into subtitle-less MP4s (also enabled by
+    /// Embed same-name .srt sidecars into subtitle-less MP4s, and re-embed
+    /// when a sidecar embedded earlier has changed (also enabled by
     /// embed_subtitles = true in the config's [enrich] section).
     #[arg(long)]
     embed_subtitles: bool,
@@ -432,9 +433,10 @@ fn describe_plan(plan: &remux::Plan) -> String {
     out
 }
 
-/// Embed same-name .srt sidecars into MP4 files lacking a subtitle stream.
-fn embed_sidecar_subtitles(config: &ScannerConfig) {
-    let mut embedded = 0usize;
+/// Embed same-name .srt sidecars into MP4 files lacking a subtitle stream,
+/// and replace captions embedded earlier whose sidecar has since changed.
+fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool) {
+    let (mut embedded, mut replaced, mut planned) = (0usize, 0usize, 0usize);
     for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
         if !root.path.is_dir() {
             continue;
@@ -455,16 +457,30 @@ fn embed_sidecar_subtitles(config: &ScannerConfig) {
                 &config.enrich.ffmpeg_path,
                 &config.ffprobe_path,
                 path,
+                dry_run,
             ) {
                 Ok(subtitles::Outcome::Embedded) => {
                     println!("embedded subtitles into {}", path.display());
                     embedded += 1;
                 }
-                // "not mp4" and "already has subtitles" are the expected,
-                // common skips; the rest mean an .srt exists but something
-                // is off with it — surface those at the default log level.
+                Ok(subtitles::Outcome::Replaced) => {
+                    println!("replaced embedded captions from the updated sidecar in {}", path.display());
+                    replaced += 1;
+                }
+                Ok(subtitles::Outcome::WouldEmbed) => {
+                    println!("would embed subtitles into {}", path.display());
+                    planned += 1;
+                }
+                Ok(subtitles::Outcome::WouldReplace) => {
+                    println!("would replace embedded captions (sidecar changed) in {}", path.display());
+                    planned += 1;
+                }
+                // "not mp4", "already has subtitles" and "up to date" are
+                // the expected, common skips; the rest mean an .srt exists
+                // but something is off with it — surface those at the
+                // default log level.
                 Ok(subtitles::Outcome::Skipped(why)) => {
-                    if why == "not mp4" || why == "already has text subtitles" {
+                    if why == "not mp4" || why == "already has text subtitles" || why == "captions up to date" {
                         tracing::debug!("{}: subtitles not embedded ({why})", path.display());
                     } else {
                         println!("{}: subtitles not embedded ({why})", path.display());
@@ -474,8 +490,17 @@ fn embed_sidecar_subtitles(config: &ScannerConfig) {
             }
         }
     }
-    if embedded > 0 {
-        println!("subtitle tracks embedded: {embedded}");
+    if dry_run {
+        if planned > 0 {
+            println!("(dry run) MP4s whose captions would be embedded or replaced: {planned}");
+        }
+    } else {
+        if embedded > 0 {
+            println!("subtitle tracks embedded: {embedded}");
+        }
+        if replaced > 0 {
+            println!("embedded captions replaced from updated sidecars: {replaced}");
+        }
     }
 }
 
@@ -537,7 +562,7 @@ fn main() -> Result<()> {
             println!("(dry run: embedded-title stripping skipped)");
         }
         if do_subs {
-            println!("(dry run: subtitle embedding skipped)");
+            embed_sidecar_subtitles(&config, true);
         }
     } else {
         // Remux first so subtitle embedding sees the resulting MP4s, and
@@ -546,7 +571,7 @@ fn main() -> Result<()> {
             remux_mkv_files(&config, false);
         }
         if do_subs {
-            embed_sidecar_subtitles(&config);
+            embed_sidecar_subtitles(&config, false);
         }
         // After remux (the MP4 is what gets probed) and after embedding
         // (files that just gained a track from their sidecar keep it).

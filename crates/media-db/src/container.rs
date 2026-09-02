@@ -106,6 +106,7 @@ fn descend(file: &mut File, path: &[&[u8; 4]], start: u64, end: u64) -> Result<O
 }
 
 const TITLE_KIND: [u8; 4] = [0xA9, b'n', b'a', b'm']; // ©nam
+const TOOL_KIND: [u8; 4] = [0xA9, b't', b'o', b'o']; // ©too
 
 /// The current title text inside a ©nam atom, if readable.
 fn title_text(file: &mut File, title: &Atom) -> Result<Option<String>> {
@@ -402,6 +403,25 @@ fn matroska_title_text(file: &mut File, title: &EbmlElement) -> Result<String> {
     file.seek(SeekFrom::Start(title.data_offset()))?;
     file.read_exact(&mut text)?;
     Ok(String::from_utf8_lossy(&text).trim_end_matches('\0').to_string())
+}
+
+/// The ©too ("encoding tool") text of an MP4, if it has one — where
+/// media-enrich records caption provenance (see crate::captions). None
+/// for other containers and for MP4s without the atom.
+pub fn encoding_tool(path: &Path) -> Result<Option<String>> {
+    let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let len = file.metadata()?.len();
+    if !matches!(detect(&mut file)?, Container::Mp4) {
+        return Ok(None);
+    }
+    let Ok(Some((lo, hi))) = descend(&mut file, &[b"moov", b"udta", b"meta", b"ilst"], 0, len)
+    else {
+        return Ok(None);
+    };
+    let Some(atom) = atoms_in(&mut file, lo, hi)?.into_iter().find(|a| a.kind == TOOL_KIND) else {
+        return Ok(None);
+    };
+    title_text(&mut file, &atom)
 }
 
 /// Report the embedded title(s) of a file without modifying it.

@@ -214,7 +214,16 @@ pub fn plan(probe: &Probe, srt_sidecar: bool) -> std::result::Result<Plan, Strin
 /// audio (each AAC twin immediately before its original), subtitles.
 /// `srt` is the sidecar to mux in when the plan says embed_srt — a second
 /// input, mapped as the only subtitle track.
-pub fn ffmpeg_args(plan: &Plan, input: &Path, srt: Option<&Path>, output: &Path) -> Vec<std::ffi::OsString> {
+/// `captions_hash` is the sidecar's hash to record in the file when it is
+/// embedded (media_db::captions), so a later correction of the sidecar
+/// can be recognised and re-embedded.
+pub fn ffmpeg_args(
+    plan: &Plan,
+    input: &Path,
+    srt: Option<&Path>,
+    captions_hash: Option<&str>,
+    output: &Path,
+) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = Vec::new();
     let mut push = |a: &str| args.push(a.into());
     for a in ["-v", "error", "-nostdin", "-y", "-i"] {
@@ -273,6 +282,10 @@ pub fn ffmpeg_args(plan: &Plan, input: &Path, srt: Option<&Path>, output: &Path)
         // English, and an untagged track shows as "Unknown" in menus.
         push("-metadata:s:s:0".into());
         push("language=eng".into());
+        if let Some(hash) = captions_hash {
+            push("-metadata".into());
+            push(format!("encoding_tool={}", media_db::captions::tag(hash)));
+        }
     }
     for a in twin_opts {
         push(a);
@@ -351,6 +364,11 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
     let temp = temp_beside(dir, &stem, "remux-tmp", "mp4");
     // Mux from a UTF-8 temp copy when the sidecar needed decoding; the
     // original .srt is never modified.
+    let captions_hash = if plan.embed_srt {
+        srt_text.as_deref().map(crate::subtitles::sidecar_hash)
+    } else {
+        None
+    };
     let srt_input: Option<PathBuf> = match (plan.embed_srt, srt_text) {
         (true, Some(text)) if text.as_bytes() != srt_bytes.as_slice() => {
             let converted = temp.with_extension("srt");
@@ -362,7 +380,7 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
         (false, _) => None,
     };
     let status = Command::new(ffmpeg)
-        .args(ffmpeg_args(&plan, media, srt_input.as_deref(), &temp))
+        .args(ffmpeg_args(&plan, media, srt_input.as_deref(), captions_hash.as_deref(), &temp))
         .status()
         .with_context(|| format!("running {ffmpeg}"))?;
     if let Some(converted) = srt_input.filter(|p| *p != srt) {
@@ -458,7 +476,7 @@ mod tests {
         assert_eq!(plan.twins(), 1);
         assert!(!plan.hevc);
 
-        let args = ffmpeg_args(&plan, Path::new("in.mkv"), None, Path::new("out.mp4"));
+        let args = ffmpeg_args(&plan, Path::new("in.mkv"), None, None, Path::new("out.mp4"));
         let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let joined = args.join(" ");
         // Twin mapped before its original, then the aac track, then subs.
@@ -505,7 +523,8 @@ mod tests {
         assert!(plan.embed_srt);
         assert!(plan.notes.iter().any(|n| n.contains("bitmap subtitles dropped")), "{:?}", plan.notes);
 
-        let args = ffmpeg_args(&plan, Path::new("in.mkv"), Some(Path::new("in.srt")), Path::new("out.mp4"));
+        let hash = "cd".repeat(32);
+        let args = ffmpeg_args(&plan, Path::new("in.mkv"), Some(Path::new("in.srt")), Some(&hash), Path::new("out.mp4"));
         let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
         assert!(joined.contains("-i in.mkv -i in.srt"), "{joined}");
         // The bitmap track (0:2) is not mapped; the sidecar is the one sub.
@@ -513,6 +532,7 @@ mod tests {
         assert!(!joined.contains("-map 0:2"), "{joined}");
         assert!(joined.contains("-c:s mov_text"), "{joined}");
         assert!(joined.contains("-metadata:s:s:0 language=eng"), "{joined}");
+        assert!(joined.contains(&format!("-metadata encoding_tool=media-enrich; captions=srt:sha256:{hash}")), "{joined}");
     }
 
     #[test]
@@ -550,7 +570,7 @@ mod tests {
         };
         let plan = plan(&p, false).unwrap();
         assert!(plan.hevc);
-        let args = ffmpeg_args(&plan, Path::new("in.mkv"), None, Path::new("out.mp4"));
+        let args = ffmpeg_args(&plan, Path::new("in.mkv"), None, None, Path::new("out.mp4"));
         let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
         assert!(joined.contains("-tag:v hvc1"), "{joined}");
         assert!(joined.contains("-disposition:a:0 default"), "{joined}");

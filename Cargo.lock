@@ -994,6 +994,7 @@ dependencies = [
  "media-db",
  "regex",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "toml",

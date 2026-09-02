@@ -372,6 +372,23 @@ replacement), so it is conservative: mux to a temp file in the same directory, v
 the result with ffprobe (stream count, subtitle present, duration unchanged), then a
 single atomic rename. Opt-in; needs `ffmpeg` on the PATH (`ffmpeg_path` otherwise).
 
+The embedded track remembers where it came from. The file's `©too` ("encoding tool")
+atom — the one atom meant to name the tool that wrote the file, which ffprobe reports
+as `encoder` and `media-title` prints — records
+`media-enrich; captions=srt:sha256:<hash of the embedded text>`. Every later run hashes
+the sidecar and compares: replace or fix the `.srt`, and the next enrichment re-muxes
+the file with the new track in place of the old one, under the same temp-file, verify,
+rename discipline (`--dry-run` lists what would be replaced). A timestamp-only change
+(a touch, a copy, a re-save in another encoding) is not a change. Captions are replaced
+only when that record is present, the hashes differ and the file still has exactly that
+one text track; captions of unknown provenance, or a file whose subtitle layout has
+changed since, are left alone and mentioned in the output. Two consequences worth
+knowing: deleting the sidecar of such a file lets the extraction step regenerate it
+from the embedded track, whose text hashes differently, so the following run re-embeds
+it once to re-anchor the record; and a plain `ffmpeg -c copy` of the file elsewhere
+replaces the atom with ffmpeg's own name, after which the captions count as unknown
+provenance. The remux step records the same thing when it embeds a sidecar.
+
 ### Extracting embedded subtitles to sidecars
 
 The reverse direction runs by default: for every video that has **no** same-name

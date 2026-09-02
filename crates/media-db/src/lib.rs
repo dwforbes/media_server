@@ -1,3 +1,4 @@
+pub mod captions;
 pub mod container;
 pub mod mime;
 pub mod models;

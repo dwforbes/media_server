@@ -47,6 +47,17 @@ fn show(path: &Path) -> Result<()> {
         // enumerate them without a demux.
         SubtitleStatus::Unsupported => {}
     }
+    // Captions media-enrich muxed in from the .srt sidecar carry a record
+    // of it; a changed sidecar makes the next enrichment replace them.
+    if let Ok(Some(tool)) = container::encoding_tool(path) {
+        if let Some(hash) = media_db::captions::recorded_hash(&tool) {
+            println!(
+                "{}: captions embedded from the .srt sidecar (sha256 {}…)",
+                path.display(),
+                &hash[..12]
+            );
+        }
+    }
     Ok(())
 }
 
