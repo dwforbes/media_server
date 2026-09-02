@@ -49,6 +49,8 @@ div.videowrap video{display:block;width:100%;max-height:85vh;background:#000}\
 img.art{float:right;max-width:220px;margin:0 0 1em 1.5em;border-radius:6px}\
 table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
 p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
+html a.home,html a.home:link,html a.home:visited,html a.home:hover,html a.home:active{color:inherit;text-decoration:none;font-size:1.15em;line-height:1}\
+html a.home:hover{opacity:.65}\
 p.controls input[type=checkbox]{vertical-align:middle;margin:0 .3em 0 0;position:relative;top:-.08em}\
 @media (max-width:40em){\
 body{margin:1em auto;padding:0 1rem 1.5rem}\
@@ -783,7 +785,7 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
     let head = page_head("Search", "");
     let html = format!(
         "{head}<body>\
-         <p><a href=\"/\">⌂ top</a></p><h1>Search</h1>\
+         <p><a href=\"/\" class=\"home\" title=\"Home\" aria-label=\"Home\">⌂</a></p><h1>Search</h1>\
          <p><a href=\"/browse/{}\">← Back to {}</a></p>{}\
          <p>{summary}</p>\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{PAGE_CLOSE}",
@@ -936,7 +938,7 @@ async fn browse_page(
     let head = page_head(&xml_escape(&title), &og);
     let html = format!(
         "{head}<body>\
-         <p><a href=\"/\">⌂ top</a></p>{art}<h1>{}</h1>{description}\
+         <p><a href=\"/\" class=\"home\" title=\"Home\" aria-label=\"Home\">⌂</a></p>{art}<h1>{}</h1>{description}\
          <div style=\"clear:both\"></div>{back_link}{search_box}\
          <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
         xml_escape(&title)
@@ -1147,9 +1149,9 @@ async fn extract_subs(state: &AppState, id: i64, path: &std::path::Path, cache: 
 /// crossing a dead zone that would dismiss it.
 const PLAYER_STYLE: &str = r#"<style>
 #heading { position: relative; }
-/* The way home, small and to the left of the title — the same weight and
-   size as the "details" link on its right. */
-#heading a.top { font-size: 1rem; font-weight: normal; margin-right: .9em; white-space: nowrap; }
+/* The way home, to the left of the title: normal weight, a little
+   quieter than the title, in the text colour rather than a link's. */
+#heading a.home { font-weight: normal; color: #aaa; margin-right: .7em; vertical-align: .05em; }
 .infowrap { display: inline; font-size: 1rem; font-weight: normal;
   margin-left: 1em; padding-bottom: 1em; }
 .infowrap .card { display: none; position: absolute; left: 0; top: 100%; z-index: 10;
@@ -2336,7 +2338,7 @@ async fn play_page(
     let html = format!(
         "{head}<body class=\"player\">\
          <h2 id=\"heading\" data-swap style=\"margin-bottom:.1em\">\
-         <a href=\"/\" class=\"top\">⌂ top</a>{heading}\
+         <a href=\"/\" class=\"home\" title=\"Home\" aria-label=\"Home\">⌂</a>{heading}\
          <span class=\"infowrap\"><a href=\"/item/{id}\">details</a>\
          <span class=\"card\">{card}</span></span></h2>{context_line}\
          <div class=\"videowrap\">\
@@ -2748,14 +2750,14 @@ async fn item_page(
         &state.friendly_name,
     );
     let head = page_head(&xml_escape(&tab_title(&detail)), &format!("{PLAYER_STYLE}{og}"));
-    // Same "⌂ top" as the browse pages, plus a jump to the item's section.
+    // Same home icon as the browse pages, plus a jump to the item's section.
     let top_nav = {
         let (section_id, section_name) = match detail.kind {
             media_db::MediaKind::Movies => ("mv", "Movies"),
             media_db::MediaKind::Tv => ("tv", "TV Shows"),
             media_db::MediaKind::Music => ("mu", "Music"),
         };
-        format!("<a href=\"/\">⌂ top</a> · <a href=\"/browse/{section_id}\">{section_name}</a>")
+        format!("<a href=\"/\" class=\"home\" title=\"Home\" aria-label=\"Home\">⌂</a> · <a href=\"/browse/{section_id}\">{section_name}</a>")
     };
     let html = if detail.kind == media_db::MediaKind::Music {
         // The player lives on the detail page itself, and the next track
