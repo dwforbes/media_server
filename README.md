@@ -360,6 +360,27 @@ is set in the scanner config's `[enrich]` section (or with `media-enrich
 --strip-titles`), so newly added releases are cleaned without a manual step. It is
 opt-in because it is the one step that writes into media files rather than beside them.
 
+### HEVC on Apple devices: hev1 vs hvc1
+
+Safari, QuickTime and iOS decode HEVC in MP4 only from `hvc1` sample entries — the
+variant whose parameter sets live in the header's `hvcC` box. `hev1`, which permits
+in-band parameter sets, is refused outright, whatever the stream actually holds; VLC,
+Windows and ffmpeg play both, which is why the failure looks random until you probe:
+`ffprobe` prints the tag beside the codec (`hevc (Main 10) (hev1 / …)`). ffmpeg's
+default for HEVC in MP4 is `hev1`, and most x265 MP4 rips carry it. Since `hvcC` nearly
+always carries the parameter sets anyway, `hev1` is `hvc1` in all but name — and the
+name is four bytes in the header. So:
+
+- `media-title file.mp4` reports the tag; `media-title --hvc1 file.mp4` retags it in
+  place, after checking that `hvcC` lists the VPS, SPS and PPS. A file whose header
+  lacks them (rare) is reported as needing a remux: `ffmpeg -i in.mp4 -c copy -tag:v
+  hvc1 out.mp4`.
+- Enrichment does the same for every video under the movie and TV roots on each run
+  (`fix_hevc_tags = true` by default; `--no-fix-hevc-tags` or `fix_hevc_tags = false`
+  to leave files alone), reporting what it retagged and what needs a remux; the dry run
+  lists what it would do. The MKV remux and the subtitle embed steps write `hvc1`
+  themselves, so nothing they produce needs it.
+
 ### Embedding sidecar subtitles
 
 Some MP4 releases ship subtitles only as a same-name `.srt` beside the file, which

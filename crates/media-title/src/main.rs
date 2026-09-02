@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use media_db::container::{self, SubtitleStatus, TitleStatus};
+use media_db::container::{self, HevcTag, SubtitleStatus, TitleStatus};
 
 #[derive(Parser)]
 #[command(
@@ -23,6 +23,11 @@ struct Args {
     /// Remove embedded subtitle tracks (MP4 only — Matroska needs a remux).
     #[arg(long)]
     strip_subs: bool,
+    /// Retag hev1 HEVC video as hvc1 in place (MP4 only), which Safari,
+    /// QuickTime and iOS require; possible whenever the header already
+    /// carries the parameter sets, which is nearly always.
+    #[arg(long)]
+    hvc1: bool,
 }
 
 fn show(path: &Path) -> Result<()> {
@@ -47,6 +52,19 @@ fn show(path: &Path) -> Result<()> {
         // enumerate them without a demux.
         SubtitleStatus::Unsupported => {}
     }
+    match container::hevc_tag(path)? {
+        HevcTag::None => {}
+        HevcTag::Hvc1 => println!("{}: HEVC tagged hvc1 (plays on Apple devices)", path.display()),
+        HevcTag::Hev1Fixable => println!(
+            "{}: HEVC tagged hev1 — Safari, QuickTime and iOS refuse it; --hvc1 retags it in place",
+            path.display()
+        ),
+        HevcTag::Hev1InBandOnly => println!(
+            "{}: HEVC tagged hev1 with in-band parameter sets only — needs a remux \
+             (ffmpeg -i in.mp4 -c copy -tag:v hvc1 out.mp4)",
+            path.display()
+        ),
+    }
     // Captions media-enrich muxed in from the .srt sidecar carry a record
     // of it; a changed sidecar makes the next enrichment replace them.
     if let Ok(Some(tool)) = container::encoding_tool(path) {
@@ -62,6 +80,16 @@ fn show(path: &Path) -> Result<()> {
 }
 
 fn process(path: &Path, args: &Args) -> Result<()> {
+    if args.hvc1 {
+        match container::retag_hvc1(path)? {
+            HevcTag::Hvc1 => println!("{}: HEVC now tagged hvc1", path.display()),
+            HevcTag::Hev1InBandOnly => println!(
+                "{}: not retagged — the header carries no parameter sets; remux instead",
+                path.display()
+            ),
+            _ => println!("{}: no HEVC video to retag", path.display()),
+        }
+    }
     if args.strip {
         let removed = container::strip(path)?;
         if removed.is_empty() {

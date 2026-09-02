@@ -61,6 +61,11 @@ struct Args {
     /// by default; also disabled by extract_subtitles = false in [enrich]).
     #[arg(long)]
     no_extract_subtitles: bool,
+    /// Leave hev1-tagged HEVC MP4s alone (on by default; also disabled by
+    /// fix_hevc_tags = false in [enrich]). Normally they are retagged hvc1
+    /// in place, which is what Safari, QuickTime and iOS need to play them.
+    #[arg(long)]
+    no_fix_hevc_tags: bool,
     /// With subtitle embedding: an MP4 whose single caption track carries no
     /// record and says something other than its .srt sidecar normally keeps
     /// its track; this says the sidecar wins and re-embeds it. A one-off for
@@ -145,6 +150,11 @@ struct EnrichSection {
     /// sidecar; never touches media files. On by default.
     #[serde(default = "default_true")]
     extract_subtitles: bool,
+    /// Retag hev1 HEVC video as hvc1 in place (a four-byte header patch,
+    /// only when the header already carries the parameter sets), which
+    /// Apple's players require. On by default.
+    #[serde(default = "default_true")]
+    fix_hevc_tags: bool,
     #[serde(default = "default_ffmpeg")]
     ffmpeg_path: String,
     #[serde(flatten)]
@@ -275,6 +285,62 @@ fn strip_embedded_titles(config: &ScannerConfig) {
     }
     if stripped > 0 {
         println!("embedded titles stripped: {stripped}");
+    }
+}
+
+/// Retag hev1 HEVC MP4s as hvc1 in place so Apple's players accept them.
+/// Header-only (moov parsed, four bytes written), so every video is
+/// checked each run, like title stripping. Dry run: report only.
+fn fix_hevc_tags(config: &ScannerConfig, dry_run: bool) {
+    use media_db::container::{self, HevcTag};
+    let (mut fixed, mut planned, mut stuck) = (0usize, 0usize, 0usize);
+    for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
+        if !root.path.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&root.path)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .flatten()
+            .filter(|e| e.file_type().is_file() && is_video(e.path()))
+        {
+            let path = entry.path();
+            match container::hevc_tag(path) {
+                Ok(HevcTag::Hev1Fixable) if dry_run => {
+                    println!("would retag HEVC hev1 as hvc1 in {}", path.display());
+                    planned += 1;
+                }
+                Ok(HevcTag::Hev1Fixable) => match container::retag_hvc1(path) {
+                    Ok(HevcTag::Hvc1) => {
+                        println!("retagged HEVC hev1 as hvc1 (Apple-playable) in {}", path.display());
+                        fixed += 1;
+                    }
+                    Ok(_) => {}
+                    Err(err) => eprintln!("{}: could not retag: {err:#}", path.display()),
+                },
+                Ok(HevcTag::Hev1InBandOnly) => {
+                    println!(
+                        "{}: HEVC hev1 with in-band parameter sets only; Apple players will refuse it \
+                         and only a remux (ffmpeg -c copy -tag:v hvc1) can fix it",
+                        path.display()
+                    );
+                    stuck += 1;
+                }
+                Ok(_) => {}
+                Err(err) => tracing::debug!("{}: HEVC tag check failed: {err:#}", path.display()),
+            }
+        }
+    }
+    if dry_run {
+        if planned > 0 {
+            println!("(dry run) HEVC files that would be retagged hvc1: {planned}");
+        }
+    } else if fixed > 0 {
+        println!("HEVC files retagged hvc1: {fixed}");
+    }
+    if stuck > 0 {
+        println!("HEVC files needing a remux for Apple playback: {stuck}");
     }
 }
 
@@ -634,6 +700,7 @@ fn main() -> Result<()> {
     let do_subs = args.embed_subtitles || config.enrich.embed_subtitles;
     let do_remux = args.remux_mkv || config.enrich.remux_mkv;
     let do_extract = !args.no_extract_subtitles && config.enrich.extract_subtitles;
+    let do_hvc1 = !args.no_fix_hevc_tags && config.enrich.fix_hevc_tags;
     if args.dry_run {
         // Remux and extraction planning are probe-only, so the dry run can
         // show them in full.
@@ -642,6 +709,9 @@ fn main() -> Result<()> {
         }
         if do_extract {
             extract_embedded_subtitles(&config, true, &mut captions);
+        }
+        if do_hvc1 {
+            fix_hevc_tags(&config, true);
         }
         if do_strip {
             println!("(dry run: embedded-title stripping skipped)");
@@ -662,6 +732,11 @@ fn main() -> Result<()> {
         // (files that just gained a track from their sidecar keep it).
         if do_extract {
             extract_embedded_subtitles(&config, false, &mut captions);
+        }
+        // After the muxing steps (they write hvc1 themselves now): what is
+        // left is what arrived hev1 and was never remuxed.
+        if do_hvc1 {
+            fix_hevc_tags(&config, false);
         }
         if do_strip {
             strip_embedded_titles(&config);

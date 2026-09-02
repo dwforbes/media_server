@@ -52,6 +52,8 @@ struct Probe {
     subtitle: usize,
     /// ffmpeg's `0:s:N` of the first text subtitle stream.
     first_text_ordinal: Option<usize>,
+    /// The video is HEVC: the mux must say `hvc1`, or Apple players refuse it.
+    hevc_video: bool,
     duration: f64,
     encoder: String,
 }
@@ -85,7 +87,10 @@ fn parse_probe(text: &str) -> Probe {
             last_codec = name.to_string();
         } else if let Some(kind) = line.strip_prefix("codec_type=") {
             match kind {
-                "video" => p.video += 1,
+                "video" => {
+                    p.video += 1;
+                    p.hevc_video |= last_codec == "hevc";
+                }
                 "audio" => p.audio += 1,
                 "subtitle" => {
                     // Only text subtitles count: a bitmap-only (PGS/VobSub)
@@ -285,6 +290,12 @@ pub fn embed_if_applicable(
         // has come along. A replacement drops the one text track.
         cmd.args(["-map", "0:s?"]);
     }
+    if before.hevc_video {
+        // ffmpeg's default hev1 tag is refused by Safari, QuickTime and
+        // iOS (same rule the remux step applies); a stream copy keeps
+        // hvc1 but never upgrades hev1 on its own.
+        cmd.args(["-tag:v", "hvc1"]);
+    }
     cmd.args([
         "-map", "1",
         "-c", "copy", "-c:s", "mov_text",
@@ -435,6 +446,8 @@ mod tests {
              codec_name=mov_text\ncodec_type=subtitle\nduration=3.0\n",
         );
         assert_eq!((p.subtitle, p.first_text_ordinal), (1, Some(1)));
+        assert!(!p.hevc_video);
+        assert!(parse_probe("codec_name=hevc\ncodec_type=video\n").hevc_video);
     }
 
     #[test]

@@ -329,6 +329,176 @@ fn mp4_subtitle_traks(file: &mut File, len: u64) -> Result<Vec<(Atom, String)>> 
     Ok(out)
 }
 
+/// How an MP4's HEVC video is labelled. Apple's players (Safari,
+/// QuickTime, iOS) decode HEVC only from `hvc1` sample entries, whose
+/// parameter sets live in the header's hvcC box; `hev1` — ffmpeg's
+/// default, and what most x265 MP4 rips carry — permits in-band
+/// parameter sets and is refused outright, whatever the stream holds.
+/// When the hvcC box carries the parameter sets anyway (it nearly always
+/// does), `hev1` is `hvc1` in all but name, and the name is four bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HevcTag {
+    /// Not an MP4, or no HEVC video in it.
+    None,
+    Hvc1,
+    /// `hev1` whose hvcC lists VPS, SPS and PPS: retaggable in place.
+    Hev1Fixable,
+    /// `hev1` whose hvcC lacks parameter sets: only a remux can fix it.
+    Hev1InBandOnly,
+}
+
+/// The HEVC sample entries (`hev1`/`hvc1` boxes inside each video trak's
+/// stsd), whatever their tag.
+fn hevc_sample_entries(file: &mut File, len: u64) -> Result<Vec<Atom>> {
+    let Some((mlo, mhi)) = descend(file, &[b"moov"], 0, len)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for trak in atoms_in(file, mlo, mhi)?.into_iter().filter(|a| &a.kind == b"trak") {
+        let (tlo, thi) = trak.body();
+        let Some((slo, shi)) = descend(file, &[b"mdia", b"minf", b"stbl", b"stsd"], tlo, thi)? else {
+            continue;
+        };
+        // stsd is a FullBox: version/flags and entry_count precede the
+        // sample entries, which are boxes of their own.
+        if shi < slo + 8 {
+            continue;
+        }
+        for entry in atoms_in(file, slo + 8, shi)? {
+            if &entry.kind == b"hev1" || &entry.kind == b"hvc1" {
+                out.push(entry);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a sample entry's hvcC box lists VPS, SPS and PPS — the
+/// parameter sets `hvc1` promises to carry out of band.
+fn hvcc_has_parameter_sets(file: &mut File, entry: &Atom) -> Result<bool> {
+    let (lo, hi) = entry.body();
+    // VisualSampleEntry: 78 bytes of fixed fields before the child boxes.
+    let children_lo = lo + 78;
+    if hi <= children_lo {
+        return Ok(false);
+    }
+    let Some(hvcc) = atoms_in(file, children_lo, hi)?.into_iter().find(|a| &a.kind == b"hvcC")
+    else {
+        return Ok(false);
+    };
+    let (clo, chi) = hvcc.body();
+    // HEVCDecoderConfigurationRecord: 22 fixed bytes, numOfArrays, then
+    // per array a type byte (low 6 bits: NAL unit type), a 16-bit count
+    // and length-prefixed NAL units. Bounded: a record is a few hundred
+    // bytes, never more than this.
+    let size = (chi - clo).min(64 * 1024) as usize;
+    if size < 23 {
+        return Ok(false);
+    }
+    let mut buf = vec![0u8; size];
+    file.seek(SeekFrom::Start(clo))?;
+    file.read_exact(&mut buf)?;
+    let (mut vps, mut sps, mut pps) = (false, false, false);
+    let mut pos = 23usize;
+    for _ in 0..buf[22] as usize {
+        if pos + 3 > buf.len() {
+            return Ok(false);
+        }
+        let nal_type = buf[pos] & 0x3F;
+        let count = u16::from_be_bytes([buf[pos + 1], buf[pos + 2]]) as usize;
+        pos += 3;
+        let mut any = false;
+        for _ in 0..count {
+            if pos + 2 > buf.len() {
+                return Ok(false);
+            }
+            let n = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
+            pos += 2;
+            if pos + n > buf.len() {
+                return Ok(false);
+            }
+            any |= n > 0;
+            pos += n;
+        }
+        if any {
+            match nal_type {
+                32 => vps = true,
+                33 => sps = true,
+                34 => pps = true,
+                _ => {}
+            }
+        }
+    }
+    Ok(vps && sps && pps)
+}
+
+fn hevc_tag_of(file: &mut File, len: u64) -> Result<(HevcTag, Vec<Atom>)> {
+    let entries = hevc_sample_entries(file, len)?;
+    if entries.is_empty() {
+        return Ok((HevcTag::None, entries));
+    }
+    let mut fixable = Vec::new();
+    let mut worst = HevcTag::Hvc1;
+    for entry in &entries {
+        if &entry.kind == b"hvc1" {
+            continue;
+        }
+        if hvcc_has_parameter_sets(file, entry)? {
+            fixable.push(*entry);
+            if worst == HevcTag::Hvc1 {
+                worst = HevcTag::Hev1Fixable;
+            }
+        } else {
+            worst = HevcTag::Hev1InBandOnly;
+        }
+    }
+    Ok((worst, fixable))
+}
+
+/// How the file's HEVC video is tagged, without modifying it.
+pub fn hevc_tag(path: &Path) -> Result<HevcTag> {
+    let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let len = file.metadata()?.len();
+    if !matches!(detect(&mut file)?, Container::Mp4) {
+        return Ok(HevcTag::None);
+    }
+    match hevc_tag_of(&mut file, len) {
+        Ok((tag, _)) => Ok(tag),
+        Err(_) => Ok(HevcTag::None),
+    }
+}
+
+/// Retag `hev1` sample entries as `hvc1` in place — the four bytes of the
+/// entry's type — when every one of them carries its parameter sets in
+/// hvcC. Returns the state afterwards: Hvc1 when patched (or already so),
+/// Hev1InBandOnly when left alone because one entry cannot honestly be
+/// called hvc1.
+pub fn retag_hvc1(path: &Path) -> Result<HevcTag> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("opening {} for writing", path.display()))?;
+    let len = file.metadata()?.len();
+    if !matches!(detect(&mut file)?, Container::Mp4) {
+        return Ok(HevcTag::None);
+    }
+    let (tag, fixable) = match hevc_tag_of(&mut file, len) {
+        Ok(x) => x,
+        Err(_) => return Ok(HevcTag::None),
+    };
+    if tag != HevcTag::Hev1Fixable {
+        return Ok(tag);
+    }
+    for entry in fixable {
+        // The type field sits 4 bytes into the box (after the 32-bit size).
+        file.seek(SeekFrom::Start(entry.offset + 4))?;
+        file.write_all(b"hvc1")?;
+    }
+    file.sync_all()?;
+    Ok(HevcTag::Hvc1)
+}
+
 /// Report subtitle tracks without modifying the file.
 pub fn subtitle_tracks(path: &Path) -> Result<SubtitleStatus> {
     let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
