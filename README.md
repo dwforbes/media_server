@@ -402,6 +402,21 @@ but never write it, and a file that fails is not recorded, so it is retried. A s
 the extraction step regenerates is recorded as it stands, so it is not re-embedded
 merely for having been regenerated — only if you then change it.
 
+**An existing library, and files embedded before records existed.** The first run
+after this change looks at every pair once (the cost every run had before) and then
+settles into the memory. A track with no record — embedded by an earlier version of
+this tool, or by anything else — is not re-injected: when the file has exactly one text
+track, the run reads that track and compares it with the sidecar cue by cue (timings
+and words; indices, styling tags and line breaks do not count). If they match, the
+sidecar is *adopted* as the track's source — remembered in the memory, the file
+untouched — and from then on a corrected sidecar is embedded like any other; the run
+reports these as "existing caption track matches the sidecar". If they differ, the
+track is kept and the file is listed once as "they differ from the sidecar": either the
+sidecar was corrected before this change existed, or the track came from somewhere
+else. For a library where you know the sidecars are the truth, one manual
+`media-enrich --config … --adopt-sidecar-captions` embeds those sidecars too; each file
+gets the record and needs no further special treatment.
+
 ### Extracting embedded subtitles to sidecars
 
 The reverse direction runs by default: for every video that has **no** same-name

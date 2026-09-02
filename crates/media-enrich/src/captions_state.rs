@@ -7,6 +7,13 @@
 //! — a corrected sidecar, a remux, a title strip — moves a stamp and earns
 //! a fresh look. Dry runs read the memory but never write it, and a run
 //! that fails on a file records nothing for it, so it is retried.
+//!
+//! The memory also carries a `canonical` hash: the sidecar text known to
+//! be what the video's track says. For files this tool embedded it
+//! mirrors the record inside the file; for files embedded before that
+//! record existed, or whose sidecar was extracted from the track, it is
+//! the only provenance there is — and what lets a later correction of
+//! such a sidecar be recognised and embedded.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -42,10 +49,13 @@ impl Stamp {
 struct Entry {
     media: Stamp,
     srt: Stamp,
-    /// What the last look concluded ("embedded", "replaced", "extracted",
-    /// or the skip reason) — for a human reading the file; the decision
-    /// to skip rests on the stamps alone.
+    /// What the last look concluded ("embedded", "replaced", "adopted",
+    /// "extracted", or the skip reason) — for a human reading the file;
+    /// the decision to skip rests on the stamps alone.
     note: String,
+    /// SHA-256 of the sidecar text the video's track is known to carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    canonical: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -89,12 +99,29 @@ impl CaptionsState {
             .is_some_and(|e| e.media == media_stamp && e.srt == srt_stamp)
     }
 
-    pub fn record(&mut self, media: &Path, media_stamp: Stamp, srt_stamp: Stamp, note: &str) {
+    /// `canonical` None keeps whatever hash was remembered before: a skip
+    /// does not unlearn provenance.
+    pub fn record(
+        &mut self,
+        media: &Path,
+        media_stamp: Stamp,
+        srt_stamp: Stamp,
+        note: &str,
+        canonical: Option<&str>,
+    ) {
         let k = key(media);
         self.seen.insert(k.clone());
-        let entry = Entry { media: media_stamp, srt: srt_stamp, note: note.to_string() };
+        let canonical = canonical
+            .map(str::to_string)
+            .or_else(|| self.entries.get(&k).and_then(|e| e.canonical.clone()));
+        let entry = Entry { media: media_stamp, srt: srt_stamp, note: note.to_string(), canonical };
         self.entries.insert(k, entry);
         self.dirty = true;
+    }
+
+    /// The sidecar hash the video's track is known to carry, if remembered.
+    pub fn canonical_hash(&self, media: &Path) -> Option<String> {
+        self.entries.get(&key(media)).and_then(|e| e.canonical.clone())
     }
 
     /// Drop entries under `roots` that this run did not encounter: the
@@ -149,11 +176,14 @@ mod tests {
 
         let mut state = CaptionsState::load(&dir);
         assert!(!state.unchanged(&movie, ms, ss), "nothing remembered yet");
-        state.record(&movie, ms, ss, "embedded");
+        state.record(&movie, ms, ss, "embedded", Some("abc"));
         state.save().unwrap();
 
         let mut again = CaptionsState::load(&dir);
         assert!(again.unchanged(&movie, ms, ss));
+        assert_eq!(again.canonical_hash(&movie).as_deref(), Some("abc"));
+        again.record(&movie, ms, ss, "captions up to date", None);
+        assert_eq!(again.canonical_hash(&movie).as_deref(), Some("abc"), "a skip keeps provenance");
         let moved = Stamp { size: ss.size + 1, ..ss };
         assert!(!again.unchanged(&movie, ms, moved), "a changed sidecar is a change");
 

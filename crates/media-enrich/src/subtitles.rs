@@ -20,9 +20,16 @@ use media_db::textenc::decode_subtitle_text;
 pub enum Outcome {
     /// Not a candidate (wrong format, no .srt, already subtitled, ...).
     Skipped(&'static str),
-    Embedded,
+    /// The sidecar (its hash) is now the file's track, with the record.
+    Embedded(String),
     /// The sidecar changed since it was embedded: the track was replaced.
-    Replaced,
+    Replaced(String),
+    /// The track already says what the sidecar says.
+    UpToDate(String),
+    /// A track without a record — embedded before records existed, or by
+    /// something else — says the same as the sidecar: the sidecar is
+    /// taken as canonical from here on, the file untouched.
+    Adopted(String),
     /// Dry run: what a real run would do.
     WouldEmbed,
     WouldReplace,
@@ -41,7 +48,10 @@ fn is_mp4(path: &Path) -> bool {
 struct Probe {
     video: usize,
     audio: usize,
+    /// Text subtitle streams.
     subtitle: usize,
+    /// ffmpeg's `0:s:N` of the first text subtitle stream.
+    first_text_ordinal: Option<usize>,
     duration: f64,
     encoder: String,
 }
@@ -69,6 +79,7 @@ fn parse_probe(text: &str) -> Probe {
     let mut p = Probe::default();
     // Per stream, codec_name precedes codec_type in the output.
     let mut last_codec = String::new();
+    let mut sub_streams = 0usize;
     for line in text.lines() {
         if let Some(name) = line.strip_prefix("codec_name=") {
             last_codec = name.to_string();
@@ -76,10 +87,14 @@ fn parse_probe(text: &str) -> Probe {
             match kind {
                 "video" => p.video += 1,
                 "audio" => p.audio += 1,
-                // Only text subtitles count: a bitmap-only (PGS/VobSub)
-                // file still deserves the .srt embedded.
-                "subtitle" if TEXT_SUB_CODECS.contains(&last_codec.as_str()) => {
-                    p.subtitle += 1
+                "subtitle" => {
+                    // Only text subtitles count: a bitmap-only (PGS/VobSub)
+                    // file still deserves the .srt embedded.
+                    if TEXT_SUB_CODECS.contains(&last_codec.as_str()) {
+                        p.subtitle += 1;
+                        p.first_text_ordinal.get_or_insert(sub_streams);
+                    }
+                    sub_streams += 1;
                 }
                 _ => {}
             }
@@ -100,16 +115,85 @@ pub fn sidecar_hash(text: &str) -> String {
     digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A subtitle track as SRT text, via ffmpeg.
+fn track_text(ffmpeg: &str, media: &Path, ordinal: usize) -> Result<String> {
+    let output = Command::new(ffmpeg)
+        .args(["-v", "error", "-nostdin", "-i"])
+        .arg(media)
+        .args(["-map", &format!("0:s:{ordinal}"), "-f", "srt", "-"])
+        .output()
+        .with_context(|| format!("running {ffmpeg}"))?;
+    if !output.status.success() {
+        bail!("ffmpeg could not read the subtitle track: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Whether two SRT texts carry the same captions: the same cues at the
+/// same times with the same words. Indices, styling tags, line breaks
+/// within a cue and surrounding whitespace do not count — an srt →
+/// mov_text → srt round trip changes exactly those.
+pub fn cues_match(a: &str, b: &str) -> bool {
+    normalized_cues(a) == normalized_cues(b)
+}
+
+fn normalized_cues(text: &str) -> Vec<(i64, i64, String)> {
+    use std::sync::OnceLock;
+    static TAGS: OnceLock<regex::Regex> = OnceLock::new();
+    let tags = TAGS.get_or_init(|| regex::Regex::new(r"<[^>]*>|\{\\[^}]*\}").unwrap());
+    let mut cues = Vec::new();
+    let mut lines = text.lines().map(|l| l.trim()).peekable();
+    while let Some(line) = lines.next() {
+        let Some((start, end)) = line.split_once("-->") else { continue };
+        let (Some(start), Some(end)) = (parse_timestamp(start), parse_timestamp(end)) else {
+            continue;
+        };
+        let mut words: Vec<String> = Vec::new();
+        while let Some(next) = lines.peek() {
+            if next.is_empty() {
+                break;
+            }
+            let clean = tags.replace_all(next, " ");
+            words.extend(clean.split_whitespace().map(str::to_string));
+            lines.next();
+        }
+        if !words.is_empty() {
+            cues.push((start, end, words.join(" ")));
+        }
+    }
+    cues
+}
+
+/// "HH:MM:SS,mmm" / "HH:MM:SS.mmm" / "MM:SS,mmm" (anything after a space,
+/// such as SRT position hints, ignored) as milliseconds.
+fn parse_timestamp(s: &str) -> Option<i64> {
+    let s = s.trim().split_whitespace().next()?;
+    let (clock, millis) = s.split_once([',', '.'])?;
+    let mut ms: i64 = millis.parse::<String>().ok()?.chars().take(3).collect::<String>().parse().ok()?;
+    if millis.len() < 3 {
+        ms *= 10i64.pow((3 - millis.len().min(3)) as u32);
+    }
+    let mut total = 0i64;
+    for part in clock.split(':') {
+        total = total * 60 + part.parse::<i64>().ok()?;
+    }
+    Some(total * 1000 + ms)
+}
+
 /// Embed `<stem>.srt` into an MP4 with no text subtitle stream — or, when
-/// the file's captions came from that sidecar earlier (the ©too record,
-/// see media_db::captions) and the sidecar has since changed, replace
-/// them with it. Captions of unknown provenance are never touched, and
-/// neither is a file whose subtitle layout changed since the embedding.
+/// the file's captions are known to come from that sidecar and it has
+/// since changed, replace them with it. "Known" is the record in the file
+/// (media_db::captions), else `known`, the hash the caller remembers for
+/// it (captions_state). A single track with neither is compared to the
+/// sidecar cue by cue: a match adopts the sidecar as canonical; a
+/// mismatch is left alone unless `adopt_all` says the sidecar wins.
 pub fn embed_if_applicable(
     ffmpeg: &str,
     ffprobe: &str,
     media: &Path,
     dry_run: bool,
+    known: Option<&str>,
+    adopt_all: bool,
 ) -> Result<Outcome> {
     if !is_mp4(media) {
         return Ok(Outcome::Skipped("not mp4"));
@@ -140,13 +224,33 @@ pub fn embed_if_applicable(
     let replace = if before.subtitle == 0 {
         false
     } else {
-        match media_db::captions::recorded_hash(&before.encoder) {
-            None => return Ok(Outcome::Skipped("already has text subtitles")),
-            Some(recorded) if recorded == hash => return Ok(Outcome::Skipped("captions up to date")),
-            Some(_) if before.subtitle != 1 => {
-                return Ok(Outcome::Skipped("subtitle layout changed since embedding; not replacing"))
+        let recorded = media_db::captions::recorded_hash(&before.encoder).or(known);
+        match recorded {
+            Some(recorded) if recorded == hash => return Ok(Outcome::UpToDate(hash)),
+            _ if before.subtitle != 1 => {
+                return Ok(Outcome::Skipped(if recorded.is_some() {
+                    "subtitle layout changed since embedding; not replacing"
+                } else {
+                    "already has text subtitles"
+                }))
             }
             Some(_) => true,
+            None => {
+                // One track, no provenance: embedded before records
+                // existed, or by something else entirely. If it says what
+                // the sidecar says, the sidecar is its source for all
+                // practical purposes; if not, only an explicit adopt-all
+                // may decide the sidecar wins.
+                let ordinal = before.first_text_ordinal.unwrap_or(0);
+                let embedded = track_text(ffmpeg, media, ordinal)?;
+                if cues_match(&embedded, &srt_text) {
+                    return Ok(Outcome::Adopted(hash));
+                }
+                if !adopt_all {
+                    return Ok(Outcome::Skipped("already has text subtitles; they differ from the sidecar"));
+                }
+                true
+            }
         }
     };
     if dry_run {
@@ -178,7 +282,7 @@ pub fn embed_if_applicable(
         .args(["-map", "0:v", "-map", "0:a?"]);
     if !replace {
         // First embedding: whatever (non-text) subtitle streams the file
-        // has come along. A replacement drops the one text track, ours.
+        // has come along. A replacement drops the one text track.
         cmd.args(["-map", "0:s?"]);
     }
     cmd.args([
@@ -232,7 +336,7 @@ pub fn embed_if_applicable(
 
     std::fs::rename(&temp, media)
         .with_context(|| format!("replacing {}", media.display()))?;
-    Ok(if replace { Outcome::Replaced } else { Outcome::Embedded })
+    Ok(if replace { Outcome::Replaced(hash) } else { Outcome::Embedded(hash) })
 }
 
 pub enum ExtractOutcome {
@@ -306,6 +410,31 @@ mod tests {
         assert_eq!((p.video, p.audio, p.subtitle), (1, 1, 1));
         assert_eq!(p.encoder, "media-enrich; captions=srt:sha256:ab");
         assert_eq!(media_db::captions::recorded_hash(&p.encoder), None, "too short to be ours");
+    }
+
+    #[test]
+    fn cues_match_ignores_what_a_mov_text_round_trip_changes() {
+        let sidecar = "1\n00:00:01,000 --> 00:00:02,500\nHello there,\n<i>General</i> Kenobi.\n\n\
+                       2\n00:00:03,000 --> 00:00:04,000\n{\\an8}[door slams]\n\n";
+        let extracted = "1\r\n00:00:01,000 --> 00:00:02,500\r\nHello there, General Kenobi.\r\n\r\n\
+                         2\r\n00:00:03,000 --> 00:00:04,000\r\n[door slams]\r\n\r\n";
+        assert!(cues_match(sidecar, extracted));
+        let retimed = extracted.replace("00:00:03,000", "00:00:03,200");
+        assert!(!cues_match(sidecar, &retimed), "timing is content");
+        let reworded = extracted.replace("Kenobi", "Grievous");
+        assert!(!cues_match(sidecar, &reworded), "words are content");
+        assert!(!cues_match(sidecar, "1\n00:00:01,000 --> 00:00:02,500\nHello there, General Kenobi.\n"), "a missing cue is content");
+        assert_eq!(parse_timestamp("00:01:02,5"), Some(62_500));
+        assert_eq!(parse_timestamp("01:02.250 X1:0"), Some(62_250));
+    }
+
+    #[test]
+    fn probe_finds_the_first_text_track_among_subtitle_streams() {
+        let p = parse_probe(
+            "codec_name=h264\ncodec_type=video\ncodec_name=dvd_subtitle\ncodec_type=subtitle\n\
+             codec_name=mov_text\ncodec_type=subtitle\nduration=3.0\n",
+        );
+        assert_eq!((p.subtitle, p.first_text_ordinal), (1, Some(1)));
     }
 
     #[test]

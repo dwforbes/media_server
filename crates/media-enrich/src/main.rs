@@ -61,6 +61,12 @@ struct Args {
     /// by default; also disabled by extract_subtitles = false in [enrich]).
     #[arg(long)]
     no_extract_subtitles: bool,
+    /// With subtitle embedding: an MP4 whose single caption track carries no
+    /// record and says something other than its .srt sidecar normally keeps
+    /// its track; this says the sidecar wins and re-embeds it. A one-off for
+    /// libraries whose sidecars were corrected before records existed.
+    #[arg(long)]
+    adopt_sidecar_captions: bool,
     /// Re-download the cached IMDb ratings dataset when older than this.
     #[arg(long, default_value_t = 7)]
     ratings_max_age_days: u64,
@@ -307,10 +313,17 @@ fn extract_embedded_subtitles(config: &ScannerConfig, dry_run: bool, captions: &
                         path.with_extension("srt").display()
                     );
                     extracted += 1;
-                    // Remember the pair as it now stands: the embed step
-                    // need not probe a video for the sidecar it just got.
-                    if let (Some(m), Some(s)) = (Stamp::of(path), Stamp::of(&path.with_extension("srt"))) {
-                        captions.record(path, m, s, "extracted");
+                    // Remember the pair as it now stands — the embed step
+                    // need not probe a video for the sidecar it just got —
+                    // and the extracted text as what the track says, so a
+                    // later correction of this sidecar is recognised.
+                    let srt = path.with_extension("srt");
+                    let canonical = media_db::sidecar::read_capped(&srt, media_db::sidecar::MAX_TEXT)
+                        .ok()
+                        .and_then(|bytes| media_db::textenc::decode_subtitle_text(&bytes))
+                        .map(|text| subtitles::sidecar_hash(&text));
+                    if let (Some(m), Some(s)) = (Stamp::of(path), Stamp::of(&srt)) {
+                        captions.record(path, m, s, "extracted", canonical.as_deref());
                     }
                 }
                 Ok(subtitles::ExtractOutcome::WouldExtract(track)) => {
@@ -442,8 +455,14 @@ fn describe_plan(plan: &remux::Plan) -> String {
 
 /// Embed same-name .srt sidecars into MP4 files lacking a subtitle stream,
 /// and replace captions embedded earlier whose sidecar has since changed.
-fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool, captions: &mut CaptionsState) {
-    let (mut embedded, mut replaced, mut planned, mut unchanged) = (0usize, 0usize, 0usize, 0usize);
+fn embed_sidecar_subtitles(
+    config: &ScannerConfig,
+    dry_run: bool,
+    adopt_all: bool,
+    captions: &mut CaptionsState,
+) {
+    let (mut embedded, mut replaced, mut adopted, mut planned, mut unchanged) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
     for root in config.roots.iter().filter(|r| r.kind == "movies" || r.kind == "tv") {
         if !root.path.is_dir() {
             continue;
@@ -463,28 +482,46 @@ fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool, captions: &mut
             }
             // Cheaper still: a pair that looks exactly as it did at the
             // last look (size and mtime of both files) would conclude the
-            // same thing, so it is not read, hashed or probed again.
+            // same thing, so it is not read, hashed or probed again —
+            // unless adopt-all is on and the pair has no provenance yet,
+            // which is exactly the conclusion adopt-all changes.
+            let known = captions.canonical_hash(path);
             if let (Some(m), Some(s)) = (Stamp::of(path), Stamp::of(&srt)) {
-                if captions.unchanged(path, m, s) {
+                if captions.unchanged(path, m, s) && !(adopt_all && known.is_none()) {
                     unchanged += 1;
                     continue;
                 }
             }
-            let note: Option<&str> = match subtitles::embed_if_applicable(
+            // (note for the memory, hash the track is now known to carry)
+            let outcome: Option<(&str, Option<String>)> = match subtitles::embed_if_applicable(
                 &config.enrich.ffmpeg_path,
                 &config.ffprobe_path,
                 path,
                 dry_run,
+                known.as_deref(),
+                adopt_all,
             ) {
-                Ok(subtitles::Outcome::Embedded) => {
+                Ok(subtitles::Outcome::Embedded(hash)) => {
                     println!("embedded subtitles into {}", path.display());
                     embedded += 1;
-                    Some("embedded")
+                    Some(("embedded", Some(hash)))
                 }
-                Ok(subtitles::Outcome::Replaced) => {
+                Ok(subtitles::Outcome::Replaced(hash)) => {
                     println!("replaced embedded captions from the updated sidecar in {}", path.display());
                     replaced += 1;
-                    Some("replaced")
+                    Some(("replaced", Some(hash)))
+                }
+                Ok(subtitles::Outcome::Adopted(hash)) => {
+                    println!(
+                        "{}: existing caption track matches the sidecar; sidecar adopted as its source",
+                        path.display()
+                    );
+                    adopted += 1;
+                    Some(("adopted", Some(hash)))
+                }
+                Ok(subtitles::Outcome::UpToDate(hash)) => {
+                    tracing::debug!("{}: captions up to date", path.display());
+                    Some(("captions up to date", Some(hash)))
                 }
                 Ok(subtitles::Outcome::WouldEmbed) => {
                     println!("would embed subtitles into {}", path.display());
@@ -496,17 +533,16 @@ fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool, captions: &mut
                     planned += 1;
                     None
                 }
-                // "not mp4", "already has subtitles" and "up to date" are
-                // the expected, common skips; the rest mean an .srt exists
-                // but something is off with it — surface those at the
-                // default log level.
+                // "not mp4" and "already has subtitles" are the expected,
+                // common skips; the rest mean an .srt exists but something
+                // is off with it — surface those at the default log level.
                 Ok(subtitles::Outcome::Skipped(why)) => {
-                    if why == "not mp4" || why == "already has text subtitles" || why == "captions up to date" {
+                    if why == "not mp4" || why == "already has text subtitles" {
                         tracing::debug!("{}: subtitles not embedded ({why})", path.display());
                     } else {
                         println!("{}: subtitles not embedded ({why})", path.display());
                     }
-                    Some(why)
+                    Some((why, None))
                 }
                 Err(err) => {
                     eprintln!("{}: subtitle embedding failed: {err:#}", path.display());
@@ -515,9 +551,9 @@ fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool, captions: &mut
             };
             // Recorded as the pair now stands (an embed just rewrote the
             // video). Dry runs and failures record nothing.
-            if let Some(note) = note.filter(|_| !dry_run) {
+            if let Some((note, canonical)) = outcome.filter(|_| !dry_run) {
                 if let (Some(m), Some(s)) = (Stamp::of(path), Stamp::of(&srt)) {
-                    captions.record(path, m, s, note);
+                    captions.record(path, m, s, note, canonical.as_deref());
                 }
             }
         }
@@ -535,6 +571,9 @@ fn embed_sidecar_subtitles(config: &ScannerConfig, dry_run: bool, captions: &mut
         }
         if replaced > 0 {
             println!("embedded captions replaced from updated sidecars: {replaced}");
+        }
+        if adopted > 0 {
+            println!("existing caption tracks adopted as sidecar-sourced: {adopted}");
         }
     }
 }
@@ -608,7 +647,7 @@ fn main() -> Result<()> {
             println!("(dry run: embedded-title stripping skipped)");
         }
         if do_subs {
-            embed_sidecar_subtitles(&config, true, &mut captions);
+            embed_sidecar_subtitles(&config, true, args.adopt_sidecar_captions, &mut captions);
         }
     } else {
         // Remux first so subtitle embedding sees the resulting MP4s, and
@@ -617,7 +656,7 @@ fn main() -> Result<()> {
             remux_mkv_files(&config, false);
         }
         if do_subs {
-            embed_sidecar_subtitles(&config, false, &mut captions);
+            embed_sidecar_subtitles(&config, false, args.adopt_sidecar_captions, &mut captions);
         }
         // After remux (the MP4 is what gets probed) and after embedding
         // (files that just gained a track from their sidecar keep it).
