@@ -51,8 +51,8 @@ div.hdr{display:grid;grid-template-columns:1fr auto;grid-template-areas:\"top ar
 div.hdr-top{grid-area:top}div.hdr-desc{grid-area:desc}\
 div.hdr img.art{grid-area:art;float:none;margin:0 0 1em}\
 table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
-div.covers{display:flex;gap:.6em;overflow-x:auto;margin:0 -4px;padding:.4em 4px 1em;scroll-padding-inline:4px;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}\
-div.covers a{flex:none;width:120px;height:180px;border-radius:6px;overflow:hidden;background:#eee;scroll-snap-align:start;box-sizing:border-box}\
+div.covers{display:flex;flex-wrap:wrap;gap:.6em;padding:.4em 0 1em}\
+div.covers a{flex:none;width:120px;height:180px;border-radius:6px;overflow:hidden;background:#eee;box-sizing:border-box}\
 div.covers a img{display:block;width:100%;height:100%;object-fit:cover}\
 div.covers a.noart{display:flex;align-items:center;justify-content:center;text-align:center;padding:.6em;border:2px solid #999;background:none;color:#333;font-size:.85em;line-height:1.3;text-decoration:none;overflow-wrap:anywhere}\
 div.covers a:hover{outline:2px solid #0645ad;outline-offset:1px}\
@@ -913,9 +913,9 @@ async fn browse_page(
     };
     let search_box = search_form(&oid, "");
     // A leaf grouping of movies (a franchise, a genre, a year, All Movies)
-    // also gets its covers in a row under the listing: the same order and
-    // the same links, scrolling sideways past the column's width; a movie
-    // without a poster holds its place as an outlined card with its name.
+    // also gets its covers under the listing, wrapping into as many rows
+    // as it takes: the same order and the same links; a movie without a
+    // poster holds its place as an outlined card with its name.
     let covers = {
         let movies: Vec<&media_db::BrowseItem> = children
             .iter()
