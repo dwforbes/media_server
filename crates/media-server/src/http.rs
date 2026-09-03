@@ -51,7 +51,7 @@ div.hdr{display:grid;grid-template-columns:1fr auto;grid-template-areas:\"top ar
 div.hdr-top{grid-area:top}div.hdr-desc{grid-area:desc}\
 div.hdr img.art{grid-area:art;float:none;margin:0 0 1em}\
 table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
-div.covers{display:flex;gap:.6em;overflow-x:auto;padding:.4em 0 1em;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}\
+div.covers{display:flex;gap:.6em;overflow-x:auto;margin:0 -4px;padding:.4em 4px 1em;scroll-padding-inline:4px;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}\
 div.covers a{flex:none;width:120px;height:180px;border-radius:6px;overflow:hidden;background:#eee;scroll-snap-align:start;box-sizing:border-box}\
 div.covers a img{display:block;width:100%;height:100%;object-fit:cover}\
 div.covers a.noart{display:flex;align-items:center;justify-content:center;text-align:center;padding:.6em;border:2px solid #999;background:none;color:#333;font-size:.85em;line-height:1.3;text-decoration:none;overflow-wrap:anywhere}\
