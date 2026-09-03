@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, Row};
+use rusqlite::OptionalExtension;
 
 use crate::models::{BrowseItem, MediaKind, TechInfo};
 use crate::queries::{ensure_genre, files};
@@ -126,6 +127,31 @@ const ALBUM_ART: &str = "
             = COALESCE(mu.album_artist, mu.artist, 'Unknown Artist')
         AND COALESCE(mu2.album, 'Unknown Album') = COALESCE(mu.album, 'Unknown Album')
       LIMIT 1)";
+
+/// A file id in the album that has artwork — for the album's own page
+/// and its DIDL entry (the album list under an artist decorates each
+/// album the same way through ALBUM_ART). Tracks with art in track
+/// order, so the first track's picture stands for the album.
+pub fn album_art(conn: &Connection, artist: &str, album: &str) -> Result<Option<i64>> {
+    let sql = format!(
+        "SELECT f.id FROM music_tracks mu JOIN files f ON f.id = mu.file_id
+         WHERE f.status = 'ready' AND f.art IS NOT NULL
+           AND {DISPLAY_ARTIST} = ?1 AND COALESCE(mu.album, 'Unknown Album') = ?2
+         ORDER BY mu.track_no, f.id LIMIT 1"
+    );
+    Ok(conn.query_row(&sql, [artist, album], |r| r.get(0)).optional()?)
+}
+
+/// A file id among the artist's tracks that has artwork, for the
+/// artist's own page: the first album's first pictured track.
+pub fn artist_art(conn: &Connection, artist: &str) -> Result<Option<i64>> {
+    let sql = format!(
+        "SELECT f.id FROM music_tracks mu JOIN files f ON f.id = mu.file_id
+         WHERE f.status = 'ready' AND f.art IS NOT NULL AND {DISPLAY_ARTIST} = ?1
+         ORDER BY mu.album COLLATE NOCASE, mu.track_no, f.id LIMIT 1"
+    );
+    Ok(conn.query_row(&sql, [artist], |r| r.get(0)).optional()?)
+}
 
 /// Albums of one artist: (album name, art file id).
 pub fn albums_for_artist(

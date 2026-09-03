@@ -432,13 +432,16 @@ pub fn browse_metadata(conn: &Connection, oid: &ObjectId) -> Result<Entry> {
         MoviesFolders => container(oid, &Movies, "Folders"),
         Music => container(oid, &Root, "Music"),
         MusicArtists => container(oid, &Music, "Artists"),
-        MusicArtist(a) => container_class(oid, &MusicArtists, a.clone(), CLASS_ARTIST),
+        // An artist's and an album's own pages carry a track's picture, as
+        // the album list under an artist already does for each album.
+        MusicArtist(a) => with_art(
+            container_class(oid, &MusicArtists, a.clone(), CLASS_ARTIST),
+            music::artist_art(conn, a)?,
+        ),
         MusicAlbums => container(oid, &Music, "Albums"),
-        MusicAlbum { artist, album } => container_class(
-            oid,
-            &MusicArtist(artist.clone()),
-            album.clone(),
-            CLASS_ALBUM,
+        MusicAlbum { artist, album } => with_art(
+            container_class(oid, &MusicArtist(artist.clone()), album.clone(), CLASS_ALBUM),
+            music::album_art(conn, artist, album)?,
         ),
         MusicByGenre => container(oid, &Music, "Genres"),
         MusicGenre(g) => {
