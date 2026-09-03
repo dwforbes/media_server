@@ -70,7 +70,7 @@ const MOVIE_SELECT: &str = "
              JOIN genres g ON g.id = mg.genre_id WHERE mg.file_id = f.id),
            (SELECT group_concat(d.name, ', ') FROM movie_directors md
              JOIN directors d ON d.id = md.director_id WHERE md.file_id = f.id),
-           f.art IS NOT NULL, m.rating
+           f.art IS NOT NULL, m.rating, f.updated_at
     FROM movies m JOIN files f ON f.id = m.file_id
     WHERE f.status = 'ready'";
 
@@ -90,6 +90,7 @@ fn movie_from_row(row: &Row) -> rusqlite::Result<BrowseItem> {
     item.director = row.get(9)?;
     item.has_art = row.get(10)?;
     item.rating = row.get(11)?;
+    item.art_version = row.get(12)?;
     Ok(item)
 }
 

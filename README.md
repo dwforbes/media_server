@@ -397,6 +397,21 @@ name is four bytes in the header. So:
   lists what it would do. The MKV remux and the subtitle embed steps write `hvc1`
   themselves, so nothing they produce needs it.
 
+### Cover strip and art caching
+
+A browse page that lists movies — a franchise, a genre, a year, a director, All Movies —
+ends with a row of their covers under the listing: the same order and the same links,
+sized alike, scrolling sideways past the column's width (touch-friendly, snapping), and
+a movie without a poster keeps its place as an outlined card carrying its name. Images
+load lazily, so a long list costs nothing until scrolled to.
+
+Art is served to be cached: every `/art/{id}` response carries an `ETag` and
+`Last-Modified` from the art file, a day of `max-age` (a week of
+`stale-while-revalidate`), and answers a revalidation with a 304 rather than the bytes.
+Where a page knows the item's extraction time it links the art as `/art/{id}?v=…`, which
+is served `immutable` for a year — artwork changes re-extract the file and change the
+version, so the URL changes with it and nothing stale is ever kept.
+
 ### Embedding sidecar subtitles
 
 Some MP4 releases ship subtitles only as a same-name `.srt` beside the file, which

@@ -154,6 +154,9 @@ pub struct BrowseItem {
     pub renditions: Vec<Rendition>,
     /// The item has artwork servable at /art/{art_file_id or file_id}.
     pub has_art: bool,
+    /// When the file was last extracted (files.updated_at) — artwork
+    /// changes re-extract, so this versions the art URL for long caching.
+    pub art_version: Option<i64>,
     /// Set when the artwork lives on a merged rendition, not the primary.
     pub art_file_id: Option<i64>,
     // movies / music
@@ -185,6 +188,7 @@ impl BrowseItem {
             height: None,
             renditions: Vec::new(),
             has_art: false,
+            art_version: None,
             art_file_id: None,
             year: None,
             genre: None,

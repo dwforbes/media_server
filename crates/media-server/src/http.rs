@@ -51,6 +51,11 @@ div.hdr{display:grid;grid-template-columns:1fr auto;grid-template-areas:\"top ar
 div.hdr-top{grid-area:top}div.hdr-desc{grid-area:desc}\
 div.hdr img.art{grid-area:art;float:none;margin:0 0 1em}\
 table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
+div.covers{display:flex;gap:.6em;overflow-x:auto;padding:.4em 0 1em;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}\
+div.covers a{flex:none;width:120px;height:180px;border-radius:6px;overflow:hidden;background:#eee;scroll-snap-align:start;box-sizing:border-box}\
+div.covers a img{display:block;width:100%;height:100%;object-fit:cover}\
+div.covers a.noart{display:flex;align-items:center;justify-content:center;text-align:center;padding:.6em;border:2px solid #999;background:none;color:#333;font-size:.85em;line-height:1.3;text-decoration:none;overflow-wrap:anywhere}\
+div.covers a:hover{outline:2px solid #0645ad;outline-offset:1px}\
 p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
 html a.home,html a.home:link,html a.home:visited,html a.home:hover,html a.home:active{color:inherit;text-decoration:none;font-size:1.15em;line-height:1}\
 html a.home:hover{opacity:.65}\
@@ -907,6 +912,41 @@ async fn browse_page(
         }
     };
     let search_box = search_form(&oid, "");
+    // A leaf grouping of movies (a franchise, a genre, a year, All Movies)
+    // also gets its covers in a row under the listing: the same order and
+    // the same links, scrolling sideways past the column's width; a movie
+    // without a poster holds its place as an outlined card with its name.
+    let covers = {
+        let movies: Vec<&media_db::BrowseItem> = children
+            .iter()
+            .filter_map(|e| match e {
+                tree::Entry::Item { item, .. } if item.kind == media_db::MediaKind::Movies => Some(item),
+                _ => None,
+            })
+            .collect();
+        if movies.is_empty() {
+            String::new()
+        } else {
+            let mut strip = String::from("<div class=\"covers\">");
+            for item in movies {
+                let name = xml_escape(&item.title);   // as the row shows it (year included)
+                if item.has_art {
+                    strip.push_str(&format!(
+                        "<a href=\"/item/{}\" title=\"{name}\"><img src=\"{}\" alt=\"{name}\" loading=\"lazy\"></a>",
+                        item.file_id,
+                        art_url(item)
+                    ));
+                } else {
+                    strip.push_str(&format!(
+                        "<a class=\"noart\" href=\"/item/{}\" title=\"{name}\"><span>{name}</span></a>",
+                        item.file_id
+                    ));
+                }
+            }
+            strip.push_str("</div>");
+            strip
+        }
+    };
     let mut rows = String::new();
     for entry in children {
         match entry {
@@ -952,10 +992,21 @@ async fn browse_page(
         "{head}<body>\
          <div class=\"hdr\"><div class=\"hdr-top\"><h1>{}</h1>{back_link}{search_box}</div>\
          {art}{description}</div>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{grid}{PAGE_CLOSE}",
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{grid}{PAGE_CLOSE}",
         xml_escape(&title)
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+/// An item's art URL, versioned by its extraction time when known so the
+/// response can be cached for a year: artwork changes re-extract the
+/// file, which changes the version and so the URL.
+fn art_url(item: &media_db::BrowseItem) -> String {
+    let id = item.art_file_id.unwrap_or(item.file_id);
+    match item.art_version {
+        Some(v) => format!("/art/{id}?v={v}"),
+        None => format!("/art/{id}"),
+    }
 }
 
 
@@ -3109,7 +3160,21 @@ fn og_art(bytes: Vec<u8>, mime: String) -> (Vec<u8>, String) {
     }
 }
 
-async fn serve_art_variant(state: Arc<AppState>, id: i64, social: bool) -> Response {
+/// `?v=` on an art URL: the page vouches for the version (see art_url),
+/// so the response may live in caches for a year.
+#[derive(serde::Deserialize)]
+struct ArtQuery {
+    #[serde(default)]
+    v: Option<String>,
+}
+
+async fn serve_art_variant(
+    state: Arc<AppState>,
+    id: i64,
+    social: bool,
+    request_headers: &HeaderMap,
+    versioned: bool,
+) -> Response {
     let source = {
         let conn = state.db.lock().await;
         files::art_source(&conn, id)
@@ -3122,20 +3187,69 @@ async fn serve_art_variant(state: Arc<AppState>, id: i64, social: bool) -> Respo
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+    // Validators from the file the art comes from (the media file itself
+    // for an embedded picture): a client holding a copy revalidates for a
+    // 304 instead of downloading again, and a versioned URL never asks.
+    let path = match &source {
+        files::ArtSource::File(p) | files::ArtSource::Embedded(p) => p.clone(),
+    };
+    let stamp = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| Some((m.modified().ok()?, m.len())));
+    let etag = stamp.map(|(mtime, len)| {
+        let secs = mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("\"{secs:x}-{len:x}{}\"", if social { "-og" } else { "" })
+    });
+    let cache_control = if versioned {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=86400, stale-while-revalidate=604800"
+    };
+    if let Some(etag) = &etag {
+        let matches = request_headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.split(',').any(|t| t.trim() == etag || t.trim() == "*"));
+        if matches {
+            return (
+                StatusCode::NOT_MODIFIED,
+                [
+                    (header::ETAG, etag.clone()),
+                    (header::CACHE_CONTROL, cache_control.to_string()),
+                ],
+            )
+                .into_response();
+        }
+    }
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<u8>, String)> {
         let (bytes, mime) = read_art(source)?;
         Ok(if social { og_art(bytes, mime) } else { (bytes, mime) })
     })
     .await;
     match result {
-        Ok(Ok((bytes, mime))) => (
-            [
-                (header::CONTENT_TYPE, mime),
-                (header::CACHE_CONTROL, "max-age=86400".to_string()),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(Ok((bytes, mime))) => {
+            let mut response = (
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::CACHE_CONTROL, cache_control.to_string()),
+                ],
+                bytes,
+            )
+                .into_response();
+            if let (Some(etag), Some((mtime, _))) = (etag, stamp) {
+                let h = response.headers_mut();
+                if let Ok(v) = HeaderValue::from_str(&etag) {
+                    h.insert(header::ETAG, v);
+                }
+                if let Ok(v) = HeaderValue::from_str(&httpdate::fmt_http_date(mtime)) {
+                    h.insert(header::LAST_MODIFIED, v);
+                }
+            }
+            response
+        }
         // The catalog says this item HAS art, so a read failure now is
         // transient (spun-down drive, EIO, a file mid-replacement) — not
         // "no such art". 404 is authoritative and clients cache it, which
@@ -3155,13 +3269,23 @@ async fn serve_art_variant(state: Arc<AppState>, id: i64, social: bool) -> Respo
     }
 }
 
-async fn serve_art(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
-    serve_art_variant(state, id, false).await
+async fn serve_art(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Query(q): Query<ArtQuery>,
+    headers: HeaderMap,
+) -> Response {
+    serve_art_variant(state, id, false, &headers, q.v.is_some()).await
 }
 
 /// The og:image target: the same art, sized for preview cards.
-async fn serve_art_og(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
-    serve_art_variant(state, id, true).await
+async fn serve_art_og(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Query(q): Query<ArtQuery>,
+    headers: HeaderMap,
+) -> Response {
+    serve_art_variant(state, id, true, &headers, q.v.is_some()).await
 }
 
 async fn serve_media(

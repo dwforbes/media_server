@@ -9,6 +9,7 @@ media-db = { path = "../media-db" }
 anyhow.workspace = true
 axum = "0.8"
 base64.workspace = true
+httpdate = "1"
 clap.workspace = true
 if-addrs = "0.13"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
