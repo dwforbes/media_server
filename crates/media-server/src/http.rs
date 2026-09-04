@@ -68,7 +68,7 @@ div.covers .cover>a:hover{outline:2px solid #0645ad;outline-offset:1px}\
 [data-card].open .card.loaded{display:block}div.covers .cover.open>a{outline:2px solid #0645ad;outline-offset:1px}\
 [data-card] .card{margin-top:.35em;cursor:default}[data-card].flip .card{left:auto;right:0}\
 [data-card].up .card{top:auto;bottom:100%;margin-top:0;margin-bottom:.35em}\
-[data-card].quiet .card{display:none!important}\
+body.kbd [data-card]:not(:focus-within) .card{display:none!important}\
 p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
 html a.home,html a.home:link,html a.home:visited,html a.home:hover,html a.home:active{color:inherit;text-decoration:none;font-size:1.15em;line-height:1}\
 html a.home:hover{opacity:.65}\
@@ -1639,12 +1639,13 @@ const CARDS_SCRIPT: &str = r#"<script>
     }).catch(function () { delete card.dataset.state; });
   }
   if (!touch) {
-    // One card at a time: hover and keyboard focus each open one, so
-    // hovering a new item drops the focus from the old one, and focusing
-    // a new item quiets the hovered one until the pointer moves on. Only
-    // a pointer that actually moved counts: a card hiding changes what
-    // lies under a stationary pointer, and the browser reports that as a
-    // hover too, which must not steal the keyboard's focus.
+    // One card at a time. Keyboard focus on an item puts the page in
+    // keyboard mode (body.kbd), where no hover card may show but the
+    // focused item's — whatever comes to lie under a resting pointer as
+    // cards open and close — until the pointer actually moves; a real
+    // move ends the mode and drops the focus, and hover takes over. Only
+    // a pointer that moved counts: a card hiding changes what is under a
+    // stationary pointer, and the browser reports that as a hover too.
     var lastX = -1, lastY = -1;
     document.addEventListener('mouseover', function (e) {
       if (e.clientX === lastX && e.clientY === lastY) return;
@@ -1652,7 +1653,7 @@ const CARDS_SCRIPT: &str = r#"<script>
       var el = target(e.target);
       if (!el || el === current) return;
       current = el;
-      el.classList.remove('quiet');
+      document.body.classList.remove('kbd');
       var focused = target(document.activeElement);
       if (focused && focused !== el) document.activeElement.blur();
       clearTimeout(timer);
@@ -1660,15 +1661,12 @@ const CARDS_SCRIPT: &str = r#"<script>
     });
     document.addEventListener('mouseout', function (e) {
       var el = target(e.target);
-      if (el && !el.contains(e.relatedTarget)) {
-        el.classList.remove('quiet');
-        if (el === current) { current = null; clearTimeout(timer); }
-      }
+      if (el && el === current && !el.contains(e.relatedTarget)) { current = null; clearTimeout(timer); }
     });
     document.addEventListener('focusin', function (e) {
       var el = target(e.target);
       if (!el) return;
-      if (current && current !== el) current.classList.add('quiet');
+      document.body.classList.add('kbd');
       show(el);
     });
   } else {
@@ -2371,7 +2369,7 @@ async fn play_page(
 
     // Everything the detail page knows, in a hover card on the "details"
     // link beside the heading — the same card the cover grid fetches.
-    let mut card = info_card(id, &detail, &context);
+    let mut card = info_card(id, &detail, &context, true);
     // Prior/next for serial programs. neighbours() orders the whole
     // series, so the last episode of a season leads into the next season
     // and vice versa; the links stay in the player (and swap in place).
@@ -2558,7 +2556,7 @@ async fn captions_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) 
 /// duration, resolution, codec, size. The player renders it inline on
 /// its "details" link; the browse pages' cover grid fetches it from
 /// /card/{id} on hover.
-fn info_card(id: i64, detail: &files::ItemDetail, context: &str) -> String {
+fn info_card(id: i64, detail: &files::ItemDetail, context: &str, link_imdb: bool) -> String {
     let mut heading = xml_escape(&detail.title);
     if let Some(year) = detail.year {
         heading.push_str(&format!(" ({year})"));
@@ -2580,8 +2578,11 @@ fn info_card(id: i64, detail: &files::ItemDetail, context: &str) -> String {
     }
     let mut facts: Vec<String> = Vec::new();
     // The rating links to the IMDb entry when we know it — the episode's
-    // own tconst for TV, the film's for movies.
-    let imdb = detail.imdb_id.as_deref().and_then(imdb_title_id);
+    // own tconst for TV, the film's for movies — on the player's card. A
+    // listing's card is a hover card: nothing in it can be reached with
+    // the pointer, and a link there only catches the keyboard on the way
+    // through the list.
+    let imdb = detail.imdb_id.as_deref().and_then(imdb_title_id).filter(|_| link_imdb);
     match (detail.rating, imdb) {
         (Some(rating), Some(id)) => facts.push(format!(
             "<a href=\"https://www.imdb.com/title/{id}/\">IMDb {rating:.1}</a>"
@@ -2630,7 +2631,7 @@ async fn card_fragment(State(state): State<Arc<AppState>>, Path(id): Path<i64>) 
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "private, max-age=300"),
         ],
-        info_card(id, &detail, &context),
+        info_card(id, &detail, &context, false),
     )
         .into_response()
 }
