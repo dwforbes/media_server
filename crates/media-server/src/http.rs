@@ -1380,7 +1380,9 @@ window.ccPanel = function (list, track, opts) {
     var period = 150 + 1050 * Math.min(1, remaining / HOLD);   // 1.2 s at rest, 150 ms at the end
     phase += (t - lastBeat) / period;
     lastBeat = t;
-    var o = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(2 * Math.PI * phase));
+    // A gentle swell, not a flash: the arrow stays readable throughout and
+    // moves through a third of the range it could.
+    var o = 0.77 + 0.23 * (0.5 + 0.5 * Math.sin(2 * Math.PI * phase));
     (up.hidden ? down : up).style.opacity = o;
   }
   function stopPulse() {
