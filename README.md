@@ -407,7 +407,10 @@ keeps its place as an outlined card carrying its name. Images load lazily, so a 
 list costs nothing until scrolled to. Resting the pointer on a cover (or tabbing to it)
 opens the same details card the player's "details" link shows — poster, title, plot,
 IMDb rating and link, genre, director, duration, resolution, codec, size — fetched from
-`/card/{id}` the first time and kept; it opens leftward near the right edge. On a touch
+`/card/{id}` the first time and kept; it opens leftward near the right edge and upward
+near the bottom of the viewport, and the grid keeps a band of space beneath it, so
+hovering never lengthens the page (which would summon a scrollbar and shift the page
+under the pointer). On a touch
 screen, where there is no hover, a tap on a cover opens its card (as a sheet along the
 bottom of a narrow screen), a tap anywhere else closes it, and a second tap on the same
 cover goes to the media.

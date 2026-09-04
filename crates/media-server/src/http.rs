@@ -56,7 +56,7 @@ table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
 .card .facts{display:block;color:#9a9a9a;margin-top:.5em}.card .plot{display:block;margin-top:.5em}\
 .card .nav{display:flex;justify-content:space-between;gap:1.5em;clear:both;margin-top:.6em;padding-top:.5em;border-top:1px solid #3a3a3a}.card .nav span:last-child{text-align:right}\
 .card a:link,.card a:visited{color:#9cf}.card a:hover,.card a:active{color:#cef}\
-div.covers{display:flex;flex-wrap:wrap;gap:.6em;padding:.4em 0 1em}\
+div.covers{display:flex;flex-wrap:wrap;gap:.6em;padding:.4em 0 14em}\
 div.covers .cover{position:relative;flex:none;width:120px;height:180px}\
 div.covers .cover>a{display:block;width:100%;height:100%;border-radius:6px;background:#eee;box-sizing:border-box}\
 div.covers .cover>a img{display:block;width:100%;height:100%;object-fit:cover;border-radius:6px}\
@@ -65,6 +65,7 @@ div.covers .cover>a:hover{outline:2px solid #0645ad;outline-offset:1px}\
 @media (hover:hover){div.covers .cover:hover .card.loaded,div.covers .cover:focus-within .card.loaded{display:block}}\
 div.covers .cover.open .card.loaded{display:block}div.covers .cover.open>a{outline:2px solid #0645ad;outline-offset:1px}\
 div.covers .card{margin-top:.35em;cursor:default}div.covers .cover.flip .card{left:auto;right:0}\
+div.covers .cover.up .card{top:auto;bottom:100%;margin-top:0;margin-bottom:.35em}\
 p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
 html a.home,html a.home:link,html a.home:visited,html a.home:hover,html a.home:active{color:inherit;text-decoration:none;font-size:1.15em;line-height:1}\
 html a.home:hover{opacity:.65}\
@@ -75,7 +76,8 @@ body.player{margin:.5em auto}\
 img.art{float:none;display:block;max-width:55%;margin:0 auto 1em}\
 div.hdr{grid-template-columns:1fr;grid-template-areas:\"top\" \"art\" \"desc\"}\
 div.hdr img.art{justify-self:center;margin:0 0 .5em}\
-div.covers .card,div.covers .cover.flip .card{position:fixed;left:1rem;right:1rem;top:auto;bottom:1rem;width:auto;max-width:none;max-height:60vh;overflow:auto;margin:0}\
+div.covers{padding-bottom:1em}\
+div.covers .card,div.covers .cover.flip .card,div.covers .cover.up .card{position:fixed;left:1rem;right:1rem;top:auto;bottom:1rem;width:auto;max-width:none;max-height:60vh;overflow:auto;margin:0}\
 h1{font-size:1.5em}}\
 </style>";
 
@@ -1590,12 +1592,27 @@ const COVERS_SCRIPT: &str = r#"<script>
   var grid = document.querySelector('div.covers');
   if (!grid) return;
   var timer = null, current = null;
+  // Where the card opens: leftward when it would run off the right edge,
+  // and upward when it would run off the bottom of the viewport (the
+  // grid's bottom padding fits a typical card; a tall one goes up) — so
+  // hovering never lengthens the page, which would summon a scrollbar
+  // and shift everything under the pointer.
+  function place(cover, card) {
+    var r = cover.getBoundingClientRect();
+    var width = Math.min(parseFloat(getComputedStyle(card).width) || 440, innerWidth * 0.9);
+    cover.classList.toggle('flip', r.left + width > innerWidth - 8);
+    var shown = getComputedStyle(card).display !== 'none';
+    if (!shown) card.style.display = 'block';
+    var height = card.offsetHeight + 6;
+    if (!shown) card.style.display = '';
+    cover.classList.toggle('up', r.bottom + height > innerHeight && r.top - height >= 0);
+  }
   function show(cover) {
     var card = cover.querySelector('.card');
     if (!card) return;
-    var width = Math.min(parseFloat(getComputedStyle(card).width) || 440, innerWidth * 0.9);
-    cover.classList.toggle('flip', cover.getBoundingClientRect().left + width > innerWidth - 8);
+    if (card.dataset.state === 'loaded') { place(cover, card); return; }
     if (card.dataset.state) return;
+    place(cover, card);
     card.dataset.state = 'loading';
     fetch('/card/' + cover.dataset.card).then(function (r) {
       if (!r.ok) throw 0;
@@ -1604,6 +1621,7 @@ const COVERS_SCRIPT: &str = r#"<script>
       card.innerHTML = html;
       card.dataset.state = 'loaded';
       card.classList.add('loaded');
+      place(cover, card);
     }).catch(function () { delete card.dataset.state; });
   }
   grid.addEventListener('mouseover', function (e) {
