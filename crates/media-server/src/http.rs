@@ -62,7 +62,8 @@ div.covers .cover>a{display:block;width:100%;height:100%;border-radius:6px;backg
 div.covers .cover>a img{display:block;width:100%;height:100%;object-fit:cover;border-radius:6px}\
 div.covers .cover>a.noart{display:flex;align-items:center;justify-content:center;text-align:center;padding:.6em;border:2px solid #999;background:none;color:#333;font-size:.85em;line-height:1.3;text-decoration:none;overflow-wrap:anywhere}\
 div.covers .cover>a:hover{outline:2px solid #0645ad;outline-offset:1px}\
-div.covers .cover:hover .card.loaded,div.covers .cover:focus-within .card.loaded{display:block}\
+@media (hover:hover){div.covers .cover:hover .card.loaded,div.covers .cover:focus-within .card.loaded{display:block}}\
+div.covers .cover.open .card.loaded{display:block}div.covers .cover.open>a{outline:2px solid #0645ad;outline-offset:1px}\
 div.covers .card{margin-top:.35em;cursor:default}div.covers .cover.flip .card{left:auto;right:0}\
 p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
 html a.home,html a.home:link,html a.home:visited,html a.home:hover,html a.home:active{color:inherit;text-decoration:none;font-size:1.15em;line-height:1}\
@@ -74,6 +75,7 @@ body.player{margin:.5em auto}\
 img.art{float:none;display:block;max-width:55%;margin:0 auto 1em}\
 div.hdr{grid-template-columns:1fr;grid-template-areas:\"top\" \"art\" \"desc\"}\
 div.hdr img.art{justify-self:center;margin:0 0 .5em}\
+div.covers .card,div.covers .cover.flip .card{position:fixed;left:1rem;right:1rem;top:auto;bottom:1rem;width:auto;max-width:none;max-height:60vh;overflow:auto;margin:0}\
 h1{font-size:1.5em}}\
 </style>";
 
@@ -1576,10 +1578,13 @@ const CAPTIONS_SCRIPT: &str = r#"<script>
 })();
 </script>"#;
 
-/// The cover grid's hover cards: a cover's details card is fetched from
+/// The cover grid's details cards: a cover's card is fetched from
 /// /card/{id} the first time the pointer rests on it (a short delay, so
 /// sweeping across the grid fetches nothing) or it takes focus, kept
 /// thereafter, and opened leftward when it would run off the right edge.
+/// Without hover (touch screens) the tap does the work instead: the
+/// first tap on a cover opens its card, a tap anywhere else closes it,
+/// and a second tap on the same cover goes to the media.
 const COVERS_SCRIPT: &str = r#"<script>
 (function () {
   var grid = document.querySelector('div.covers');
@@ -1616,6 +1621,28 @@ const COVERS_SCRIPT: &str = r#"<script>
     var cover = e.target.closest ? e.target.closest('.cover') : null;
     if (cover) show(cover);
   });
+  if (matchMedia('(hover: none)').matches) {
+    var open = null;
+    function close() {
+      if (open) { open.classList.remove('open'); open = null; }
+    }
+    grid.addEventListener('click', function (e) {
+      var cover = e.target.closest ? e.target.closest('.cover') : null;
+      if (!cover) return;
+      var link = e.target.closest('a');
+      if (link && link !== cover.firstElementChild) return;   // a link inside the card: let it go
+      if (cover === open) return;                             // second tap: through to the media
+      e.preventDefault();
+      close();
+      open = cover;
+      cover.classList.add('open');
+      show(cover);
+    });
+    document.addEventListener('click', function (e) {
+      var inside = e.target.closest ? e.target.closest('.cover') : null;
+      if (open && inside !== open) close();
+    });
+  }
 })();
 </script>"#;
 
