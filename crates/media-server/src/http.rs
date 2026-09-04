@@ -64,7 +64,7 @@ div.covers .cover>a img{display:block;width:100%;height:100%;object-fit:cover;bo
 div.covers .cover>a.noart{display:flex;align-items:center;justify-content:center;text-align:center;padding:.6em;border:2px solid #999;background:none;color:#333;font-size:.85em;line-height:1.3;text-decoration:none;overflow-wrap:anywhere}\
 div.covers .cover>a:hover{outline:2px solid #0645ad;outline-offset:1px}\
 [data-card]{position:relative}\
-@media (hover:hover){[data-card]:hover .card.loaded,[data-card]:focus-within .card.loaded{display:block}}\
+@media (hover:hover){[data-card].show .card.loaded,[data-card]:focus-within .card.loaded{display:block}}\
 [data-card].open .card.loaded{display:block}div.covers .cover.open>a{outline:2px solid #0645ad;outline-offset:1px}\
 [data-card] .card{margin-top:.35em;cursor:default}[data-card].flip .card{left:auto;right:0}\
 [data-card].up .card{top:auto;bottom:100%;margin-top:0;margin-bottom:.35em}\
@@ -1646,22 +1646,34 @@ const CARDS_SCRIPT: &str = r#"<script>
     // move ends the mode and drops the focus, and hover takes over. Only
     // a pointer that moved counts: a card hiding changes what is under a
     // stationary pointer, and the browser reports that as a hover too.
+    // The card appears only once the pointer has rested a while — half a
+    // second on a list row, where sweeping down the list would otherwise
+    // flash a card per row; less on a cover, which is bigger and sparser
+    // — and hides the moment the pointer leaves. Keyboard focus is
+    // immediate.
     var lastX = -1, lastY = -1;
+    function leave(el) {
+      el.classList.remove('show');
+      if (el === current) { current = null; clearTimeout(timer); }
+    }
     document.addEventListener('mouseover', function (e) {
       if (e.clientX === lastX && e.clientY === lastY) return;
       lastX = e.clientX; lastY = e.clientY;
       var el = target(e.target);
       if (!el || el === current) return;
+      if (current) leave(current);
       current = el;
       document.body.classList.remove('kbd');
       var focused = target(document.activeElement);
       if (focused && focused !== el) document.activeElement.blur();
-      clearTimeout(timer);
-      timer = setTimeout(function () { show(el); }, 120);
+      timer = setTimeout(function () {
+        el.classList.add('show');
+        show(el);
+      }, el.classList.contains('row') ? 500 : 200);
     });
     document.addEventListener('mouseout', function (e) {
       var el = target(e.target);
-      if (el && el === current && !el.contains(e.relatedTarget)) { current = null; clearTimeout(timer); }
+      if (el && !el.contains(e.relatedTarget)) leave(el);
     });
     document.addEventListener('focusin', function (e) {
       var el = target(e.target);
