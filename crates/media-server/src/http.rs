@@ -1303,7 +1303,16 @@ const CC_STYLE: &str = concat!("<style>\n", r#"#cc-panel { position: fixed; top:
 #cc-panel .head button:hover { background: #2a2a2a; color: #fff; }
 /* Touch devices have no floating windows to pop out into. */
 @media (hover: none) { #cc-pop { display: none; } }
-#cc-list { position: relative; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+#cc-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#cc-list { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+/* The way back to now, while the viewer has scrolled off elsewhere:
+   pinned over the list's top or bottom edge, pulsing. */
+.cc-arrow { position: absolute; left: 50%; transform: translateX(-50%); z-index: 5;
+  padding: .25em .9em; border: 0; border-radius: 1em; background: #9cf; color: #111;
+  font: inherit; font-weight: bold; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.5); }
+.cc-arrow[hidden] { display: none; }
+#cc-up { top: .5em; }
+#cc-down { bottom: .5em; }
 /* flow-root: the first line's top margin (its lead-in gap) must not
    collapse through the track, which anchors the playhead and the rule. */
 #cc-track { position: relative; display: flow-root; margin: .4em 0; }
@@ -1346,7 +1355,52 @@ body.captions #cc-panel .head #cc-title { overflow: hidden; text-overflow: ellip
 const CC_PANEL_SCRIPT: &str = r#"<script>
 window.ccPanel = function (list, track, opts) {
   var cues = [], cueEls = [], tops = [], bottoms = [], now = null, active = -1;
+  var HOLD = 20000;    // ms the list stays where the viewer scrolled it before following again
   var userUntil = 0;   // the viewer scrolled the list: no following until then
+  // The way back while the viewer reads elsewhere: an arrow pinned over
+  // the list's top or bottom edge (whichever side now is on) carrying
+  // the current time, pulsing slowly at first and quickening as the hold
+  // runs out and the list is about to jump back; a click goes at once.
+  var body = document.createElement('div');
+  body.id = 'cc-body';
+  list.parentNode.insertBefore(body, list);
+  body.appendChild(list);
+  function arrow(id, glyph) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.id = id; b.className = 'cc-arrow'; b.hidden = true; b.dataset.glyph = glyph;
+    b.addEventListener('click', function () { userUntil = 0; follow(true); });
+    body.appendChild(b);
+    return b;
+  }
+  var up = arrow('cc-up', '▲'), down = arrow('cc-down', '▼');
+  var pulse = null, phase = 0, lastBeat = 0;
+  function beat() {
+    var t = Date.now();
+    var remaining = Math.max(0, userUntil - t);
+    var period = 150 + 1050 * Math.min(1, remaining / HOLD);   // 1.2 s at rest, 150 ms at the end
+    phase += (t - lastBeat) / period;
+    lastBeat = t;
+    var o = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(2 * Math.PI * phase));
+    (up.hidden ? down : up).style.opacity = o;
+  }
+  function stopPulse() {
+    if (pulse) { clearInterval(pulse); pulse = null; }
+    up.style.opacity = ''; down.style.opacity = '';
+  }
+  function hideArrows() { up.hidden = true; down.hidden = true; stopPulse(); }
+  function arrows() {
+    if (!cues.length || !now || !visible() || Date.now() >= userUntil) { hideArrows(); return; }
+    var t = opts.time() || 0;
+    var pos = y(t, index(t)) + track.offsetTop;
+    var top = list.scrollTop, h = list.clientHeight;
+    var which = pos < top ? up : pos > top + h ? down : null;
+    up.hidden = which !== up;
+    down.hidden = which !== down;
+    if (!which) { stopPulse(); return; }
+    which.textContent = which.dataset.glyph + ' ' + mmss(t);
+    if (!pulse) { lastBeat = Date.now(); pulse = setInterval(beat, 40); }
+  }
+  list.addEventListener('scroll', function () { arrows(); }, { passive: true });
   function mmss(t) {
     var m = Math.floor(t / 60), s = Math.floor(t % 60);
     return m + ':' + (s < 10 ? '0' : '') + s;
@@ -1449,7 +1503,8 @@ window.ccPanel = function (list, track, opts) {
       if (cur >= 0) cueEls[cur].classList.add('on');
       active = cur;
     }
-    if (!force && Date.now() < userUntil) return;
+    if (!force && Date.now() < userUntil) { arrows(); return; }
+    hideArrows();
     var top = list.scrollTop, h = list.clientHeight;
     var pos = yy + track.offsetTop;
     if (!force && pos >= top + h * 0.15 && pos <= top + h * 0.7) return;
@@ -1459,7 +1514,7 @@ window.ccPanel = function (list, track, opts) {
     catch (e) { list.scrollTop = target; }
   }
   ['wheel', 'touchmove', 'mousedown', 'keydown'].forEach(function (ev) {
-    list.addEventListener(ev, function () { userUntil = Date.now() + 6000; }, { passive: true });
+    list.addEventListener(ev, function () { userUntil = Date.now() + HOLD; }, { passive: true });
   });
   // Click a line: seek there (modifier clicks keep the link's own meaning).
   track.addEventListener('click', function (e) {

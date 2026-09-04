@@ -346,7 +346,10 @@ the column is the program's timeline, with a rule running on through the gaps. T
 scale is the program's own (the median of line height over seconds to the next line,
 so a typical pair of lines just touches). A bar marks the current position, drifting
 through the silent stretches; the current line is highlighted; the list follows
-playback unless you have just scrolled it yourself (it resumes after six seconds); and
+playback unless you have scrolled it yourself — then it holds for twenty seconds, and
+while now is out of view an arrow with the current time sits over the list's top or
+bottom edge, pulsing slowly at first and quickening as the jump back approaches (a click
+on it goes at once); and
 clicking a line seeks there and plays (a modifier-click opens the same `#position`
 resume link in a new tab). The lines come from the WebVTT track the browser already
 loaded for the `<track>` element — the same conversion the on-video captions use,
