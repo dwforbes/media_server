@@ -68,6 +68,7 @@ div.covers .cover>a:hover{outline:2px solid #0645ad;outline-offset:1px}\
 [data-card].open .card.loaded{display:block}div.covers .cover.open>a{outline:2px solid #0645ad;outline-offset:1px}\
 [data-card] .card{margin-top:.35em;cursor:default}[data-card].flip .card{left:auto;right:0}\
 [data-card].up .card{top:auto;bottom:100%;margin-top:0;margin-bottom:.35em}\
+[data-card].quiet .card{display:none!important}\
 p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
 html a.home,html a.home:link,html a.home:visited,html a.home:hover,html a.home:active{color:inherit;text-decoration:none;font-size:1.15em;line-height:1}\
 html a.home:hover{opacity:.65}\
@@ -1638,20 +1639,37 @@ const CARDS_SCRIPT: &str = r#"<script>
     }).catch(function () { delete card.dataset.state; });
   }
   if (!touch) {
+    // One card at a time: hover and keyboard focus each open one, so
+    // hovering a new item drops the focus from the old one, and focusing
+    // a new item quiets the hovered one until the pointer moves on. Only
+    // a pointer that actually moved counts: a card hiding changes what
+    // lies under a stationary pointer, and the browser reports that as a
+    // hover too, which must not steal the keyboard's focus.
+    var lastX = -1, lastY = -1;
     document.addEventListener('mouseover', function (e) {
+      if (e.clientX === lastX && e.clientY === lastY) return;
+      lastX = e.clientX; lastY = e.clientY;
       var el = target(e.target);
       if (!el || el === current) return;
       current = el;
+      el.classList.remove('quiet');
+      var focused = target(document.activeElement);
+      if (focused && focused !== el) document.activeElement.blur();
       clearTimeout(timer);
       timer = setTimeout(function () { show(el); }, 120);
     });
     document.addEventListener('mouseout', function (e) {
       var el = target(e.target);
-      if (el && !el.contains(e.relatedTarget)) { current = null; clearTimeout(timer); }
+      if (el && !el.contains(e.relatedTarget)) {
+        el.classList.remove('quiet');
+        if (el === current) { current = null; clearTimeout(timer); }
+      }
     });
     document.addEventListener('focusin', function (e) {
       var el = target(e.target);
-      if (el) show(el);
+      if (!el) return;
+      if (current && current !== el) current.classList.add('quiet');
+      show(el);
     });
   } else {
     var open = null;
