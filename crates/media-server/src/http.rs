@@ -56,6 +56,7 @@ table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
 .card .facts{display:block;color:#9a9a9a;margin-top:.5em}.card .plot{display:block;margin-top:.5em}\
 .card .nav{display:flex;justify-content:space-between;gap:1.5em;clear:both;margin-top:.6em;padding-top:.5em;border-top:1px solid #3a3a3a}.card .nav span:last-child{text-align:right}\
 .card a:link,.card a:visited{color:#9cf}.card a:hover,.card a:active{color:#cef}\
+.card .go{display:block;clear:both;margin-top:.7em;text-align:right;font-weight:bold}\
 div.covers{display:flex;flex-wrap:wrap;gap:.6em;padding:.4em 0 14em}\
 div.covers .cover{position:relative;flex:none;width:120px;height:180px}\
 div.covers .cover>a{display:block;width:100%;height:100%;border-radius:6px;background:#eee;box-sizing:border-box}\
@@ -1586,12 +1587,15 @@ const CAPTIONS_SCRIPT: &str = r#"<script>
 /// thereafter, and opened leftward when it would run off the right edge.
 /// Without hover (touch screens) the tap does the work instead: the
 /// first tap on a cover opens its card, a tap anywhere else closes it,
-/// and a second tap on the same cover goes to the media.
+/// and a second tap on the same cover — or a tap on the open card, which
+/// on a phone covers the bottom row, and which carries an "Open" link —
+/// goes to the media.
 const COVERS_SCRIPT: &str = r#"<script>
 (function () {
   var grid = document.querySelector('div.covers');
   if (!grid) return;
   var timer = null, current = null;
+  var touch = matchMedia('(hover: none)').matches;
   // Where the card opens: leftward when it would run off the right edge,
   // and upward when it would run off the bottom of the viewport (the
   // grid's bottom padding fits a typical card; a tall one goes up) — so
@@ -1619,6 +1623,14 @@ const COVERS_SCRIPT: &str = r#"<script>
       return r.text();
     }).then(function (html) {
       card.innerHTML = html;
+      if (touch) {
+        // The sheet hides the cover it belongs to; give it a way through.
+        var go = document.createElement('a');
+        go.className = 'go';
+        go.href = cover.firstElementChild.href;
+        go.textContent = 'Open ›';
+        card.appendChild(go);
+      }
       card.dataset.state = 'loaded';
       card.classList.add('loaded');
       place(cover, card);
@@ -1639,7 +1651,7 @@ const COVERS_SCRIPT: &str = r#"<script>
     var cover = e.target.closest ? e.target.closest('.cover') : null;
     if (cover) show(cover);
   });
-  if (matchMedia('(hover: none)').matches) {
+  if (touch) {
     var open = null;
     function close() {
       if (open) { open.classList.remove('open'); open = null; }
@@ -1649,7 +1661,12 @@ const COVERS_SCRIPT: &str = r#"<script>
       if (!cover) return;
       var link = e.target.closest('a');
       if (link && link !== cover.firstElementChild) return;   // a link inside the card: let it go
-      if (cover === open) return;                             // second tap: through to the media
+      if (cover === open) {
+        // Second tap: through to the media — from the cover, or from the
+        // open card itself, which on a phone lies over the bottom row.
+        if (!link) location.href = cover.firstElementChild.href;
+        return;
+      }
       e.preventDefault();
       close();
       open = cover;

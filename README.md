@@ -413,7 +413,8 @@ hovering never lengthens the page (which would summon a scrollbar and shift the 
 under the pointer). On a touch
 screen, where there is no hover, a tap on a cover opens its card (as a sheet along the
 bottom of a narrow screen), a tap anywhere else closes it, and a second tap on the same
-cover goes to the media.
+cover — or a tap on the open card, which ends in an "Open ›" link, since on a phone the
+sheet lies over the bottom row — goes to the media.
 
 Art is served to be cached: every `/art/{id}` response carries an `ETag` and
 `Last-Modified` from the art file, a day of `max-age` (a week of
