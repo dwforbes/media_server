@@ -784,6 +784,9 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
     for item in &hits {
         rows.push_str(&listing_row(item));
     }
+    // Movies among the hits get their covers under the list, as on any
+    // grouping page.
+    let covers = covers_html(hits.iter());
     let summary = if terms.is_empty() {
         "Enter a search term.".to_string()
     } else if hits.is_empty() {
@@ -807,10 +810,11 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
          <h1>Search</h1>\
          <p><a href=\"/browse/{}\">← Back to {}</a></p>{}\
          <p>{summary}</p>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{PAGE_CLOSE}",
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{covers_script}{PAGE_CLOSE}",
         xml_escape(&scope_id),
         xml_escape(&scope_title),
-        search_form(&scope_id, &q.q)
+        search_form(&scope_id, &q.q),
+        covers_script = if covers.is_empty() { "" } else { COVERS_SCRIPT }
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -922,47 +926,11 @@ async fn browse_page(
     };
     let search_box = search_form(&oid, "");
     // A leaf grouping of movies (a franchise, a genre, a year, All Movies)
-    // also gets its covers under the listing, wrapping into as many rows
-    // as it takes: the same order and the same links; a movie without a
-    // poster holds its place as an outlined card with its name.
-    let covers = {
-        let movies: Vec<&media_db::BrowseItem> = children
-            .iter()
-            .filter_map(|e| match e {
-                tree::Entry::Item { item, .. } if item.kind == media_db::MediaKind::Movies => Some(item),
-                _ => None,
-            })
-            .collect();
-        if movies.is_empty() {
-            String::new()
-        } else {
-            let mut strip = String::from("<div class=\"covers\">");
-            for item in movies {
-                let name = xml_escape(&item.title);   // as the row shows it (year included)
-                // The details card sits beside the link, not inside it (a
-                // card holds links of its own, and anchors do not nest);
-                // COVERS_SCRIPT fills it from /card/{id} on hover.
-                let link = if item.has_art {
-                    format!(
-                        "<a href=\"/item/{}\" title=\"{name}\"><img src=\"{}\" alt=\"{name}\" loading=\"lazy\"></a>",
-                        item.file_id,
-                        art_url(item)
-                    )
-                } else {
-                    format!(
-                        "<a class=\"noart\" href=\"/item/{}\" title=\"{name}\"><span>{name}</span></a>",
-                        item.file_id
-                    )
-                };
-                strip.push_str(&format!(
-                    "<span class=\"cover\" data-card=\"{}\">{link}<span class=\"card\"></span></span>",
-                    item.file_id
-                ));
-            }
-            strip.push_str("</div>");
-            strip
-        }
-    };
+    // also gets its covers under the listing (covers_html).
+    let covers = covers_html(children.iter().filter_map(|e| match e {
+        tree::Entry::Item { item, .. } => Some(item),
+        _ => None,
+    }));
     let mut rows = String::new();
     for entry in children {
         match entry {
@@ -1013,6 +981,44 @@ async fn browse_page(
         covers_script = if covers.is_empty() { "" } else { COVERS_SCRIPT }
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+/// The cover grid under a listing of movies: their covers in the
+/// listing's order, wrapping into as many rows as it takes, each linking
+/// to the item; a movie without a poster holds its place as an outlined
+/// card with its name. Each cover carries an empty details card beside
+/// its link (not inside it: the card holds links of its own, and anchors
+/// do not nest) that COVERS_SCRIPT fills from /card/{id} on hover.
+/// Empty when the items hold no movies; the caller adds COVERS_SCRIPT
+/// when it is not.
+fn covers_html<'a>(items: impl Iterator<Item = &'a media_db::BrowseItem>) -> String {
+    let mut strip = String::new();
+    for item in items.filter(|i| i.kind == media_db::MediaKind::Movies) {
+        if strip.is_empty() {
+            strip.push_str("<div class=\"covers\">");
+        }
+        let name = xml_escape(&item.title);   // as the row shows it (year included)
+        let link = if item.has_art {
+            format!(
+                "<a href=\"/item/{}\" title=\"{name}\"><img src=\"{}\" alt=\"{name}\" loading=\"lazy\"></a>",
+                item.file_id,
+                art_url(item)
+            )
+        } else {
+            format!(
+                "<a class=\"noart\" href=\"/item/{}\" title=\"{name}\"><span>{name}</span></a>",
+                item.file_id
+            )
+        };
+        strip.push_str(&format!(
+            "<span class=\"cover\" data-card=\"{}\">{link}<span class=\"card\"></span></span>",
+            item.file_id
+        ));
+    }
+    if !strip.is_empty() {
+        strip.push_str("</div>");
+    }
+    strip
 }
 
 /// An item's art URL, versioned by its extraction time when known so the
