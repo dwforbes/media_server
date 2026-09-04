@@ -1004,13 +1004,13 @@ fn covers_html<'a>(items: impl Iterator<Item = &'a media_db::BrowseItem>) -> Str
         let name = xml_escape(&item.title);   // as the row shows it (year included)
         let link = if item.has_art {
             format!(
-                "<a href=\"/item/{}\" title=\"{name}\"><img src=\"{}\" alt=\"{name}\" loading=\"lazy\"></a>",
+                "<a href=\"/item/{}\"><img src=\"{}\" alt=\"{name}\" loading=\"lazy\"></a>",
                 item.file_id,
                 art_url(item)
             )
         } else {
             format!(
-                "<a class=\"noart\" href=\"/item/{}\" title=\"{name}\"><span>{name}</span></a>",
+                "<a class=\"noart\" href=\"/item/{}\"><span>{name}</span></a>",
                 item.file_id
             )
         };
