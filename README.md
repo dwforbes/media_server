@@ -404,8 +404,8 @@ and a search results page with movies among its hits end with their covers under
 listing, wrapping into as many rows as the column
 needs: the same order and the same links, sized alike, and a movie without a poster
 keeps its place as an outlined card carrying its name. Images load lazily, so a long
-list costs nothing until scrolled to. Resting the pointer on a cover (or tabbing to it)
-opens the same details card the player's "details" link shows — poster, title, plot,
+list costs nothing until scrolled to. Resting the pointer on a cover or on a row of the listing
+(or tabbing to either) opens the same details card the player's "details" link shows — poster, title, plot,
 IMDb rating and link, genre, director, duration, resolution, codec, size — fetched from
 `/card/{id}` the first time and kept; it opens leftward near the right edge and upward
 near the bottom of the viewport, and the grid keeps a band of space beneath it, so

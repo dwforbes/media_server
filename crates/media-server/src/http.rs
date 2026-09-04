@@ -58,15 +58,16 @@ table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
 .card a:link,.card a:visited{color:#9cf}.card a:hover,.card a:active{color:#cef}\
 .card .go{display:block;clear:both;margin-top:.7em;text-align:right;font-weight:bold}\
 div.covers{display:flex;flex-wrap:wrap;gap:.6em;padding:.4em 0 14em}\
-div.covers .cover{position:relative;flex:none;width:120px;height:180px}\
+div.covers .cover{flex:none;width:120px;height:180px}\
 div.covers .cover>a{display:block;width:100%;height:100%;border-radius:6px;background:#eee;box-sizing:border-box}\
 div.covers .cover>a img{display:block;width:100%;height:100%;object-fit:cover;border-radius:6px}\
 div.covers .cover>a.noart{display:flex;align-items:center;justify-content:center;text-align:center;padding:.6em;border:2px solid #999;background:none;color:#333;font-size:.85em;line-height:1.3;text-decoration:none;overflow-wrap:anywhere}\
 div.covers .cover>a:hover{outline:2px solid #0645ad;outline-offset:1px}\
-@media (hover:hover){div.covers .cover:hover .card.loaded,div.covers .cover:focus-within .card.loaded{display:block}}\
-div.covers .cover.open .card.loaded{display:block}div.covers .cover.open>a{outline:2px solid #0645ad;outline-offset:1px}\
-div.covers .card{margin-top:.35em;cursor:default}div.covers .cover.flip .card{left:auto;right:0}\
-div.covers .cover.up .card{top:auto;bottom:100%;margin-top:0;margin-bottom:.35em}\
+[data-card]{position:relative}\
+@media (hover:hover){[data-card]:hover .card.loaded,[data-card]:focus-within .card.loaded{display:block}}\
+[data-card].open .card.loaded{display:block}div.covers .cover.open>a{outline:2px solid #0645ad;outline-offset:1px}\
+[data-card] .card{margin-top:.35em;cursor:default}[data-card].flip .card{left:auto;right:0}\
+[data-card].up .card{top:auto;bottom:100%;margin-top:0;margin-bottom:.35em}\
 p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
 html a.home,html a.home:link,html a.home:visited,html a.home:hover,html a.home:active{color:inherit;text-decoration:none;font-size:1.15em;line-height:1}\
 html a.home:hover{opacity:.65}\
@@ -78,7 +79,7 @@ img.art{float:none;display:block;max-width:55%;margin:0 auto 1em}\
 div.hdr{grid-template-columns:1fr;grid-template-areas:\"top\" \"art\" \"desc\"}\
 div.hdr img.art{justify-self:center;margin:0 0 .5em}\
 div.covers{padding-bottom:1em}\
-div.covers .card,div.covers .cover.flip .card,div.covers .cover.up .card{position:fixed;left:1rem;right:1rem;top:auto;bottom:1rem;width:auto;max-width:none;max-height:60vh;overflow:auto;margin:0}\
+[data-card] .card,[data-card].flip .card,[data-card].up .card{position:fixed;left:1rem;right:1rem;top:auto;bottom:1rem;width:auto;max-width:none;max-height:60vh;overflow:auto;margin:0}\
 h1{font-size:1.5em}}\
 </style>";
 
@@ -368,7 +369,7 @@ fn csp() -> &'static str {
     static CSP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CSP.get_or_init(|| {
         use base64::Engine;
-        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT, COVERS_SCRIPT]
+        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT, CARDS_SCRIPT]
             .iter()
             .map(|script| {
                 let body = script
@@ -815,11 +816,11 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
          <h1>Search</h1>\
          <p><a href=\"/browse/{}\">← Back to {}</a></p>{}\
          <p>{summary}</p>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{covers_script}{PAGE_CLOSE}",
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{cards_script}{PAGE_CLOSE}",
         xml_escape(&scope_id),
         xml_escape(&scope_title),
         search_form(&scope_id, &q.q),
-        covers_script = if covers.is_empty() { "" } else { COVERS_SCRIPT }
+        cards_script = if rows.contains("data-card") || !covers.is_empty() { CARDS_SCRIPT } else { "" }
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -981,9 +982,9 @@ async fn browse_page(
         "{head}<body>\
          <div class=\"hdr\"><div class=\"hdr-top\"><h1>{}</h1>{back_link}{search_box}</div>\
          {art}{description}</div>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{grid}{covers_script}{PAGE_CLOSE}",
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{grid}{cards_script}{PAGE_CLOSE}",
         xml_escape(&title),
-        covers_script = if covers.is_empty() { "" } else { COVERS_SCRIPT }
+        cards_script = if rows.contains("data-card") || !covers.is_empty() { CARDS_SCRIPT } else { "" }
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -993,9 +994,9 @@ async fn browse_page(
 /// to the item; a movie without a poster holds its place as an outlined
 /// card with its name. Each cover carries an empty details card beside
 /// its link (not inside it: the card holds links of its own, and anchors
-/// do not nest) that COVERS_SCRIPT fills from /card/{id} on hover.
-/// Empty when the items hold no movies; the caller adds COVERS_SCRIPT
-/// when it is not.
+/// do not nest) that CARDS_SCRIPT fills from /card/{id} on hover.
+/// Empty when the items hold no movies; the caller adds CARDS_SCRIPT
+/// when the page carries any card.
 fn covers_html<'a>(items: impl Iterator<Item = &'a media_db::BrowseItem>) -> String {
     let mut strip = String::new();
     for item in items.filter(|i| i.kind == media_db::MediaKind::Movies) {
@@ -1581,44 +1582,44 @@ const CAPTIONS_SCRIPT: &str = r#"<script>
 })();
 </script>"#;
 
-/// The cover grid's details cards: a cover's card is fetched from
+/// Details cards on listings: any element carrying data-card — a cover
+/// in the grid, a row in the list — has its item's card fetched from
 /// /card/{id} the first time the pointer rests on it (a short delay, so
-/// sweeping across the grid fetches nothing) or it takes focus, kept
-/// thereafter, and opened leftward when it would run off the right edge.
-/// Without hover (touch screens) the tap does the work instead: the
-/// first tap on a cover opens its card, a tap anywhere else closes it,
-/// and a second tap on the same cover — or a tap on the open card, which
-/// on a phone covers the bottom row, and which carries an "Open" link —
-/// goes to the media.
-const COVERS_SCRIPT: &str = r#"<script>
+/// sweeping across fetches nothing) or it takes focus, kept thereafter,
+/// and opened leftward when it would run off the right edge, upward when
+/// it would run off the bottom. Without hover (touch screens) rows stay
+/// plain links and the covers use taps instead: the first tap on a cover
+/// opens its card, a tap anywhere else closes it, and a second tap on the
+/// same cover — or a tap on the open card, which on a phone covers the
+/// bottom row, and which carries an "Open" link — goes to the media.
+const CARDS_SCRIPT: &str = r#"<script>
 (function () {
-  var grid = document.querySelector('div.covers');
-  if (!grid) return;
-  var timer = null, current = null;
   var touch = matchMedia('(hover: none)').matches;
+  var timer = null, current = null;
+  function target(node) { return node && node.closest ? node.closest('[data-card]') : null; }
+  function mainLink(el) { return el.querySelector('a[href]'); }
   // Where the card opens: leftward when it would run off the right edge,
-  // and upward when it would run off the bottom of the viewport (the
-  // grid's bottom padding fits a typical card; a tall one goes up) — so
+  // and upward when it would run off the bottom of the viewport — so
   // hovering never lengthens the page, which would summon a scrollbar
   // and shift everything under the pointer.
-  function place(cover, card) {
-    var r = cover.getBoundingClientRect();
+  function place(el, card) {
+    var r = el.getBoundingClientRect();
     var width = Math.min(parseFloat(getComputedStyle(card).width) || 440, innerWidth * 0.9);
-    cover.classList.toggle('flip', r.left + width > innerWidth - 8);
+    el.classList.toggle('flip', r.left + width > innerWidth - 8);
     var shown = getComputedStyle(card).display !== 'none';
     if (!shown) card.style.display = 'block';
     var height = card.offsetHeight + 6;
     if (!shown) card.style.display = '';
-    cover.classList.toggle('up', r.bottom + height > innerHeight && r.top - height >= 0);
+    el.classList.toggle('up', r.bottom + height > innerHeight && r.top - height >= 0);
   }
-  function show(cover) {
-    var card = cover.querySelector('.card');
+  function show(el) {
+    var card = el.querySelector('.card');
     if (!card) return;
-    if (card.dataset.state === 'loaded') { place(cover, card); return; }
+    if (card.dataset.state === 'loaded') { place(el, card); return; }
     if (card.dataset.state) return;
-    place(cover, card);
+    place(el, card);
     card.dataset.state = 'loading';
-    fetch('/card/' + cover.dataset.card).then(function (r) {
+    fetch('/card/' + el.dataset.card).then(function (r) {
       if (!r.ok) throw 0;
       return r.text();
     }).then(function (html) {
@@ -1627,44 +1628,48 @@ const COVERS_SCRIPT: &str = r#"<script>
         // The sheet hides the cover it belongs to; give it a way through.
         var go = document.createElement('a');
         go.className = 'go';
-        go.href = cover.firstElementChild.href;
+        go.href = mainLink(el).href;
         go.textContent = 'Open ›';
         card.appendChild(go);
       }
       card.dataset.state = 'loaded';
       card.classList.add('loaded');
-      place(cover, card);
+      place(el, card);
     }).catch(function () { delete card.dataset.state; });
   }
-  grid.addEventListener('mouseover', function (e) {
-    var cover = e.target.closest ? e.target.closest('.cover') : null;
-    if (!cover || cover === current) return;
-    current = cover;
-    clearTimeout(timer);
-    timer = setTimeout(function () { show(cover); }, 120);
-  });
-  grid.addEventListener('mouseout', function (e) {
-    var cover = e.target.closest ? e.target.closest('.cover') : null;
-    if (cover && !cover.contains(e.relatedTarget)) { current = null; clearTimeout(timer); }
-  });
-  grid.addEventListener('focusin', function (e) {
-    var cover = e.target.closest ? e.target.closest('.cover') : null;
-    if (cover) show(cover);
-  });
-  if (touch) {
+  if (!touch) {
+    document.addEventListener('mouseover', function (e) {
+      var el = target(e.target);
+      if (!el || el === current) return;
+      current = el;
+      clearTimeout(timer);
+      timer = setTimeout(function () { show(el); }, 120);
+    });
+    document.addEventListener('mouseout', function (e) {
+      var el = target(e.target);
+      if (el && !el.contains(e.relatedTarget)) { current = null; clearTimeout(timer); }
+    });
+    document.addEventListener('focusin', function (e) {
+      var el = target(e.target);
+      if (el) show(el);
+    });
+  } else {
     var open = null;
     function close() {
       if (open) { open.classList.remove('open'); open = null; }
     }
-    grid.addEventListener('click', function (e) {
+    document.addEventListener('click', function (e) {
       var cover = e.target.closest ? e.target.closest('.cover') : null;
-      if (!cover) return;
+      if (!cover) {
+        if (open && !(e.target.closest && e.target.closest('[data-card]') === open)) close();
+        return;
+      }
       var link = e.target.closest('a');
-      if (link && link !== cover.firstElementChild) return;   // a link inside the card: let it go
+      if (link && link !== mainLink(cover)) return;   // a link inside the card: let it go
       if (cover === open) {
         // Second tap: through to the media — from the cover, or from the
         // open card itself, which on a phone lies over the bottom row.
-        if (!link) location.href = cover.firstElementChild.href;
+        if (!link) location.href = mainLink(cover).href;
         return;
       }
       e.preventDefault();
@@ -1672,10 +1677,6 @@ const COVERS_SCRIPT: &str = r#"<script>
       open = cover;
       cover.classList.add('open');
       show(cover);
-    });
-    document.addEventListener('click', function (e) {
-      var inside = e.target.closest ? e.target.closest('.cover') : null;
-      if (open && inside !== open) close();
     });
   }
 })();
@@ -2637,8 +2638,11 @@ fn listing_row(item: &media_db::BrowseItem) -> String {
     } else {
         uhd_chip(is_uhd(item.width, item.height))
     };
+    // data-card: the row opens the item's details card on hover or focus,
+    // like a cover in the grid (CARDS_SCRIPT fills it from /card/{id}).
     format!(
-        "<li style=\"display:flex;align-items:center\">{chip}<a href=\"/item/{0}\">{1}</a>{2}</li>",
+        "<li class=\"row\" data-card=\"{0}\" style=\"display:flex;align-items:center\">\
+         {chip}<a href=\"/item/{0}\">{1}</a>{2}<span class=\"card\"></span></li>",
         item.file_id,
         xml_escape(&item.title),
         rating_chip(item.rating)
