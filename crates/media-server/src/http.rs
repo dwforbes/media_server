@@ -51,11 +51,19 @@ div.hdr{display:grid;grid-template-columns:1fr auto;grid-template-areas:\"top ar
 div.hdr-top{grid-area:top}div.hdr-desc{grid-area:desc}\
 div.hdr img.art{grid-area:art;float:none;margin:0 0 1em}\
 table{max-width:100%}td{overflow-wrap:anywhere}input{font-size:1rem}\
+.card{display:none;position:absolute;left:0;top:100%;z-index:10;width:32em;max-width:90vw;padding:.9em 1em;background:#1c1c1c;color:#ddd;border:1px solid #444;border-radius:6px;box-shadow:0 8px 22px rgba(0,0,0,.55);font-size:.85rem;font-weight:normal;line-height:1.5;text-align:left;box-sizing:border-box}\
+.card img{float:right;width:6em;margin:0 0 .6em .9em;border-radius:4px}\
+.card .facts{display:block;color:#9a9a9a;margin-top:.5em}.card .plot{display:block;margin-top:.5em}\
+.card .nav{display:flex;justify-content:space-between;gap:1.5em;clear:both;margin-top:.6em;padding-top:.5em;border-top:1px solid #3a3a3a}.card .nav span:last-child{text-align:right}\
+.card a:link,.card a:visited{color:#9cf}.card a:hover,.card a:active{color:#cef}\
 div.covers{display:flex;flex-wrap:wrap;gap:.6em;padding:.4em 0 1em}\
-div.covers a{flex:none;width:120px;height:180px;border-radius:6px;overflow:hidden;background:#eee;box-sizing:border-box}\
-div.covers a img{display:block;width:100%;height:100%;object-fit:cover}\
-div.covers a.noart{display:flex;align-items:center;justify-content:center;text-align:center;padding:.6em;border:2px solid #999;background:none;color:#333;font-size:.85em;line-height:1.3;text-decoration:none;overflow-wrap:anywhere}\
-div.covers a:hover{outline:2px solid #0645ad;outline-offset:1px}\
+div.covers .cover{position:relative;flex:none;width:120px;height:180px}\
+div.covers .cover>a{display:block;width:100%;height:100%;border-radius:6px;background:#eee;box-sizing:border-box}\
+div.covers .cover>a img{display:block;width:100%;height:100%;object-fit:cover;border-radius:6px}\
+div.covers .cover>a.noart{display:flex;align-items:center;justify-content:center;text-align:center;padding:.6em;border:2px solid #999;background:none;color:#333;font-size:.85em;line-height:1.3;text-decoration:none;overflow-wrap:anywhere}\
+div.covers .cover>a:hover{outline:2px solid #0645ad;outline-offset:1px}\
+div.covers .cover:hover .card.loaded,div.covers .cover:focus-within .card.loaded{display:block}\
+div.covers .card{margin-top:.35em;cursor:default}div.covers .cover.flip .card{left:auto;right:0}\
 p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
 html a.home,html a.home:link,html a.home:visited,html a.home:hover,html a.home:active{color:inherit;text-decoration:none;font-size:1.15em;line-height:1}\
 html a.home:hover{opacity:.65}\
@@ -322,6 +330,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/playlist/search", get(search_playlist))
         .route("/play/{id}", get(play_page))
         .route("/captions/{id}", get(captions_page))
+        .route("/card/{id}", get(card_fragment))
         .route("/subs/{id}", get(serve_subs))
         .layer(middleware::from_fn_with_state(state.clone(), redirect_pages))
         .layer(middleware::from_fn(security_headers))
@@ -354,7 +363,7 @@ fn csp() -> &'static str {
     static CSP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CSP.get_or_init(|| {
         use base64::Engine;
-        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT]
+        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT, COVERS_SCRIPT]
             .iter()
             .map(|script| {
                 let body = script
@@ -930,18 +939,25 @@ async fn browse_page(
             let mut strip = String::from("<div class=\"covers\">");
             for item in movies {
                 let name = xml_escape(&item.title);   // as the row shows it (year included)
-                if item.has_art {
-                    strip.push_str(&format!(
+                // The details card sits beside the link, not inside it (a
+                // card holds links of its own, and anchors do not nest);
+                // COVERS_SCRIPT fills it from /card/{id} on hover.
+                let link = if item.has_art {
+                    format!(
                         "<a href=\"/item/{}\" title=\"{name}\"><img src=\"{}\" alt=\"{name}\" loading=\"lazy\"></a>",
                         item.file_id,
                         art_url(item)
-                    ));
+                    )
                 } else {
-                    strip.push_str(&format!(
+                    format!(
                         "<a class=\"noart\" href=\"/item/{}\" title=\"{name}\"><span>{name}</span></a>",
                         item.file_id
-                    ));
-                }
+                    )
+                };
+                strip.push_str(&format!(
+                    "<span class=\"cover\" data-card=\"{}\">{link}<span class=\"card\"></span></span>",
+                    item.file_id
+                ));
             }
             strip.push_str("</div>");
             strip
@@ -992,8 +1008,9 @@ async fn browse_page(
         "{head}<body>\
          <div class=\"hdr\"><div class=\"hdr-top\"><h1>{}</h1>{back_link}{search_box}</div>\
          {art}{description}</div>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{grid}{PAGE_CLOSE}",
-        xml_escape(&title)
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{grid}{covers_script}{PAGE_CLOSE}",
+        xml_escape(&title),
+        covers_script = if covers.is_empty() { "" } else { COVERS_SCRIPT }
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -1217,26 +1234,12 @@ const PLAYER_STYLE: &str = r#"<style>
 #heading a.home { font-weight: normal; color: #aaa; margin-right: .7em; vertical-align: .05em; }
 .infowrap { display: inline; font-size: 1rem; font-weight: normal;
   margin-left: 1em; padding-bottom: 1em; }
-.infowrap .card { display: none; position: absolute; left: 0; top: 100%; z-index: 10;
-  width: 32em; max-width: 90vw; padding: .9em 1em; background: #1c1c1c; color: #ddd;
-  border: 1px solid #444; border-radius: 6px; box-shadow: 0 8px 22px rgba(0,0,0,.55);
-  font-size: .85rem; line-height: 1.5; text-align: left; }
 .infowrap:hover .card, .infowrap:focus-within .card { display: block; }
-.infowrap .card img { float: right; width: 6em; margin: 0 0 .6em .9em; border-radius: 4px; }
-/* Spans, not divs: the card sits inside the <h2>, which only permits
-   phrasing content — a <div> in there is invalid HTML. */
-.infowrap .card .facts { display: block; color: #9a9a9a; margin-top: .5em; }
-.infowrap .card .plot { display: block; margin-top: .5em; }
-.infowrap .card .nav { display: flex; justify-content: space-between; gap: 1.5em;
-  clear: both; margin-top: .6em; padding-top: .5em; border-top: 1px solid #3a3a3a; }
-.infowrap .card .nav span:last-child { text-align: right; }
 /* Dark surfaces (the player page, the card on either page): browser
    default link colours — navy visited links especially — vanish on
    near-black, so pin every link state to a light blue. */
-body.player a:link, body.player a:visited,
-.infowrap .card a:link, .infowrap .card a:visited { color: #9cf; }
-body.player a:hover, body.player a:active,
-.infowrap .card a:hover, .infowrap .card a:active { color: #cef; }
+body.player a:link, body.player a:visited { color: #9cf; }
+body.player a:hover, body.player a:active { color: #cef; }
 /* Captions panel ("CC"): a fixed column down the right edge, the page
    re-centred in what remains. The body is centred by auto margins, so
    widening its max-width by the panel's width and handing that width
@@ -1564,6 +1567,49 @@ const CAPTIONS_SCRIPT: &str = r#"<script>
   addEventListener('pagehide', function () { post({ type: 'bye' }); });
   load(id);
   post({ type: 'hello' });   // a paused player answers with its state
+})();
+</script>"#;
+
+/// The cover grid's hover cards: a cover's details card is fetched from
+/// /card/{id} the first time the pointer rests on it (a short delay, so
+/// sweeping across the grid fetches nothing) or it takes focus, kept
+/// thereafter, and opened leftward when it would run off the right edge.
+const COVERS_SCRIPT: &str = r#"<script>
+(function () {
+  var grid = document.querySelector('div.covers');
+  if (!grid) return;
+  var timer = null, current = null;
+  function show(cover) {
+    var card = cover.querySelector('.card');
+    if (!card) return;
+    var width = Math.min(parseFloat(getComputedStyle(card).width) || 440, innerWidth * 0.9);
+    cover.classList.toggle('flip', cover.getBoundingClientRect().left + width > innerWidth - 8);
+    if (card.dataset.state) return;
+    card.dataset.state = 'loading';
+    fetch('/card/' + cover.dataset.card).then(function (r) {
+      if (!r.ok) throw 0;
+      return r.text();
+    }).then(function (html) {
+      card.innerHTML = html;
+      card.dataset.state = 'loaded';
+      card.classList.add('loaded');
+    }).catch(function () { delete card.dataset.state; });
+  }
+  grid.addEventListener('mouseover', function (e) {
+    var cover = e.target.closest ? e.target.closest('.cover') : null;
+    if (!cover || cover === current) return;
+    current = cover;
+    clearTimeout(timer);
+    timer = setTimeout(function () { show(cover); }, 120);
+  });
+  grid.addEventListener('mouseout', function (e) {
+    var cover = e.target.closest ? e.target.closest('.cover') : null;
+    if (cover && !cover.contains(e.relatedTarget)) { current = null; clearTimeout(timer); }
+  });
+  grid.addEventListener('focusin', function (e) {
+    var cover = e.target.closest ? e.target.closest('.cover') : null;
+    if (cover) show(cover);
+  });
 })();
 </script>"#;
 
@@ -2237,51 +2283,8 @@ async fn play_page(
     );
 
     // Everything the detail page knows, in a hover card on the "details"
-    // link beside the heading.
-    let mut card = String::new();
-    if detail.has_art {
-        card.push_str(&format!("<img src=\"/art/{id}\" alt=\"\">"));
-    }
-    card.push_str(&format!("<strong>{heading}</strong>"));
-    if !context.is_empty() {
-        card.push_str(&format!("<br>{context}"));
-    }
-    if let Some(plot) = detail.plot.as_deref().filter(|p| !p.trim().is_empty()) {
-        // Keep the card a card: truncate long synopses on a word boundary.
-        card.push_str(&format!(
-            "<span class=\"plot\">{}</span>",
-            xml_escape(&truncate_words(plot, 400))
-        ));
-    }
-    let mut facts: Vec<String> = Vec::new();
-    // The rating links to the IMDb entry when we know it — the episode's
-    // own tconst for TV, the film's for movies.
-    let imdb = detail.imdb_id.as_deref().and_then(imdb_title_id);
-    match (detail.rating, imdb) {
-        (Some(rating), Some(id)) => facts.push(format!(
-            "<a href=\"https://www.imdb.com/title/{id}/\">IMDb {rating:.1}</a>"
-        )),
-        (Some(rating), None) => facts.push(format!("IMDb {rating:.1}")),
-        (None, Some(id)) => facts.push(format!("<a href=\"https://www.imdb.com/title/{id}/\">IMDb</a>")),
-        (None, None) => {}
-    }
-    if let Some(genre) = &detail.genre {
-        facts.push(xml_escape(genre));
-    }
-    if let Some(director) = &detail.director {
-        facts.push(format!("dir. {}", xml_escape(director)));
-    }
-    if let Some(ms) = detail.duration_ms {
-        facts.push(human_duration(ms));
-    }
-    if let (Some(w), Some(h)) = (detail.width, detail.height) {
-        facts.push(format!("{w}×{h}{}", if is_uhd(detail.width, detail.height) { " (4K)" } else { "" }));
-    }
-    if let Some(codec) = &detail.video_codec {
-        facts.push(xml_escape(codec));
-    }
-    facts.push(human_size(detail.size));
-    card.push_str(&format!("<span class=\"facts\">{}</span>", facts.join(" · ")));
+    // link beside the heading — the same card the cover grid fetches.
+    let mut card = info_card(id, &detail, &context);
     // Prior/next for serial programs. neighbours() orders the whole
     // series, so the last episode of a season leads into the next season
     // and vice versa; the links stay in the player (and swap in place).
@@ -2460,6 +2463,89 @@ async fn captions_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) 
          {CC_PANEL_SCRIPT}{CAPTIONS_SCRIPT}{PAGE_CLOSE}"
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+/// The details card for an item: poster, title and year, where it sits
+/// (series/season or artist/album), the plot cut to a card's worth, and
+/// a line of facts — IMDb rating linked to the entry, genre, director,
+/// duration, resolution, codec, size. The player renders it inline on
+/// its "details" link; the browse pages' cover grid fetches it from
+/// /card/{id} on hover.
+fn info_card(id: i64, detail: &files::ItemDetail, context: &str) -> String {
+    let mut heading = xml_escape(&detail.title);
+    if let Some(year) = detail.year {
+        heading.push_str(&format!(" ({year})"));
+    }
+    let mut card = String::new();
+    if detail.has_art {
+        card.push_str(&format!("<img src=\"/art/{id}\" alt=\"\">"));
+    }
+    card.push_str(&format!("<strong>{heading}</strong>"));
+    if !context.is_empty() {
+        card.push_str(&format!("<br>{context}"));
+    }
+    if let Some(plot) = detail.plot.as_deref().filter(|p| !p.trim().is_empty()) {
+        // Keep the card a card: truncate long synopses on a word boundary.
+        card.push_str(&format!(
+            "<span class=\"plot\">{}</span>",
+            xml_escape(&truncate_words(plot, 400))
+        ));
+    }
+    let mut facts: Vec<String> = Vec::new();
+    // The rating links to the IMDb entry when we know it — the episode's
+    // own tconst for TV, the film's for movies.
+    let imdb = detail.imdb_id.as_deref().and_then(imdb_title_id);
+    match (detail.rating, imdb) {
+        (Some(rating), Some(id)) => facts.push(format!(
+            "<a href=\"https://www.imdb.com/title/{id}/\">IMDb {rating:.1}</a>"
+        )),
+        (Some(rating), None) => facts.push(format!("IMDb {rating:.1}")),
+        (None, Some(id)) => facts.push(format!("<a href=\"https://www.imdb.com/title/{id}/\">IMDb</a>")),
+        (None, None) => {}
+    }
+    if let Some(genre) = &detail.genre {
+        facts.push(xml_escape(genre));
+    }
+    if let Some(director) = &detail.director {
+        facts.push(format!("dir. {}", xml_escape(director)));
+    }
+    if let Some(ms) = detail.duration_ms {
+        facts.push(human_duration(ms));
+    }
+    if let (Some(w), Some(h)) = (detail.width, detail.height) {
+        facts.push(format!("{w}×{h}{}", if is_uhd(detail.width, detail.height) { " (4K)" } else { "" }));
+    }
+    if let Some(codec) = &detail.video_codec {
+        facts.push(xml_escape(codec));
+    }
+    facts.push(human_size(detail.size));
+    card.push_str(&format!("<span class=\"facts\">{}</span>", facts.join(" · ")));
+    card
+}
+
+/// The details card as an HTML fragment, for hover cards that load on
+/// demand (the cover grid). Escaped server-side like every page; the
+/// page drops it into the card element as-is.
+async fn card_fragment(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    let detail = {
+        let conn = state.db.lock().await;
+        files::detail(&conn, id)
+    };
+    let Ok(Some(detail)) = detail else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let context = match (&detail.series, detail.season, detail.episode) {
+        (Some(series), Some(season), Some(episode)) => tv_context_html(series, season, episode),
+        _ => music_context_html(&detail, false),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "private, max-age=300"),
+        ],
+        info_card(id, &detail, &context),
+    )
+        .into_response()
 }
 
 /// "24" for whole rates, "23.976" for the NTSC-style fractions.

@@ -403,7 +403,10 @@ A browse page that lists movies — a franchise, a genre, a year, a director, Al
 ends with their covers under the listing, wrapping into as many rows as the column
 needs: the same order and the same links, sized alike, and a movie without a poster
 keeps its place as an outlined card carrying its name. Images load lazily, so a long
-list costs nothing until scrolled to.
+list costs nothing until scrolled to. Resting the pointer on a cover (or tabbing to it)
+opens the same details card the player's "details" link shows — poster, title, plot,
+IMDb rating and link, genre, director, duration, resolution, codec, size — fetched from
+`/card/{id}` the first time and kept; it opens leftward near the right edge.
 
 Art is served to be cached: every `/art/{id}` response carries an `ETag` and
 `Last-Modified` from the art file, a day of `max-age` (a week of
