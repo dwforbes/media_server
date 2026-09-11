@@ -358,6 +358,22 @@ and no parsing happens in the page. The panel is remembered per browser like
 auto-play: it re-opens on the next program with captions and follows in-place episode
 swaps, hiding itself for a program that has none.
 
+**Speakers.** A same-name `.rttm` sidecar beside the video — a speaker diarization in
+the NIST Rich Transcription Time Marked format every diarizer (pyannote, NeMo,
+sherpa-onnx) writes, one `SPEAKER <file> 1 <start> <duration> <NA> <NA> <label> <NA>
+<NA>` line per stretch of speech — names who is talking. The server joins it to the
+captions at request time: each cue takes the label whose speech overlaps it the most,
+written into the WebVTT as a voice span (`<v Label>…</v>`, the one caption construct
+browsers carry a speaker in), and a cue whose lines each open with a dash — two people
+in one cue — is split by line, each labelled from its own share of the cue's time. The
+panel and the pop-out window show the label before each line in a colour of its own
+(handed out in order of first appearance, so the leads get the clearest hues) with a
+bar of that colour along the timeline, and a dashed exchange becomes a line per
+speaker. The sidecar is time-based, not cue-based, so it stays valid when the `.srt`
+beside it is corrected; it is read on every load, so one that arrives or changes shows
+on the next play. Nothing catalogs it, and nothing here produces one: a diarization is
+a GPU job for another machine, whose only contract with this server is the `.rttm`.
+
 The panel can also leave the page: the ⧉ button in its header pops the captions out
 into a browser window of their own (`/captions/{id}`), the page gets its full width
 back, and the window can be dragged to another monitor and resized. The two stay in

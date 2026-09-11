@@ -1082,6 +1082,18 @@ fn vtt_response(body: String) -> Response {
     ([(header::CONTENT_TYPE, "text/vtt; charset=utf-8")], body).into_response()
 }
 
+/// The WebVTT with speakers from the media file's `.rttm` sidecar (a
+/// diarization, see media_db::rttm) written in as voice spans; the text
+/// untouched when there is no such sidecar. Read at request time, like
+/// the .srt, so a sidecar that arrives or changes shows on the next load.
+fn with_speakers(media: &std::path::Path, vtt: String) -> String {
+    let rttm = media.with_extension("rttm");
+    match sidecar::read_text_capped(&rttm, sidecar::MAX_TEXT) {
+        Ok(text) => media_db::rttm::tag_vtt(&vtt, &media_db::rttm::parse(&text)),
+        Err(_) => vtt,
+    }
+}
+
 fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
@@ -1139,7 +1151,7 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     let srt_path = servable.abs_path.with_extension("srt");
     if let Ok(bytes) = sidecar::read_capped(&srt_path, sidecar::MAX_TEXT) {
         if let Some(text) = media_db::textenc::decode_subtitle_text(&bytes) {
-            return vtt_response(srt_to_vtt(&text));
+            return vtt_response(with_speakers(&servable.abs_path, srt_to_vtt(&text)));
         }
     }
 
@@ -1149,7 +1161,7 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     if let (Some(cache_time), Some(media_time)) = (file_mtime(&cache), media_mtime) {
         if cache_time >= media_time {
             if let Ok(body) = std::fs::read_to_string(&cache) {
-                return vtt_response(body);
+                return vtt_response(with_speakers(&servable.abs_path, body));
             }
         }
     }
@@ -1185,7 +1197,7 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     // Err once the sender is dropped, i.e. the extraction finished.
     let _ = rx.changed().await;
     match std::fs::read_to_string(&cache) {
-        Ok(body) => vtt_response(body),
+        Ok(body) => vtt_response(with_speakers(&servable.abs_path, body)),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -1328,6 +1340,11 @@ const CC_STYLE: &str = concat!("<style>\n", r#"#cc-panel { position: fixed; top:
 #cc-track a.cue time { flex: none; width: 3.4em; text-align: right; color: #777;
   font-size: .9em; font-variant-numeric: tabular-nums; }
 #cc-track a.cue.on time { color: #9cf; }
+/* A line with a known speaker (an .rttm sidecar): the speaker's colour
+   as a bar along the timeline and the name, in that colour, before the
+   text. */
+#cc-track a.cue.voiced { box-shadow: inset 3px 0 0 var(--who); }
+#cc-track a.cue .who { color: var(--who); font-weight: 600; font-size: .85em; margin-right: .5em; }
 #cc-now { position: absolute; left: 0; right: 0; height: 2px; background: #9cf; opacity: .6;
   pointer-events: none; }
 #cc-panel .empty { padding: 1em .9em; color: #888; }
@@ -1415,8 +1432,20 @@ window.ccPanel = function (list, track, opts) {
     d.className = 'empty'; d.textContent = text;
     track.appendChild(d);
   }
+  // A speaker's colour: a distinguishable palette handed out in order of
+  // first appearance, so the leads get the clearest hues; past the
+  // palette's end the wheel is walked in a golden-angle stride.
+  var PALETTE = ['#7fb8ff', '#ffb070', '#8fe08f', '#f090e0', '#ffe070', '#70e0e0', '#c8a0ff', '#ff9090'];
+  var speakers = {};
+  function colour(who) {
+    if (!(who in speakers)) {
+      var n = Object.keys(speakers).length;
+      speakers[who] = n < PALETTE.length ? PALETTE[n] : 'hsl(' + ((n * 137.5) % 360) + ', 70%, 72%)';
+    }
+    return speakers[who];
+  }
   function render(newCues) {
-    cues = newCues; cueEls = []; active = -1;
+    cues = newCues; cueEls = []; active = -1; speakers = {};
     var frag = document.createDocumentFragment();
     for (var i = 0; i < cues.length; i++) {
       var a = document.createElement('a');
@@ -1426,7 +1455,14 @@ window.ccPanel = function (list, track, opts) {
       var t = document.createElement('time');
       t.textContent = mmss(cues[i].start);
       var s = document.createElement('span');
-      s.textContent = cues[i].text;
+      if (cues[i].speaker) {
+        a.classList.add('voiced');
+        a.style.setProperty('--who', colour(cues[i].speaker));
+        var who = document.createElement('b');
+        who.className = 'who'; who.textContent = cues[i].speaker;
+        s.appendChild(who);
+      }
+      s.appendChild(document.createTextNode(cues[i].text));
       a.appendChild(t); a.appendChild(s);
       frag.appendChild(a);
       cueEls.push(a);
@@ -1579,9 +1615,16 @@ const CAPTIONS_SCRIPT: &str = r#"<script>
       var times = lines[ti].split('-->');
       var start = ts(times[0]), end = ts(times[1] || '');
       if (isNaN(start) || isNaN(end)) continue;
-      var body = lines.slice(ti + 1).join(' ').replace(/<[^>]*>/g, '').replace(/\{\\[^}]*\}/g, '');
-      body = decode(body).replace(/\s+/g, ' ').trim();
-      if (body) out.push({ start: start, end: end, text: body });
+      var raw = lines.slice(ti + 1).join(' ');
+      var clean = function (t) { return decode(t.replace(/<[^>]*>/g, '').replace(/\{\\[^}]*\}/g, '')).replace(/\s+/g, ' ').trim(); };
+      // Voice spans, <v Name>: two or more in one cue (a dashed exchange)
+      // become a line each; otherwise the cue is one line, named or not.
+      var re = /<v(?:\.[^ >]*)? ([^>]*)>([\s\S]*?)(?:<\/v>|$)/g, m, voiced = [];
+      while ((m = re.exec(raw))) voiced.push({ text: clean(m[2]), speaker: decode(m[1]).trim() });
+      var parts = voiced.length > 1 ? voiced : [{ text: clean(raw), speaker: voiced.length ? voiced[0].speaker : '' }];
+      for (var k = 0; k < parts.length; k++) {
+        if (parts[k].text) out.push({ start: start, end: end, text: parts[k].text, speaker: parts[k].speaker });
+      }
     }
     out.sort(function (a, b) { return a.start - b.start; });
     return out;
@@ -2128,9 +2171,25 @@ const PLAYER_SCRIPT: &str = r#"<script>
   // (<i>, <c>, entities), then any ASS-style {\an8} positioning the sidecar
   // carried through, newlines folded.
   function cueText(c) {
-    var s;
-    try { s = c.getCueAsHTML().textContent; } catch (e) { s = String(c.text || '').replace(/<[^>]*>/g, ''); }
-    return s.replace(/\{\\[^}]*\}/g, '').replace(/\s+/g, ' ').trim();
+    var clean = function (t) { return t.replace(/\{\\[^}]*\}/g, '').replace(/\s+/g, ' ').trim(); };
+    var parts = [];
+    try {
+      var frag = c.getCueAsHTML();
+      // A voice span, <v Name>, is a span titled Name. Two or more in one
+      // cue (a dashed exchange) become a line each; the rest is one line.
+      var spans = frag.querySelectorAll('span[title]');
+      if (spans.length > 1) {
+        for (var i = 0; i < spans.length; i++) parts.push({ text: clean(spans[i].textContent), speaker: spans[i].title.trim() });
+      } else {
+        parts.push({ text: clean(frag.textContent), speaker: spans.length ? spans[0].title.trim() : '' });
+      }
+    } catch (e) {
+      var raw = String(c.text || ''), re = /<v(?:\.[^ >]*)? ([^>]*)>([\s\S]*?)(?:<\/v>|$)/g, m, voiced = [];
+      while ((m = re.exec(raw))) voiced.push({ text: clean(m[2].replace(/<[^>]*>/g, '')), speaker: m[1].trim() });
+      if (voiced.length > 1) parts = voiced;
+      else parts.push({ text: clean(raw.replace(/<[^>]*>/g, '')), speaker: voiced.length ? voiced[0].speaker : '' });
+    }
+    return parts.filter(function (p) { return p.text; });
   }
   // A track exposes its cues only once loaded and while not disabled (a
   // viewer may have switched captions off in the native controls);
@@ -2141,8 +2200,10 @@ const PLAYER_SCRIPT: &str = r#"<script>
       if (tt.mode === 'disabled') tt.mode = 'hidden';
       var out = [], list = tt.cues || [];
       for (var i = 0; i < list.length; i++) {
-        var text = cueText(list[i]);
-        if (text) out.push({ start: list[i].startTime, end: list[i].endTime, text: text });
+        var parts = cueText(list[i]);
+        for (var j = 0; j < parts.length; j++) {
+          out.push({ start: list[i].startTime, end: list[i].endTime, text: parts[j].text, speaker: parts[j].speaker });
+        }
       }
       cb(out);
     }

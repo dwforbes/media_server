@@ -438,6 +438,11 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         // which re-embeds it into the video it was embedded in before.
         return Ok(Handled::CaptionSidecar);
     }
+    if ext == "rttm" {
+        // A speaker diarization beside the video (see media_db::rttm):
+        // nothing to catalog, the server reads it at request time.
+        return Ok(Handled::Nothing);
+    }
     if ext == "jpg" || ext == "png" {
         refresh_art_siblings(conn, cfg, root, &rel)?;
         return Ok(Handled::Nothing);

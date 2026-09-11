@@ -5,6 +5,7 @@ pub mod models;
 pub mod nameparse;
 pub mod open;
 pub mod queries;
+pub mod rttm;
 pub mod schema;
 pub mod sidecar;
 pub mod subtitles;
