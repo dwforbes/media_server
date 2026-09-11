@@ -372,7 +372,36 @@ bar of that colour along the timeline, and a dashed exchange becomes a line per
 speaker. The sidecar is time-based, not cue-based, so it stays valid when the `.srt`
 beside it is corrected; it is read on every load, so one that arrives or changes shows
 on the next play. Nothing catalogs it, and nothing here produces one: a diarization is
-a GPU job for another machine, whose only contract with this server is the `.rttm`.
+a GPU job for another machine, whose contract with this server is the `.rttm` it
+writes and the audio it fetches (next).
+
+### Audio for analysis off this host
+
+A diarizer or caption aligner on another machine wants the dialogue as a few dozen
+megabytes of speech-rate audio, not the multi-gigabyte file it sits in — and demuxing
+over SMB reads most of the file anyway, since audio packets are interleaved between
+video ones. So the server offers the track itself:
+
+```
+GET /api/captions                 every video: id, root, path, duration_ms, srt, rttm, audio
+GET /audio/{id}.flac              mono 16 kHz FLAC of the dialogue track
+GET /audio/{id}.flac?channel=center   the front-centre channel alone (5.1 and wider)
+GET /audio/{id}.flac?rate=22050   another sample rate, 8000–48000
+```
+
+The listing carries each video's root path as this host mounts it and the path
+beneath, which together name the file, so a worker that has the share mounted can
+write its `.rttm` (or a corrected `.srt`) beside the video; `srt` and `rttm` say
+which sidecars are already there. The audio is ffmpeg decoding, downmixing and
+resampling straight into the response — nothing is cached, the FLAC carries no
+duration (it is a pipe), and a client that disconnects takes its ffmpeg with it. The
+stream is the one flagged default, else the widest, the same choice ffmpeg makes
+alone. `channel=center` takes the front-centre channel where a surround mix keeps its
+dialogue, which diarizes cleaner than a downmix that folds the score back in; a stereo
+or mono source folds down regardless. Each stream holds one of the two shared ffmpeg
+permits for as long as it runs, so a worker fetching in parallel queues rather than
+forking a process apiece. A file ffmpeg cannot read answers 502 with its complaint; one
+with no audio stream, 404.
 
 The panel can also leave the page: the ⧉ button in its header pops the captions out
 into a browser window of their own (`/captions/{id}`), the page gets its full width
@@ -673,7 +702,10 @@ anything that can reach it). The controls that follow from that:
   pull parser with no entity expansion; paging arithmetic saturates; search honours at
   most 12 distinct terms; object ids reject control characters; ffprobe/ffmpeg spawns
   share a two-permit semaphore and a "no captions" result is cached, so a burst of
-  requests cannot fork a process apiece.
+  requests cannot fork a process apiece. The `/audio/{id}.flac` stream holds a permit
+  for its whole run and its ffmpeg dies with the connection, so at most two decodes
+  exist at once and an abandoned request costs nothing further; the sample rate is
+  bounded and the channel option is a fixed choice, not a filter string.
 - **SSDP.** M-SEARCH is answered only for sources on a directly attached network (so a
   forged source cannot use the responder as an amplifier) and within a reply budget
   (25/s, bursts of 100); the announcer also validates the UUID it relays and caps the

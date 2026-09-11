@@ -374,6 +374,43 @@ pub fn servable(conn: &Connection, file_id: i64) -> Result<Option<ServableFile>>
     .map_err(Into::into)
 }
 
+/// A video as an analysis worker sees it: where it is (the root path as
+/// this host mounts it, and the path beneath) and how long it runs.
+#[derive(Debug, Clone)]
+pub struct VideoLocation {
+    pub file_id: i64,
+    pub kind: MediaKind,
+    pub root_path: String,
+    pub rel_path: String,
+    pub duration_ms: Option<i64>,
+}
+
+/// Every ready video (movies and TV), in path order.
+pub fn video_locations(conn: &Connection) -> Result<Vec<VideoLocation>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.kind, r.path, f.rel_path, f.duration_ms
+         FROM files f JOIN roots r ON r.id = f.root_id
+         WHERE f.status = 'ready' AND f.kind IN ('movies', 'tv')
+         ORDER BY r.path, f.rel_path",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, Option<i64>>(4)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (file_id, kind, root_path, rel_path, duration_ms) = row?;
+        let kind = MediaKind::parse(&kind).context("bad kind in files table")?;
+        out.push(VideoLocation { file_id, kind, root_path, rel_path, duration_ms });
+    }
+    Ok(out)
+}
+
 /// Everything known about one item, for a detail view.
 #[derive(Debug, Clone)]
 pub struct ItemDetail {

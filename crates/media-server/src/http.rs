@@ -225,8 +225,10 @@ pub struct AppState {
     /// just before the sender is dropped, which is what wakes the waiters.
     pub subs_inflight: std::sync::Mutex<std::collections::HashMap<i64, tokio::sync::watch::Receiver<()>>>,
     /// Permits for ffprobe/ffmpeg children (see text_sub_stream): the
-    /// cap on how many a flood of requests can have running at once.
-    pub probes: tokio::sync::Semaphore,
+    /// cap on how many a flood of requests can have running at once. By
+    /// handle, so an audio stream can carry its permit for as long as
+    /// its ffmpeg runs (see serve_audio).
+    pub probes: Arc<tokio::sync::Semaphore>,
 }
 
 pub struct TlsInfo {
@@ -339,6 +341,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/captions/{id}", get(captions_page))
         .route("/card/{id}", get(card_fragment))
         .route("/subs/{id}", get(serve_subs))
+        .route("/audio/{id}", get(serve_audio))
+        .route("/api/captions", get(api_captions))
         .layer(middleware::from_fn_with_state(state.clone(), redirect_pages))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
@@ -1199,6 +1203,238 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     match std::fs::read_to_string(&cache) {
         Ok(body) => vtt_response(with_speakers(&servable.abs_path, body)),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Which audio stream carries the dialogue, and how many channels it
+/// has: the stream flagged default when there is one, else the widest —
+/// the same choice ffmpeg makes on its own, made here so the channel
+/// count that decides the centre-channel filter belongs to the stream
+/// that is then mapped. (ordinal among audio streams, channels)
+async fn dialogue_stream(state: &AppState, path: &std::path::Path) -> Option<(usize, u32)> {
+    let out = tokio::process::Command::new(&state.ffprobe)
+        .args(["-v", "error", "-select_streams", "a", "-show_entries",
+               "stream=channels:stream_disposition=default", "-of", "default=noprint_wrappers=1"])
+        .arg(path)
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut streams: Vec<(u32, bool)> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(n) = line.strip_prefix("channels=") {
+            streams.push((n.trim().parse().unwrap_or(0), false));
+        } else if let Some(d) = line.strip_prefix("DISPOSITION:default=") {
+            if let Some(last) = streams.last_mut() {
+                last.1 = d.trim() == "1";
+            }
+        }
+    }
+    let pick = streams
+        .iter()
+        .position(|s| s.1)
+        .or_else(|| (0..streams.len()).max_by_key(|&i| streams[i].0))?;
+    Some((pick, streams[pick].0))
+}
+
+#[derive(serde::Deserialize)]
+struct AudioQuery {
+    /// "center": the centre channel alone when the stream has one (a
+    /// surround mix keeps its dialogue there); otherwise a mono downmix.
+    channel: Option<String>,
+    /// Sample rate, 8000–48000; 16000 (what speech models want) by default.
+    rate: Option<u32>,
+}
+
+/// The dialogue track as mono FLAC for analysis off this host — a
+/// diarizer or aligner on another machine wants a few dozen megabytes
+/// of speech-rate audio, not the multi-gigabyte file it sits in.
+/// ffmpeg decodes, downmixes and resamples straight into the response;
+/// nothing is cached, and a client that goes away takes its ffmpeg with
+/// it (kill_on_drop). The stream holds one of the shared ffmpeg permits
+/// for as long as it runs. The first bytes are awaited before the
+/// response starts, so a file ffmpeg cannot read is a 502 with its
+/// complaint rather than an empty 200.
+async fn serve_audio(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<AudioQuery>,
+) -> Response {
+    let Ok(id) = id.trim_end_matches(".flac").parse::<i64>() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let servable = {
+        let conn = state.db.lock().await;
+        files::servable(&conn, id)
+    };
+    let Ok(Some(servable)) = servable else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let rate = q.rate.unwrap_or(16_000);
+    if !(8_000..=48_000).contains(&rate) {
+        return (StatusCode::BAD_REQUEST, "rate must be 8000–48000").into_response();
+    }
+    let centre = matches!(q.channel.as_deref(), Some("center") | Some("centre"));
+
+    let Ok(permit) = state.probes.clone().acquire_owned().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Some((ordinal, channels)) = dialogue_stream(&state, &servable.abs_path).await else {
+        return (StatusCode::NOT_FOUND, "no audio stream").into_response();
+    };
+    let mut cmd = tokio::process::Command::new(&state.ffmpeg);
+    cmd.args(["-v", "error", "-nostdin", "-i"])
+        .arg(&servable.abs_path)
+        .args(["-map", &format!("0:a:{ordinal}"), "-vn", "-sn", "-dn"]);
+    // 5.1 and wider carry dialogue in the front centre; anything narrower
+    // has no such channel and folds down instead.
+    if centre && channels >= 6 {
+        cmd.args(["-af", "pan=mono|c0=FC"]);
+    } else {
+        cmd.args(["-ac", "1"]);
+    }
+    cmd.args(["-ar", &rate.to_string(), "-c:a", "flac", "-f", "flac", "-"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!("ffmpeg unavailable for audio of {id}: {err}");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+    let Some(mut stdout) = child.stdout.take() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    // The first chunk decides whether there is a stream at all.
+    let mut first = vec![0u8; 64 * 1024];
+    let n = match tokio::io::AsyncReadExt::read(&mut stdout, &mut first).await {
+        Ok(n) => n,
+        Err(err) => {
+            tracing::warn!("reading ffmpeg audio for {id}: {err}");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+    if n == 0 {
+        let out = child.wait_with_output().await;
+        let why = out
+            .map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string())
+            .unwrap_or_default();
+        tracing::warn!("ffmpeg produced no audio for {id}: {why}");
+        return (StatusCode::BAD_GATEWAY, format!("ffmpeg produced no audio: {why}")).into_response();
+    }
+    first.truncate(n);
+    let reader = AudioPipe { first, stdout, _child: child, _permit: permit };
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(reader));
+    let name = servable
+        .abs_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| id.to_string());
+    let disposition = format!(
+        "inline; filename=\"{}.flac\"",
+        name.replace(['"', '\\'], "_").chars().filter(|c| !c.is_control()).collect::<String>()
+    );
+    let mut res = Response::new(body);
+    let h = res.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/flac"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Ok(v) = HeaderValue::from_str(&disposition) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    res
+}
+
+/// ffmpeg's stdout as the response body: the chunk already read, then
+/// the pipe. Owning the child and the permit, it ends both when the body
+/// is dropped — at the end of the stream or when the client goes away.
+struct AudioPipe {
+    first: Vec<u8>,
+    stdout: tokio::process::ChildStdout,
+    _child: tokio::process::Child,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl tokio::io::AsyncRead for AudioPipe {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if !this.first.is_empty() {
+            let n = this.first.len().min(buf.remaining());
+            buf.put_slice(&this.first[..n]);
+            this.first.drain(..n);
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut this.stdout).poll_read(cx, buf)
+    }
+}
+
+#[derive(serde::Serialize)]
+struct CaptionEntry {
+    id: i64,
+    kind: &'static str,
+    /// The root's path as this host mounts it, and the path beneath it.
+    root: String,
+    path: String,
+    duration_ms: Option<i64>,
+    /// A same-name .srt sidecar beside the video.
+    srt: bool,
+    /// A same-name .rttm sidecar (speakers, see media_db::rttm).
+    rttm: bool,
+    /// Where the dialogue track streams from (see serve_audio).
+    audio: String,
+}
+
+/// Every video with its sidecar state, as JSON, for an analysis worker
+/// deciding what to fetch: the root path and relative path together
+/// name the file, so the worker can write its own sidecar beside it
+/// over the share.
+async fn api_captions(State(state): State<Arc<AppState>>) -> Response {
+    let videos = {
+        let conn = state.db.lock().await;
+        files::video_locations(&conn)
+    };
+    let videos = match videos {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!("listing videos: {err}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let entries: Vec<CaptionEntry> = tokio::task::spawn_blocking(move || {
+        videos
+            .into_iter()
+            .map(|v| {
+                let abs = std::path::Path::new(&v.root_path).join(&v.rel_path);
+                CaptionEntry {
+                    id: v.file_id,
+                    kind: v.kind.as_str(),
+                    root: v.root_path,
+                    path: v.rel_path,
+                    duration_ms: v.duration_ms,
+                    srt: sidecar::is_regular_within(&abs.with_extension("srt"), sidecar::MAX_TEXT),
+                    rttm: sidecar::is_regular_within(&abs.with_extension("rttm"), sidecar::MAX_TEXT),
+                    audio: format!("/audio/{}.flac", v.file_id),
+                }
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+    match serde_json::to_vec(&entries) {
+        Ok(body) => (
+            [(header::CONTENT_TYPE, "application/json; charset=utf-8"), (header::CACHE_CONTROL, "no-store")],
+            body,
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
