@@ -32,7 +32,7 @@ pub struct Segment {
 }
 
 /// The confidence below which a scored segment is not worth a label.
-pub const MIN_CONFIDENCE: f64 = 0.7;
+pub const MIN_CONFIDENCE: f64 = 0.9;
 
 /// `segments` without those scored under [`MIN_CONFIDENCE`]; unscored
 /// segments stay.
@@ -255,17 +255,17 @@ SPEAKER ep 1 10.0 1.0 <NA> <NA> <Al&ice> <NA> <NA>
     fn scores_are_read_and_doubtful_segments_dropped() {
         let text = "\
 SPEAKER ep 1 0.0 1.0 <NA> <NA> A 0.95 <NA>
-SPEAKER ep 1 1.0 1.0 <NA> <NA> B 0.7 <NA>
-SPEAKER ep 1 2.0 1.0 <NA> <NA> C 0.69 <NA>
+SPEAKER ep 1 1.0 1.0 <NA> <NA> B 0.9 <NA>
+SPEAKER ep 1 2.0 1.0 <NA> <NA> C 0.89 <NA>
 SPEAKER ep 1 3.0 1.0 <NA> <NA> D <NA> <NA>
 SPEAKER ep 1 4.0 1.0 <NA> <NA> E
 SPEAKER ep 1 5.0 1.0 <NA> <NA> F junk <NA>
 ";
         let segs = parse(text);
         let scores: Vec<Option<f64>> = segs.iter().map(|s| s.confidence).collect();
-        assert_eq!(scores, vec![Some(0.95), Some(0.7), Some(0.69), None, None, None]);
+        assert_eq!(scores, vec![Some(0.95), Some(0.9), Some(0.89), None, None, None]);
         let kept: Vec<String> = confident(segs).into_iter().map(|s| s.speaker).collect();
-        assert_eq!(kept, vec!["A", "B", "D", "E", "F"], "0.7 stays, 0.69 goes, unscored stay");
+        assert_eq!(kept, vec!["A", "B", "D", "E", "F"], "0.9 stays, 0.89 goes, unscored stay");
     }
 
     #[test]
