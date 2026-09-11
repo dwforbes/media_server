@@ -369,7 +369,10 @@ in one cue — is split by line, each labelled from its own share of the cue's t
 panel and the pop-out window show the label before each line in a colour of its own
 (handed out in order of first appearance, so the leads get the clearest hues) with a
 bar of that colour along the timeline, and a dashed exchange becomes a line per
-speaker. The sidecar is time-based, not cue-based, so it stays valid when the `.srt`
+speaker. A two-silhouettes button in the panel's header (in the pop-out window too)
+turns the speakers off and on — names and colours go, the lines stay — and the choice
+is remembered per browser; while the program has no speaker data the button sits
+faded and struck through. The sidecar is time-based, not cue-based, so it stays valid when the `.srt`
 beside it is corrected; it is read on every load, so one that arrives or changes shows
 on the next play. Nothing catalogs it, and nothing here produces one: a diarization is
 a GPU job for another machine, whose contract with this server is the `.rttm` it

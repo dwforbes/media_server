@@ -1536,6 +1536,22 @@ body.cc div.videowrap { width: calc(100vw - var(--ccw)); margin-left: calc(50% -
 }
 </style>"#;
 
+/// The speakers toggle in the panel's header: two silhouettes. Three
+/// states, kept in data-state — "on" (lit) and "off" while the program
+/// has speaker data (an .rttm sidecar, see media_db::rttm), "na" (faded,
+/// struck through, disabled) while it has none. The choice is
+/// remembered per browser; the panel script (CC_PANEL_SCRIPT) owns it.
+const CC_SPEAKERS_BUTTON: &str = "<button type=\"button\" id=\"cc-speakers\" data-state=\"na\" \
+  aria-pressed=\"false\" disabled title=\"No speaker data for this program\" \
+  aria-label=\"Show speakers\">\
+  <svg viewBox=\"0 0 24 16\" aria-hidden=\"true\">\
+  <circle cx=\"16.5\" cy=\"4.6\" r=\"2.6\"/>\
+  <path d=\"M11.6 14.2a4.9 4.9 0 0 1 9.8 0z\"/>\
+  <circle cx=\"8\" cy=\"5.2\" r=\"3.2\"/>\
+  <path d=\"M2 15a6 6 0 0 1 12 0z\"/>\
+  <line class=\"strike\" x1=\"2.5\" y1=\"14.5\" x2=\"21.5\" y2=\"1.5\"/>\
+  </svg></button>";
+
 /// The captions panel's own styles, shared by the player page (where it
 /// is a column down the right edge) and the pop-out window (where it is
 /// the whole page — see CAPTIONS_STYLE).
@@ -1551,6 +1567,16 @@ const CC_STYLE: &str = concat!("<style>\n", r#"#cc-panel { position: fixed; top:
 #cc-panel .head button:hover { background: #2a2a2a; color: #fff; }
 /* Touch devices have no floating windows to pop out into. */
 @media (hover: none) { #cc-pop { display: none; } }
+/* The speakers toggle: lit while speakers show, plain while hidden,
+   faded and struck through while the program has no speaker data. */
+#cc-speakers svg { width: 1.5em; height: 1em; vertical-align: -.12em; fill: currentColor; overflow: visible; }
+#cc-speakers .strike { display: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+#cc-panel .head #cc-speakers[data-state="on"] { color: #9cf; }
+#cc-panel .head #cc-speakers[data-state="na"] { opacity: .35; cursor: default; }
+#cc-panel .head #cc-speakers[data-state="na"]:hover { background: none; color: #aaa; }
+#cc-speakers[data-state="na"] .strike { display: block; }
+#cc-track.nospeakers a.cue .who { display: none; }
+#cc-track.nospeakers a.cue.voiced { box-shadow: none; }
 #cc-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #cc-list { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 /* The way back to now, while the viewer has scrolled off elsewhere:
@@ -1661,12 +1687,39 @@ window.ccPanel = function (list, track, opts) {
     return m + ':' + (s < 10 ? '0' : '') + s;
   }
   function visible() { return list.clientHeight > 0; }
+  // Speakers (an .rttm sidecar): shown or not, the viewer's choice,
+  // remembered per browser; the header button reflects it, or reads as
+  // not applicable while the program has no speaker data.
+  var speakersBtn = document.getElementById('cc-speakers');
+  var wantSpeakers = true;
+  try { wantSpeakers = localStorage.getItem('cc-speakers') !== '0'; } catch (e) {}
+  function haveSpeakers() {
+    for (var i = 0; i < cues.length; i++) if (cues[i].speaker) return true;
+    return false;
+  }
+  function speakersUi() {
+    var have = haveSpeakers(), on = have && wantSpeakers;
+    track.classList.toggle('nospeakers', !on);
+    if (!speakersBtn) return;
+    speakersBtn.dataset.state = !have ? 'na' : on ? 'on' : 'off';
+    speakersBtn.disabled = !have;
+    speakersBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    speakersBtn.title = !have ? 'No speaker data for this program'
+      : on ? 'Speakers shown — click to hide them' : 'Speakers hidden — click to show them';
+  }
+  if (speakersBtn) speakersBtn.addEventListener('click', function () {
+    if (!haveSpeakers()) return;
+    wantSpeakers = !wantSpeakers;
+    try { localStorage.setItem('cc-speakers', wantSpeakers ? '1' : '0'); } catch (e) {}
+    speakersUi(); layout(); follow(true);
+  });
   function empty(text) {
     cues = []; cueEls = []; tops = []; bottoms = []; now = null; active = -1;
     track.innerHTML = '';
     var d = document.createElement('div');
     d.className = 'empty'; d.textContent = text;
     track.appendChild(d);
+    speakersUi();
   }
   // A speaker's colour: a distinguishable palette handed out in order of
   // first appearance, so the leads get the clearest hues; past the
@@ -1708,6 +1761,7 @@ window.ccPanel = function (list, track, opts) {
     frag.appendChild(now);
     track.innerHTML = '';
     track.appendChild(frag);
+    speakersUi();
     layout();
     follow(true);
   }
@@ -2835,13 +2889,14 @@ async fn play_page(
     // swap has an element to replace either way. The panel is fixed to
     // the right edge on desktop; on phones it flows in below the controls.
     let cc_hidden = if has_subs { "" } else { " hidden" };
-    let panel = "<aside id=\"cc-panel\" hidden aria-label=\"Captions\">\
+    let panel = format!("<aside id=\"cc-panel\" hidden aria-label=\"Captions\">\
          <div class=\"head\"><span id=\"cc-title\">Captions</span><span class=\"tools\">\
+         {CC_SPEAKERS_BUTTON}\
          <button type=\"button\" id=\"cc-pop\" title=\"Open the captions in a window of their own\" \
           aria-label=\"Pop the captions out into a window\">⧉</button>\
          <button type=\"button\" id=\"cc-close\" aria-label=\"Close the captions panel\">×</button>\
          </span></div>\
-         <div id=\"cc-list\"><div id=\"cc-track\"></div></div></aside>";
+         <div id=\"cc-list\"><div id=\"cc-track\"></div></div></aside>");
     let og = item_og_meta(
         &request_base_url(&state, &headers, https.is_some()),
         &format!("/play/{id}"),
@@ -2908,6 +2963,7 @@ async fn captions_page(State(state): State<Arc<AppState>>, Path(id): Path<i64>) 
         "{head}<body class=\"captions\">\
          <aside id=\"cc-panel\" aria-label=\"Captions\">\
          <div class=\"head\"><span id=\"cc-title\">{title}</span><span class=\"tools\">\
+         {CC_SPEAKERS_BUTTON}\
          <button type=\"button\" id=\"cc-dock\" title=\"Back into the player page\">dock</button>\
          </span></div>\
          <div id=\"cc-list\"><div id=\"cc-track\"></div></div></aside>\
