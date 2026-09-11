@@ -360,8 +360,11 @@ swaps, hiding itself for a program that has none.
 
 **Speakers.** A same-name `.rttm` sidecar beside the video — a speaker diarization in
 the NIST Rich Transcription Time Marked format every diarizer (pyannote, NeMo,
-sherpa-onnx) writes, one `SPEAKER <file> 1 <start> <duration> <NA> <NA> <label> <NA>
-<NA>` line per stretch of speech — names who is talking. The server joins it to the
+sherpa-onnx) writes, one `SPEAKER <file> 1 <start> <duration> <NA> <NA> <label> <conf>
+<NA>` line per stretch of speech — names who is talking. The ninth field is the
+diarizer's confidence in the label, 0–1, where it gives one (`<NA>` otherwise, as
+pyannote writes it): a segment scored below 0.7 is ignored — a guess the diarizer
+itself doubts is worse than no label — and an unscored one is kept. The server joins it to the
 captions at request time: each cue takes the label whose speech overlaps it the most,
 written into the WebVTT as a voice span (`<v Label>…</v>`, the one caption construct
 browsers carry a speaker in), and a cue whose lines each open with a dash — two people

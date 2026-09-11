@@ -3,8 +3,14 @@
 //! stretch of speech, whitespace separated —
 //!
 //! ```text
-//! SPEAKER <file> <channel> <start s> <duration s> <NA> <NA> <label> <NA> <NA>
+//! SPEAKER <file> <channel> <start s> <duration s> <NA> <NA> <label> <conf> <NA>
 //! ```
+//!
+//! The ninth field is a confidence score, 0–1, when the diarizer offers
+//! one (`<NA>` otherwise, as pyannote writes it); the tenth is a signal
+//! lookahead time, never read here. A scored segment under
+//! [`MIN_CONFIDENCE`] is dropped by [`confident`] — a guess the diarizer
+//! itself doubts is worse than no label — and an unscored one is kept.
 //!
 //! The sidecar is time-based, never cue-based, so it stays valid when the
 //! `.srt` beside it is corrected or replaced. The server joins the two at
@@ -21,6 +27,20 @@ pub struct Segment {
     pub start: f64,
     pub end: f64,
     pub speaker: String,
+    /// The diarizer's confidence in the label, 0–1, when it gave one.
+    pub confidence: Option<f64>,
+}
+
+/// The confidence below which a scored segment is not worth a label.
+pub const MIN_CONFIDENCE: f64 = 0.7;
+
+/// `segments` without those scored under [`MIN_CONFIDENCE`]; unscored
+/// segments stay.
+pub fn confident(segments: Vec<Segment>) -> Vec<Segment> {
+    segments
+        .into_iter()
+        .filter(|s| s.confidence.is_none_or(|c| c >= MIN_CONFIDENCE))
+        .collect()
 }
 
 /// The `SPEAKER` lines of an RTTM file, in time order. Other line types,
@@ -41,10 +61,12 @@ pub fn parse(text: &str) -> Vec<Segment> {
             let _ortho = f.next()?;
             let _stype = f.next()?;
             let speaker = f.next()?;
+            // Absent, <NA>, or unparsable all mean "no score".
+            let confidence = f.next().and_then(|c| c.parse::<f64>().ok()).filter(|c| c.is_finite());
             if !(start.is_finite() && dur.is_finite()) || start < 0.0 || dur <= 0.0 {
                 return None;
             }
-            Some(Segment { start, end: start + dur, speaker: clean_label(speaker) })
+            Some(Segment { start, end: start + dur, speaker: clean_label(speaker), confidence })
         })
         .collect();
     out.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
@@ -222,11 +244,28 @@ SPEAKER ep 1 10.0 1.0 <NA> <NA> <Al&ice> <NA> <NA>
     fn parses_speaker_lines_only_in_time_order() {
         let segs = parse(RTTM);
         assert_eq!(segs.len(), 3);
-        assert_eq!(segs[0], Segment { start: 0.5, end: 3.5, speaker: "Alice".into() });
+        assert_eq!(segs[0], Segment { start: 0.5, end: 3.5, speaker: "Alice".into(), confidence: None });
         assert_eq!(segs[1].speaker, "Bob");
         assert_eq!(segs[2].speaker, "Alice", "tag delimiters stripped from the label");
         assert!(parse("").is_empty());
         assert!(parse("SPEAKER ep 1 1.0 0.0 <NA> <NA> X <NA> <NA>").is_empty(), "zero duration");
+    }
+
+    #[test]
+    fn scores_are_read_and_doubtful_segments_dropped() {
+        let text = "\
+SPEAKER ep 1 0.0 1.0 <NA> <NA> A 0.95 <NA>
+SPEAKER ep 1 1.0 1.0 <NA> <NA> B 0.7 <NA>
+SPEAKER ep 1 2.0 1.0 <NA> <NA> C 0.69 <NA>
+SPEAKER ep 1 3.0 1.0 <NA> <NA> D <NA> <NA>
+SPEAKER ep 1 4.0 1.0 <NA> <NA> E
+SPEAKER ep 1 5.0 1.0 <NA> <NA> F junk <NA>
+";
+        let segs = parse(text);
+        let scores: Vec<Option<f64>> = segs.iter().map(|s| s.confidence).collect();
+        assert_eq!(scores, vec![Some(0.95), Some(0.7), Some(0.69), None, None, None]);
+        let kept: Vec<String> = confident(segs).into_iter().map(|s| s.speaker).collect();
+        assert_eq!(kept, vec!["A", "B", "D", "E", "F"], "0.7 stays, 0.69 goes, unscored stay");
     }
 
     #[test]

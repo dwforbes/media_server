@@ -1087,13 +1087,14 @@ fn vtt_response(body: String) -> Response {
 }
 
 /// The WebVTT with speakers from the media file's `.rttm` sidecar (a
-/// diarization, see media_db::rttm) written in as voice spans; the text
+/// diarization, see media_db::rttm) written in as voice spans, segments
+/// the diarizer scored below its confidence floor left out; the text
 /// untouched when there is no such sidecar. Read at request time, like
 /// the .srt, so a sidecar that arrives or changes shows on the next load.
 fn with_speakers(media: &std::path::Path, vtt: String) -> String {
     let rttm = media.with_extension("rttm");
     match sidecar::read_text_capped(&rttm, sidecar::MAX_TEXT) {
-        Ok(text) => media_db::rttm::tag_vtt(&vtt, &media_db::rttm::parse(&text)),
+        Ok(text) => media_db::rttm::tag_vtt(&vtt, &media_db::rttm::confident(media_db::rttm::parse(&text))),
         Err(_) => vtt,
     }
 }
