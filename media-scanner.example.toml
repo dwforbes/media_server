@@ -6,8 +6,13 @@
 # unreliable on external/network volumes:
 #   ~/Library/Application Support/mediaserver/media.db
 
-# How long a file's size must be stable before metadata extraction.
+# Watcher debounce: filesystem events are coalesced in windows of this length.
 settle_ms = 2000
+
+# How long a new file's size and mtime must hold still before it is probed
+# and catalogued. Generous on purpose: network copies stall for seconds at a
+# time, and probing a half-copied file catalogues it without its duration.
+settle_secs = 30
 
 # Full reconcile pass every N hours. Kept short because FSEvents on an
 # SMB-mounted share are unreliable; the reconcile is the backstop.

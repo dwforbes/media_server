@@ -12,6 +12,20 @@ use media_db::queries::{files, movies, music, tv};
 use media_db::{MediaKind, Root, TechInfo};
 use rusqlite::Connection;
 
+/// How an extraction ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Extracted {
+    /// Attributes stored; the row is ready.
+    Ready,
+    /// The row is ready, but ffprobe could not read the file, so it has
+    /// no duration/resolution attributes. For a file that just arrived
+    /// this usually means the copy isn't finished (an MP4's moov atom
+    /// lands last); the watcher retries those.
+    NoTechInfo,
+    /// The row is marked error.
+    Failed,
+}
+
 /// Extract attributes for one pending file and finalize it (status ready).
 /// On failure the row is marked error and the daemon carries on.
 pub fn extract_file(
@@ -20,37 +34,43 @@ pub fn extract_file(
     root: &Root,
     rel_path: &str,
     file_id: i64,
-) -> Result<()> {
+) -> Result<Extracted> {
     // A crafted file that trips a panic inside a tag or container parser
     // must cost that file its row, not the daemon its life.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         try_extract(conn, ffprobe, root, rel_path, file_id)
     }));
     match outcome {
-        Ok(Ok(())) => {
+        Ok(Ok(None)) => {
             tracing::info!("extracted {}/{}", root.path, rel_path);
-            Ok(())
+            Ok(Extracted::Ready)
+        }
+        Ok(Ok(Some(probe_err))) => {
+            tracing::warn!("{probe_err}; no tech info");
+            Ok(Extracted::NoTechInfo)
         }
         Ok(Err(err)) => {
             tracing::warn!("extraction failed for {}/{}: {err:#}", root.path, rel_path);
             files::mark_error(conn, file_id)?;
-            Ok(())
+            Ok(Extracted::Failed)
         }
         Err(_) => {
             tracing::error!("extraction panicked on {}/{}; marked error", root.path, rel_path);
             files::mark_error(conn, file_id)?;
-            Ok(())
+            Ok(Extracted::Failed)
         }
     }
 }
 
+/// Ok(Some(err)) when the file was finalized without tech info because
+/// ffprobe failed with `err`.
 fn try_extract(
     conn: &mut Connection,
     ffprobe: &str,
     root: &Root,
     rel_path: &str,
     file_id: i64,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let abs = Path::new(&root.path).join(rel_path);
     let stem = Path::new(rel_path)
         .file_stem()
@@ -67,9 +87,10 @@ fn try_extract(
         .unwrap_or_default();
 
     let mut embedded = false;
+    let mut probe_err = None;
     match root.kind {
         MediaKind::Movies => {
-            let (tech, tag_genre, chapters) = probe_or_default(ffprobe, &abs);
+            let (tech, tag_genre, chapters) = probe_or_default(ffprobe, &abs, &mut probe_err);
             let (mut title, mut year) = nameparse::movie(&stem);
             let mut genres: Vec<String> =
                 tag_genre.map(|g| audio::split_genres(&g)).unwrap_or_default();
@@ -102,7 +123,7 @@ fn try_extract(
             store_segments(conn, file_id, &abs, &tech, &chapters)?;
         }
         MediaKind::Tv => {
-            let (tech, _, chapters) = probe_or_default(ffprobe, &abs);
+            let (tech, _, chapters) = probe_or_default(ffprobe, &abs, &mut probe_err);
             let parsed = nameparse::episode(&stem, &parent_dirs);
             let nfo = nfo::read_sidecar(&abs);
             // nfo values win; name-parse fills the gaps.
@@ -173,7 +194,7 @@ fn try_extract(
     files::record_art(conn, file_id, art.as_deref())?;
     files::record_nfo_mtime(conn, file_id, nfo_mtime(&abs))?;
     files::record_edl_mtime(conn, file_id, segments::edl_mtime(&abs))?;
-    Ok(())
+    Ok(probe_err)
 }
 
 /// Discover and store the skippable segments for one video file.
@@ -397,11 +418,16 @@ pub fn nfo_mtime(media_path: &Path) -> Option<i64> {
 
 /// ffprobe failure degrades to an empty TechInfo: the file is still
 /// catalogued and playable, just without duration/resolution attributes.
-fn probe_or_default(ffprobe: &str, abs: &Path) -> (TechInfo, Option<String>, Vec<video::Chapter>) {
+/// The error text is left in `probe_err` for the caller to report.
+fn probe_or_default(
+    ffprobe: &str,
+    abs: &Path,
+    probe_err: &mut Option<String>,
+) -> (TechInfo, Option<String>, Vec<video::Chapter>) {
     match video::probe(ffprobe, abs) {
         Ok(result) => result,
         Err(err) => {
-            tracing::warn!("ffprobe unavailable/failed ({err:#}); cataloguing without tech info");
+            *probe_err = Some(format!("{err:#}"));
             (TechInfo::default(), None, Vec::new())
         }
     }

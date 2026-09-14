@@ -257,9 +257,13 @@ config and the network.
 
 - SQLite runs in WAL mode: the scanner is the only writer, the server only reads.
 - Files enter the catalog as `pending` and only become `ready` in the same transaction
-  that writes their attributes — the server never surfaces half-scanned files. Files
-  still being copied are detected by size-stability checks and picked up on a later
-  event or reconcile pass.
+  that writes their attributes — the server never surfaces half-scanned files. A file
+  the watcher reports is held until its size and mtime have stayed put for
+  `settle_secs` (30 s by default: multi-GB network copies stall for seconds at a
+  time, and the watcher's debouncer emits events throughout a copy rather than
+  waiting for it to end). If ffprobe still can't read it then — an MP4's moov atom
+  is written last — it is retried a few times with a growing delay before being
+  catalogued as-is. The reconcile pass skips files modified within the same window.
 - The server polls `PRAGMA data_version` (2 s); any scanner commit bumps the
   ContentDirectory `SystemUpdateID`, so browsing clients refresh on their next poll.
 - Every node in the UPnP tree has a stable, parseable object id (`mv:year:1995`,

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use media_db::MediaKind;
@@ -10,9 +11,15 @@ pub struct Config {
     /// Defaults to ~/Library/Application Support/mediaserver/media.db
     pub db_path: Option<PathBuf>,
     pub roots: Vec<RootConfig>,
-    /// How long a file's size must stay unchanged before extraction (ms).
+    /// Watcher debounce: filesystem events are coalesced in windows of
+    /// this length (ms). Not a copy-completion test — see settle_secs.
     #[serde(default = "default_settle_ms")]
     pub settle_ms: u64,
+    /// How long a new or changed media file's size and mtime must hold
+    /// still before it is probed and catalogued. Network copies stall for
+    /// seconds at a time, so this is deliberately generous.
+    #[serde(default = "default_settle_secs")]
+    pub settle_secs: u64,
     /// Full reconcile interval, hours. 0 disables the periodic pass.
     #[serde(default = "default_reconcile_hours")]
     pub reconcile_interval_hours: u64,
@@ -111,6 +118,9 @@ pub struct RootConfig {
 fn default_settle_ms() -> u64 {
     2000
 }
+fn default_settle_secs() -> u64 {
+    30
+}
 fn default_reconcile_hours() -> u64 {
     6
 }
@@ -141,6 +151,12 @@ impl Config {
 
     pub fn db_path(&self) -> PathBuf {
         self.db_path.clone().unwrap_or_else(media_db::open::default_db_path)
+    }
+
+    /// The settle window as a Duration (never zero: a file whose mtime is
+    /// the current second is always still suspect).
+    pub fn settle(&self) -> Duration {
+        Duration::from_secs(self.settle_secs.max(1))
     }
 
     /// The ffmpeg binary the segment detector decodes audio with.

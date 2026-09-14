@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::Result;
 use media_db::queries::files;
@@ -16,16 +16,15 @@ pub fn media_mime(root: &Root, path: &Path) -> Option<&'static str> {
     mime::mime_for_extension(&ext, root.kind.is_video())
 }
 
-/// A file modified within the last `grace_ms` is still being written
-/// (network copies stall longer than any size-stability window; mtime age
-/// is the reliable signal). Skipped files are picked up by the watcher's
-/// post-quiet event or the next reconcile.
-pub fn too_fresh(mtime: i64, grace_ms: u64) -> bool {
+/// A file modified within the last `grace` may still be being written.
+/// Files the reconcile pass skips for this reason are picked up by the
+/// watcher (which holds them until they settle) or the next reconcile.
+pub fn too_fresh(mtime: i64, grace: Duration) -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    now - mtime < (grace_ms / 1000).max(1) as i64
+    now - mtime < (grace.as_secs() as i64).max(1)
 }
 
 pub fn stat(path: &Path) -> Option<(i64, i64)> {
@@ -44,7 +43,12 @@ pub fn stat(path: &Path) -> Option<(i64, i64)> {
 /// files, total files extracted) — the distinction matters to the
 /// auto-enrich trigger, which must ignore sidecar-driven re-extraction or
 /// enrichment's own .nfo writes would re-trigger it.
-pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Result<(usize, usize)> {
+pub fn reconcile_root(
+    conn: &mut Connection,
+    ffprobe: &str,
+    root: &Root,
+    settle: Duration,
+) -> Result<(usize, usize)> {
     let root_path = Path::new(&root.path);
     if !root_path.is_dir() {
         tracing::warn!(
@@ -91,7 +95,7 @@ pub fn reconcile_root(conn: &mut Connection, ffprobe: &str, root: &Root) -> Resu
         let Ok(rel) = entry.path().strip_prefix(root_path) else { continue };
         let rel = rel.to_string_lossy().to_string();
         let Some((size, mtime)) = stat(entry.path()) else { continue };
-        if too_fresh(mtime, 2000) {
+        if too_fresh(mtime, settle) {
             tracing::debug!("skipping {} (still being written)", entry.path().display());
             known.remove(&rel);
             continue;

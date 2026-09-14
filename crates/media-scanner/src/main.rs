@@ -3,6 +3,7 @@ mod config;
 mod extract;
 mod reconcile;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -17,6 +18,7 @@ use rusqlite::Connection;
 use walkdir::WalkDir;
 
 use config::{Config, EnrichConfig};
+use extract::Extracted;
 
 /// Resolve the enrich command: an explicit path is used as-is; a bare name
 /// prefers a sibling of this executable (the binaries are built together),
@@ -176,6 +178,118 @@ impl AnalyzeRunner {
     }
 }
 
+/// Media files the watcher reported, held until they stop changing.
+///
+/// The debouncer is no help here: it does not wait for quiet, it emits a
+/// Modify event every settle_ms for as long as a copy keeps writing, and
+/// a stat-to-stat size comparison is no defence against a network copy
+/// that stalls for seconds at a time. So a file is probed only once its
+/// size and mtime have held still for the whole settle window. If
+/// ffprobe still can't read it then (an MP4's moov atom lands last), the
+/// copying client may have preallocated the size and pinned the mtime up
+/// front, so the file is tried again a few times with a growing delay
+/// before it is catalogued as-is.
+struct SettleQueue {
+    window: Duration,
+    entries: HashMap<PathBuf, Settling>,
+}
+
+struct Settling {
+    size: i64,
+    mtime: i64,
+    /// When the current (size, mtime) was first observed.
+    stable_since: Instant,
+    /// Attempts that ended with ffprobe unable to read the file.
+    probe_failures: u32,
+    /// Earliest next attempt, for the post-failure back-off.
+    not_before: Instant,
+}
+
+/// Unreadable-file retries: 30 s window → 1, 2, 4, 5, 5 min → ~17 min in
+/// all before giving up, which outlasts any realistic copy stall.
+const MAX_PROBE_RETRIES: u32 = 5;
+const MAX_PROBE_BACKOFF: Duration = Duration::from_secs(300);
+
+impl SettleQueue {
+    fn new(window: Duration) -> Self {
+        SettleQueue { window, entries: HashMap::new() }
+    }
+
+    /// An event reported this file at this size and mtime.
+    fn note(&mut self, path: &Path, size: i64, mtime: i64) {
+        let now = Instant::now();
+        match self.entries.get_mut(path) {
+            Some(e) if e.size == size && e.mtime == mtime => {}
+            Some(e) => {
+                e.size = size;
+                e.mtime = mtime;
+                e.stable_since = now;
+            }
+            None => {
+                tracing::info!("{}: new media; waiting for it to settle", path.display());
+                self.entries.insert(
+                    path.to_path_buf(),
+                    Settling {
+                        size,
+                        mtime,
+                        stable_since: now,
+                        probe_failures: 0,
+                        not_before: now,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Re-stat every entry: files whose size and mtime have held for the
+    /// window (and whose back-off has passed) are due. Vanished files
+    /// are dropped — their remove event takes care of the catalog.
+    fn due(&mut self) -> Vec<PathBuf> {
+        let now = Instant::now();
+        let window = self.window;
+        let mut due = Vec::new();
+        self.entries.retain(|path, e| {
+            let Some((size, mtime)) = reconcile::stat(path) else { return false };
+            if size != e.size || mtime != e.mtime {
+                e.size = size;
+                e.mtime = mtime;
+                e.stable_since = now;
+            } else if now.duration_since(e.stable_since) >= window && now >= e.not_before {
+                due.push(path.clone());
+            }
+            true
+        });
+        due
+    }
+
+    fn will_retry(&self, path: &Path) -> bool {
+        self.entries
+            .get(path)
+            .is_some_and(|e| e.probe_failures < MAX_PROBE_RETRIES)
+    }
+
+    /// ffprobe couldn't read the file: schedule another attempt. Returns
+    /// the delay, or None once the retries are used up.
+    fn retry_later(&mut self, path: &Path) -> Option<Duration> {
+        let e = self.entries.get_mut(path)?;
+        if e.probe_failures >= MAX_PROBE_RETRIES {
+            return None;
+        }
+        e.probe_failures += 1;
+        let delay = (self.window * 2u32.pow(e.probe_failures)).min(MAX_PROBE_BACKOFF);
+        e.not_before = Instant::now() + delay;
+        Some(delay)
+    }
+
+    fn remove(&mut self, path: &Path) {
+        self.entries.remove(path);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[derive(Parser)]
 #[command(about = "Watches media source folders and maintains the shared catalog database")]
 struct Args {
@@ -249,8 +363,9 @@ fn main() -> Result<()> {
         last_add: Instant::now(),
     });
 
-    // Watch all roots; the debouncer waits for events to settle before
-    // delivering, which absorbs most mid-copy churn.
+    // Watch all roots. The debouncer only coalesces events; new media
+    // waits in the settle queue until it stops changing.
+    let mut settle = SettleQueue::new(cfg.settle());
     let (tx, rx) = mpsc::channel::<DebounceEventResult>();
     let mut debouncer = new_debouncer(Duration::from_millis(cfg.settle_ms), None, tx)
         .context("starting filesystem watcher")?;
@@ -265,8 +380,11 @@ fn main() -> Result<()> {
     let mut last_reconcile = Instant::now();
 
     loop {
-        // Short timeout so the enrich debounce gets regular ticks.
-        match rx.recv_timeout(Duration::from_secs(10)) {
+        // Short timeout so the runners get regular ticks; shorter still
+        // while files are settling, so one is catalogued soon after its
+        // window passes.
+        let tick = if settle.is_empty() { Duration::from_secs(10) } else { Duration::from_secs(2) };
+        match rx.recv_timeout(tick) {
             Ok(Ok(events)) => {
                 let mut paths: Vec<PathBuf> = Vec::new();
                 for event in events {
@@ -285,15 +403,7 @@ fn main() -> Result<()> {
                     }
                 }
                 for path in paths {
-                    match handle_path(&mut conn, &cfg, &roots, &path) {
-                        Ok(Handled::Media) => {
-                            if let Some(runner) = &mut enricher {
-                                runner.note_media_added();
-                            }
-                            if let Some(runner) = &mut analyzer {
-                                runner.note_media_added();
-                            }
-                        }
+                    match handle_path(&mut conn, &cfg, &roots, &mut settle, &path) {
                         Ok(Handled::CaptionSidecar) => {
                             if let Some(runner) = &mut enricher {
                                 runner.note_caption_sidecar_changed(&path);
@@ -312,6 +422,45 @@ fn main() -> Result<()> {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("filesystem watcher channel closed unexpectedly");
+            }
+        }
+
+        for path in settle.due() {
+            let final_attempt = !settle.will_retry(&path);
+            let catalogued = match catalog_settled(&mut conn, &cfg, &roots, &path, final_attempt) {
+                Ok(Some(Extracted::NoTechInfo)) => match settle.retry_later(&path) {
+                    Some(delay) => {
+                        tracing::info!(
+                            "{}: unreadable so far (copy still in flight?); retrying in {}s",
+                            path.display(),
+                            delay.as_secs()
+                        );
+                        continue;
+                    }
+                    None => {
+                        tracing::warn!(
+                            "{}: still unreadable after {} attempts; catalogued without tech info",
+                            path.display(),
+                            MAX_PROBE_RETRIES + 1
+                        );
+                        true
+                    }
+                },
+                Ok(Some(Extracted::Ready)) => true,
+                Ok(Some(Extracted::Failed)) | Ok(None) => false,
+                Err(err) => {
+                    tracing::warn!("cataloguing {}: {err:#}", path.display());
+                    false
+                }
+            };
+            settle.remove(&path);
+            if catalogued {
+                if let Some(runner) = &mut enricher {
+                    runner.note_media_added();
+                }
+                if let Some(runner) = &mut analyzer {
+                    runner.note_media_added();
+                }
             }
         }
 
@@ -343,34 +492,35 @@ fn main() -> Result<()> {
 fn reconcile_all(conn: &mut Connection, cfg: &Config, roots: &[Root]) -> Result<bool> {
     let mut any_new = false;
     for root in roots {
-        let (new_media, extracted) = reconcile::reconcile_root(conn, &cfg.ffprobe_path, root)?;
+        let (new_media, extracted) =
+            reconcile::reconcile_root(conn, &cfg.ffprobe_path, root, cfg.settle())?;
         tracing::info!("reconciled {} ({extracted} files extracted)", root.path);
         any_new |= new_media > 0;
     }
     Ok(any_new)
 }
 
-/// React to one filesystem event path. Returns true when a new/changed
-/// media file was catalogued (the auto-enrich trigger).
-/// What an event under a root amounted to, for the runners: new/changed
-/// media (enrichment and analysis want to know), a caption sidecar (only
-/// enrichment does), or nothing. Ordered so a subtree scan can keep the
+/// What an event under a root amounted to, for the runners: a caption
+/// sidecar (enrichment wants to know) or nothing. New media is not an
+/// outcome here — it goes to the settle queue, and counts once it is
+/// catalogued from there. Ordered so a subtree scan can keep the
 /// strongest of its files' outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Handled {
     Nothing,
     CaptionSidecar,
-    Media,
 }
 
-fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path) -> Result<Handled> {
-    // Longest matching root wins, in case one root nests inside another.
+/// The root a path belongs to and the path relative to it. Longest
+/// matching root wins, in case one root nests inside another. None for
+/// paths outside every root, the root itself, and hidden components.
+fn locate<'a>(roots: &'a [Root], path: &Path) -> Result<Option<(&'a Root, String)>> {
     let Some(root) = roots
         .iter()
         .filter(|r| path.starts_with(&r.path))
         .max_by_key(|r| r.path.len())
     else {
-        return Ok(Handled::Nothing);
+        return Ok(None);
     };
     let rel = path
         .strip_prefix(&root.path)
@@ -378,8 +528,22 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         .to_string_lossy()
         .to_string();
     if rel.is_empty() || rel.split('/').any(|c| c.starts_with('.')) {
-        return Ok(Handled::Nothing);
+        return Ok(None);
     }
+    Ok(Some((root, rel)))
+}
+
+/// React to one filesystem event path.
+fn handle_path(
+    conn: &mut Connection,
+    cfg: &Config,
+    roots: &[Root],
+    settle: &mut SettleQueue,
+    path: &Path,
+) -> Result<Handled> {
+    let Some((root, rel)) = locate(roots, path)? else {
+        return Ok(Handled::Nothing);
+    };
 
     if !path.exists() {
         // A remux replaces x.mkv with x.mp4; the .mp4's row (if the create
@@ -405,7 +569,7 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
     }
 
     if path.is_dir() {
-        return scan_subtree(conn, cfg, root, path);
+        return scan_subtree(conn, cfg, root, settle, path);
     }
 
     let ext = path
@@ -454,38 +618,63 @@ fn handle_path(conn: &mut Connection, cfg: &Config, roots: &[Root], path: &Path)
         return Ok(Handled::Nothing);
     }
 
-    let Some(mime) = reconcile::media_mime(root, path) else {
-        return Ok(Handled::Nothing);
-    };
-
-    // Settle checks: a file still being copied grows between two stats, and
-    // — the stronger signal, since network copies stall longer than any
-    // stat window — carries a fresh mtime. The debouncer fires the final
-    // event only after settle_ms of quiet, so a completed copy passes.
-    let Some((size, _)) = reconcile::stat(path) else { return Ok(Handled::Nothing) };
-    std::thread::sleep(Duration::from_millis(500));
-    let Some((size2, mtime)) = reconcile::stat(path) else { return Ok(Handled::Nothing) };
-    if size != size2 || reconcile::too_fresh(mtime, cfg.settle_ms.min(2000)) {
-        tracing::debug!("{} still changing; leaving for next event", path.display());
+    if reconcile::media_mime(root, path).is_none() {
         return Ok(Handled::Nothing);
     }
+    let Some((size, mtime)) = reconcile::stat(path) else { return Ok(Handled::Nothing) };
 
-    // Overlapping events (directory + file) both land here; skip work the
+    // Spurious events (CIFS surfaces them for files nobody modified) and
+    // overlapping ones (directory + file) both land here; skip files the
     // catalog already reflects.
-    if let Some((_, db_size, db_mtime, status)) = files::lookup(conn, root.id, &rel)? {
-        if db_size == size2 && db_mtime == mtime && status == "ready" {
-            return Ok(Handled::Nothing);
-        }
+    if catalog_reflects(conn, root, &rel, size, mtime)? {
+        return Ok(Handled::Nothing);
     }
-
-    let id = files::upsert_pending(conn, root.id, &rel, size2, mtime, root.kind, mime)?;
-    extract::extract_file(conn, &cfg.ffprobe_path, root, &rel, id)?;
-    Ok(Handled::Media)
+    settle.note(path, size, mtime);
+    Ok(Handled::Nothing)
 }
 
-/// A directory appeared (new folder, or moved in): catalog its contents.
-/// Returns whether any media files were catalogued.
-fn scan_subtree(conn: &mut Connection, cfg: &Config, root: &Root, dir: &Path) -> Result<Handled> {
+fn catalog_reflects(conn: &Connection, root: &Root, rel: &str, size: i64, mtime: i64) -> Result<bool> {
+    Ok(files::lookup(conn, root.id, rel)?
+        .is_some_and(|(_, db_size, db_mtime, status)| {
+            db_size == size && db_mtime == mtime && status == "ready"
+        }))
+}
+
+/// Catalog a file the settle queue found stable. None when there was
+/// nothing to do (gone, or catalogued meanwhile by a reconcile pass).
+/// Unless this is the final attempt, a file ffprobe can't read is put
+/// back to pending — hidden from the server — so the retry can finalize
+/// it properly.
+fn catalog_settled(
+    conn: &mut Connection,
+    cfg: &Config,
+    roots: &[Root],
+    path: &Path,
+    final_attempt: bool,
+) -> Result<Option<Extracted>> {
+    let Some((root, rel)) = locate(roots, path)? else { return Ok(None) };
+    let Some(mime) = reconcile::media_mime(root, path) else { return Ok(None) };
+    let Some((size, mtime)) = reconcile::stat(path) else { return Ok(None) };
+    if catalog_reflects(conn, root, &rel, size, mtime)? {
+        return Ok(None);
+    }
+    let id = files::upsert_pending(conn, root.id, &rel, size, mtime, root.kind, mime)?;
+    let outcome = extract::extract_file(conn, &cfg.ffprobe_path, root, &rel, id)?;
+    if outcome == Extracted::NoTechInfo && !final_attempt {
+        files::upsert_pending(conn, root.id, &rel, size, mtime, root.kind, mime)?;
+    }
+    Ok(Some(outcome))
+}
+
+/// A directory appeared (new folder, or moved in): its media files join
+/// the settle queue, its sidecars are handled as usual.
+fn scan_subtree(
+    conn: &mut Connection,
+    cfg: &Config,
+    root: &Root,
+    settle: &mut SettleQueue,
+    dir: &Path,
+) -> Result<Handled> {
     let mut any = Handled::Nothing;
     for entry in WalkDir::new(dir)
         .follow_links(false)
@@ -494,7 +683,7 @@ fn scan_subtree(conn: &mut Connection, cfg: &Config, root: &Root, dir: &Path) ->
         .flatten()
     {
         if entry.file_type().is_file() {
-            any = any.max(handle_path(conn, cfg, &[root.clone()], entry.path())?);
+            any = any.max(handle_path(conn, cfg, std::slice::from_ref(root), settle, entry.path())?);
         }
     }
     Ok(any)
@@ -611,4 +800,53 @@ fn refresh_sidecar_sibling(
         extract::extract_file(conn, &cfg.ffprobe_path, root, &rel, kf.id)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("media-scanner-settle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    #[test]
+    fn settle_queue_waits_for_stability_then_backs_off() {
+        let path = scratch_file("episode.mp4");
+        std::fs::write(&path, b"partial").unwrap();
+        let (size, mtime) = reconcile::stat(&path).unwrap();
+
+        let mut queue = SettleQueue::new(Duration::from_millis(300));
+        queue.note(&path, size, mtime);
+        assert!(queue.due().is_empty(), "not due before the window passes");
+
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(queue.due(), vec![path.clone()]);
+
+        // The copy resumed: the window starts over.
+        std::fs::write(&path, b"partial, then some more").unwrap();
+        assert!(queue.due().is_empty());
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(queue.due(), vec![path.clone()]);
+
+        // Unreadable: retried with a growing delay, then given up on.
+        assert!(queue.will_retry(&path));
+        let mut delays = Vec::new();
+        while let Some(delay) = queue.retry_later(&path) {
+            delays.push(delay);
+        }
+        assert_eq!(delays.len(), MAX_PROBE_RETRIES as usize);
+        assert!(delays.windows(2).all(|w| w[0] <= w[1]));
+        assert!(!queue.will_retry(&path));
+        assert!(queue.due().is_empty(), "back-off holds the file");
+
+        // A vanished file leaves the queue.
+        queue.remove(&path);
+        queue.note(&path, size, mtime);
+        std::fs::remove_file(&path).unwrap();
+        assert!(queue.due().is_empty());
+        assert!(queue.entries.is_empty());
+    }
 }
