@@ -21,6 +21,11 @@ friendly_name = "Home Media Server"
 # How many items each "Recently Added" view lists (Movies, TV Shows, Music).
 recent_count = 25
 
+# How many viewer profiles (the web pages' "who's watching?" tiles) may
+# exist. Anyone on the LAN can add one, so this caps a prank or a
+# runaway script; remove profiles from /profiles to make room.
+max_profiles = 10
+
 # Optional HTTPS for the web pages on a second port. UPnP/DLNA stays on
 # the plain port above — renderers cannot do TLS — and nothing there
 # changes. The certificate must be issued for `hostname` (a Let's Encrypt

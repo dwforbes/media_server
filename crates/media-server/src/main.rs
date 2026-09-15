@@ -73,6 +73,8 @@ async fn main() -> Result<()> {
         base_url: base_url.clone(),
         icon,
         recent_count: cfg.recent_count,
+        max_profiles: cfg.max_profiles,
+        write_limit: Default::default(),
         ffmpeg: cfg.ffmpeg_path.clone(),
         ffprobe: cfg.ffprobe_path.clone(),
         vtt_cache: {

@@ -210,6 +210,9 @@ pub struct AppState {
     /// Viewer profiles and watch state — the server's own database
     /// (see profiles.rs); the catalog stays read-only.
     pub profiles: std::sync::Mutex<Connection>,
+    pub max_profiles: usize,
+    /// Throttle on the endpoints that write profile state (see watch.rs).
+    pub write_limit: crate::watch::WriteLimit,
     pub db: tokio::sync::Mutex<Connection>,
     pub update_id: AtomicU32,
     /// Leaf counts per browse container, generation-keyed on update_id.

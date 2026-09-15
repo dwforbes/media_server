@@ -47,6 +47,15 @@ pub struct Config {
     /// content as the multicast announcements.
     #[serde(default)]
     pub ssdp_unicast_clients: Vec<std::net::IpAddr>,
+    /// How many viewer profiles may exist. Anyone on the LAN can add one
+    /// (there is no authentication), so the cap keeps a prank or a
+    /// runaway script from filling the picker.
+    #[serde(default = "default_max_profiles")]
+    pub max_profiles: usize,
+}
+
+fn default_max_profiles() -> usize {
+    10
 }
 
 fn default_ssdp_alive_secs() -> u64 {

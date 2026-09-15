@@ -632,6 +632,13 @@ of the running time counts as finishing too. With that, per profile:
   "12:34 left · yesterday" or "watched 3 days ago". The series ratings grid rings
   seen episodes (dashed for part-way).
 
+Two guards, since anything on the LAN can call these: at most `max_profiles`
+profiles (10 unless `media-server.toml` says otherwise — the add tile disappears
+at the cap), and the writes (position reports, seen ticks, adding a profile) pass
+a token bucket per claimed profile (60 in hand, one back every 2 s) under a
+global one (600, ten a second); past that the answer is 429 and the state is
+simply not written.
+
 State lives in `profiles.db` beside the catalog, owned by the server (the
 scanner stays the catalog's only writer). Rows key on the program, not the
 file — an episode by series, season and number, a movie by title and year — so

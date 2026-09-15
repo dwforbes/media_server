@@ -261,7 +261,7 @@ pub fn home_picker_html(state: &AppState) -> String {
     let list = profiles::list(&store(state)).unwrap_or_default();
     format!(
         "<h2 style=\"font-size:1.1em;margin:1em 0 0\">Who's watching?</h2>{}",
-        picker_html(&list, None, false)
+        picker_html(&list, None, false, state.max_profiles)
     )
 }
 
@@ -279,7 +279,7 @@ p.err{color:#c00}\
 
 /// The tiles: one per profile (a click chooses it), plus "add". With
 /// `manage`, each tile carries a remove button as well.
-pub fn picker_html(profiles: &[Profile], current: Option<i64>, manage: bool) -> String {
+pub fn picker_html(profiles: &[Profile], current: Option<i64>, manage: bool, max: usize) -> String {
     let mut html = String::from("<div class=\"tiles\">");
     for p in profiles {
         let cls = if current == Some(p.id) { "tile current" } else { "tile" };
@@ -301,12 +301,20 @@ pub fn picker_html(profiles: &[Profile], current: Option<i64>, manage: bool) -> 
             }
         ));
     }
-    html.push_str(
-        "<form method=\"post\" action=\"/profiles/add\">\
-         <button class=\"tile add\" title=\"Add a profile\">+</button>\
-         <input name=\"name\" maxlength=\"40\" placeholder=\"New name\" required aria-label=\"New profile name\">\
-         </form></div>",
-    );
+    if profiles.len() < max {
+        html.push_str(
+            "<form method=\"post\" action=\"/profiles/add\">\
+             <button class=\"tile add\" title=\"Add a profile\">+</button>\
+             <input name=\"name\" maxlength=\"40\" placeholder=\"New name\" required aria-label=\"New profile name\">\
+             </form>",
+        );
+    }
+    html.push_str("</div>");
+    if profiles.len() >= max {
+        html.push_str(&format!(
+            "<p class=\"wnote\" style=\"margin-left:0\">Profile limit reached ({max}); remove one to add another.</p>"
+        ));
+    }
     html
 }
 
@@ -349,7 +357,7 @@ fn picker_page(state: &AppState, headers: &HeaderMap, manage: bool, error: Optio
     let html = format!(
         "{head}<body><p><a href=\"/\" class=\"home\" title=\"Home\" aria-label=\"Home\">⌂</a></p>\
          <h1>Who's watching?</h1>{intro}{error}{}{manage_link}{signed_in}{PAGE_CLOSE}",
-        picker_html(&list, current.as_ref().map(|p| p.id), manage)
+        picker_html(&list, current.as_ref().map(|p| p.id), manage, state.max_profiles)
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -392,7 +400,21 @@ pub async fn add(
     headers: HeaderMap,
     Form(form): Form<NameForm>,
 ) -> Response {
-    let added = profiles::add(&store(&state), &form.name);
+    if let Err(res) = state.write_limit.admit(profiles::cookie_profile_id(&headers)) {
+        return *res;
+    }
+    let added = {
+        let conn = store(&state);
+        let count = profiles::list(&conn).map(|l| l.len()).unwrap_or(usize::MAX);
+        if count >= state.max_profiles {
+            Err(anyhow::anyhow!(
+                "The profile limit ({}) is reached; remove one to add another.",
+                state.max_profiles
+            ))
+        } else {
+            profiles::add(&conn, &form.name)
+        }
+    };
     match added {
         Ok(id) => with_cookie(Some(id), "/"),
         Err(err) => picker_page(&state, &headers, false, Some(&err.to_string())),
@@ -434,18 +456,24 @@ struct WatchReport {
 
 /// POST /api/watch — a beacon, so the body is read as text and answered
 /// with nothing. Without a profile there is nothing to record.
-pub async fn api_watch(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> StatusCode {
-    let Some(profile) = current(&state, &headers) else { return StatusCode::NO_CONTENT };
-    let Ok(report) = serde_json::from_str::<WatchReport>(&body) else { return StatusCode::BAD_REQUEST };
+pub async fn api_watch(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    let claimed = profiles::cookie_profile_id(&headers);
+    if let Err(res) = state.write_limit.admit(claimed) {
+        return *res;
+    }
+    let Some(profile) = current(&state, &headers) else { return StatusCode::NO_CONTENT.into_response() };
+    let Ok(report) = serde_json::from_str::<WatchReport>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     if !report.position.is_finite() || report.position < 0.0 {
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
     let detail = {
         let conn = state.db.lock().await;
         files::detail(&conn, report.id)
     };
-    let Ok(Some(detail)) = detail else { return StatusCode::NOT_FOUND };
-    let Some(key) = profiles::detail_key(&detail) else { return StatusCode::NO_CONTENT };
+    let Ok(Some(detail)) = detail else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(key) = profiles::detail_key(&detail) else { return StatusCode::NO_CONTENT.into_response() };
     let duration_ms = report
         .duration
         .filter(|d| d.is_finite() && *d > 0.0)
@@ -460,9 +488,9 @@ pub async fn api_watch(State(state): State<Arc<AppState>>, headers: HeaderMap, b
     };
     if let Err(err) = result {
         tracing::warn!("recording watch state for {}: {err:#}", detail.file_id);
-        return StatusCode::INTERNAL_SERVER_ERROR;
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    StatusCode::NO_CONTENT
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -473,6 +501,9 @@ struct SeenReport {
 
 /// POST /api/seen — the tick on a listing. Answers with the note to show.
 pub async fn api_seen(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    if let Err(res) = state.write_limit.admit(profiles::cookie_profile_id(&headers)) {
+        return *res;
+    }
     let Some(profile) = current(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "choose a profile first").into_response();
     };
@@ -497,6 +528,88 @@ pub async fn api_seen(State(state): State<Arc<AppState>>, headers: HeaderMap, bo
         .unwrap_or_default();
     let json = serde_json::json!({ "seen": report.seen, "note": note });
     ([(header::CONTENT_TYPE, "application/json")], json.to_string()).into_response()
+}
+
+/// A token bucket: `capacity` calls at once, refilling at `per_sec`.
+struct Bucket {
+    tokens: f64,
+    last: std::time::Instant,
+}
+
+impl Bucket {
+    fn take(&mut self, capacity: f64, per_sec: f64, now: std::time::Instant) -> bool {
+        let elapsed = now.duration_since(self.last).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * per_sec).min(capacity);
+        self.last = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Throttle on the endpoints that write profile state — the player's
+/// position reports, the seen tick, adding a profile. Real use is a
+/// report a minute per player plus the odd tick; the buckets are sized
+/// well above that and far below what would trouble SQLite. Keyed on
+/// the profile the request claims (the cookie, unverified — the point
+/// is to bound work before any lookup), with a global bucket over all
+/// of them, and the key table bounded so a spray of made-up ids cannot
+/// grow it without limit.
+#[derive(Default)]
+pub struct WriteLimit {
+    inner: std::sync::Mutex<LimitState>,
+}
+
+#[derive(Default)]
+struct LimitState {
+    per_key: HashMap<Option<i64>, Bucket>,
+    global: Option<Bucket>,
+}
+
+/// Per claimed profile: 60 writes in hand, refilling one every 2 s.
+const KEY_BURST: f64 = 60.0;
+const KEY_PER_SEC: f64 = 0.5;
+/// Over everything: 600 in hand, refilling 10 a second.
+const GLOBAL_BURST: f64 = 600.0;
+const GLOBAL_PER_SEC: f64 = 10.0;
+/// Distinct claimed ids remembered at once.
+const MAX_KEYS: usize = 1024;
+
+impl WriteLimit {
+    /// Admit the call, or the 429 to answer with.
+    pub fn admit(&self, key: Option<i64>) -> Result<(), Box<Response>> {
+        let now = std::time::Instant::now();
+        let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let ok_global = st
+            .global
+            .get_or_insert(Bucket { tokens: GLOBAL_BURST, last: now })
+            .take(GLOBAL_BURST, GLOBAL_PER_SEC, now);
+        if st.per_key.len() >= MAX_KEYS && !st.per_key.contains_key(&key) {
+            // Drop the stalest entries rather than refuse new keys.
+            let mut stale: Vec<(Option<i64>, std::time::Instant)> =
+                st.per_key.iter().map(|(k, b)| (*k, b.last)).collect();
+            stale.sort_by_key(|(_, last)| *last);
+            for (k, _) in stale.into_iter().take(MAX_KEYS / 4) {
+                st.per_key.remove(&k);
+            }
+        }
+        let ok_key = st
+            .per_key
+            .entry(key)
+            .or_insert_with(|| Bucket { tokens: KEY_BURST, last: now })
+            .take(KEY_BURST, KEY_PER_SEC, now);
+        if ok_global && ok_key {
+            Ok(())
+        } else {
+            Err(Box::new(
+                (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "10")], "slow down")
+                    .into_response(),
+            ))
+        }
+    }
 }
 
 /// The seen ticks on listings and detail pages: a change posts to
@@ -576,6 +689,28 @@ mod tests {
         assert_eq!(initials("dennis forbes"), "DF");
         assert_eq!(initials("Émile"), "É");
         assert_eq!(tile_colour("a"), tile_colour("a"));
+    }
+
+    #[test]
+    fn write_limit_bursts_then_refills() {
+        let limit = WriteLimit::default();
+        for _ in 0..KEY_BURST as usize {
+            assert!(limit.admit(Some(1)).is_ok());
+        }
+        assert!(limit.admit(Some(1)).is_err(), "the burst is spent");
+        assert!(limit.admit(Some(2)).is_ok(), "another profile has its own bucket");
+        // Refill is by the clock: wind one back by hand.
+        let mut st = limit.inner.lock().unwrap();
+        st.per_key.get_mut(&Some(1)).unwrap().last -= std::time::Duration::from_secs(4);
+        drop(st);
+        assert!(limit.admit(Some(1)).is_ok());
+        assert!(limit.admit(Some(1)).is_ok());
+        assert!(limit.admit(Some(1)).is_err());
+        // A spray of made-up ids stays bounded.
+        for id in 100..(100 + MAX_KEYS as i64 + 50) {
+            let _ = limit.admit(Some(id));
+        }
+        assert!(limit.inner.lock().unwrap().per_key.len() <= MAX_KEYS);
     }
 
     fn profiles_now() -> i64 {
