@@ -17,7 +17,6 @@ use rusqlite::Connection;
 use crate::didl::xml_escape;
 use crate::http::{page_head, AppState, PAGE_CLOSE};
 use crate::profiles::{self, Profile, WatchRow};
-use crate::tree;
 
 pub type States = HashMap<String, WatchRow>;
 
@@ -148,94 +147,142 @@ fn up_next(episodes: &[BrowseItem], rows: &States) -> Option<(BrowseItem, Option
         .map(|(_, e)| ((*e).clone(), None))
 }
 
-fn play_link(item: &BrowseItem, label: &str) -> String {
-    format!("<a href=\"/play/{}\">{}</a>", item.file_id, xml_escape(label))
+/// One entry of the continue-watching gallery.
+struct Continue {
+    item: BrowseItem,
+    /// The row behind it — None for an "up next" episode, which has
+    /// none of its own yet.
+    row: Option<WatchRow>,
 }
 
-/// A series page's "continue" line.
-pub fn series_next_html(state: &AppState, catalog: &Connection, profile: &Profile, series: &str) -> String {
-    let rows = match profiles::series_rows(&store(state), profile.id, series) {
-        Ok(rows) if !rows.is_empty() => rows.into_iter().map(|r| (r.key.clone(), r)).collect::<States>(),
-        _ => return String::new(),
-    };
-    let episodes = tv::series_episodes(catalog, series).unwrap_or_default();
-    let Some((episode, row)) = up_next(&episodes, &rows) else {
-        return "<p class=\"wnote\" style=\"margin-left:0\">Every episode seen.</p>".to_string();
-    };
-    let label = format!(
-        "S{:02}E{:02} — {}",
-        episode.season.unwrap_or(0),
-        episode.episode.unwrap_or(0),
-        episode.title
-    );
-    match row {
-        Some(row) => format!(
-            "<p>▶ Continue: {} <span class=\"wnote\">{}</span></p>",
-            play_link(&episode, &label),
-            note(&row)
-        ),
-        None => format!("<p>▶ Up next: {}</p>", play_link(&episode, &label)),
-    }
-}
-
-/// The home page's "continue watching": programs left part-way, and
-/// the episode after each series' latest finished one, latest activity
-/// first.
-pub fn continue_html(state: &AppState, catalog: &Connection, profile: &Profile) -> String {
+/// The continue-watching gallery: programs left part-way, and the
+/// episode after each series' latest finished one, latest activity
+/// first — narrowed to what lies under `scope` (the container the page
+/// shows), so a franchise page lists only its franchises' films and a
+/// season page only its episodes. Dismissed entries stay off until the
+/// program is played again.
+pub fn continue_html(
+    state: &AppState,
+    catalog: &Connection,
+    profile: &Profile,
+    scope: &crate::objectid::ObjectId,
+    recent_count: usize,
+) -> String {
     const SHOW: usize = 12;
+    // Everything under the scope, by program key. The root is everything.
+    let in_scope: Option<std::collections::HashSet<String>> = match scope {
+        crate::objectid::ObjectId::Root => None,
+        _ => {
+            let mut seen = std::collections::HashSet::new();
+            let mut all = Vec::new();
+            if let Err(err) = crate::http::flatten_items(catalog, scope, recent_count, 5, &mut seen, &mut all) {
+                tracing::warn!("continue watching: flattening scope: {err:#}");
+            }
+            Some(all.iter().filter_map(profiles::item_key).collect())
+        }
+    };
+    let admits = |item: &BrowseItem| {
+        in_scope
+            .as_ref()
+            .is_none_or(|set| profiles::item_key(item).is_some_and(|k| set.contains(&k)))
+    };
+
     let recent = profiles::recent(&store(state), profile.id, 60).unwrap_or_default();
-    let mut lines: Vec<String> = Vec::new();
+    let mut entries: Vec<Continue> = Vec::new();
     let mut series_done: Vec<String> = Vec::new();
     for row in recent {
-        if lines.len() >= SHOW {
+        if entries.len() >= SHOW {
             break;
         }
         // A vanished file drops out; a remuxed one still finds its row
         // by key, but the play link needs a current file.
         let Ok(Some(item)) = files::browse_item(catalog, row.file_id) else { continue };
         if let Some(series) = item.series.clone().filter(|_| item.kind == media_db::MediaKind::Tv) {
+            // The series' latest row decides for the whole series (this
+            // is it: rows come latest-first), dismissed included.
             let folded = series.to_lowercase();
             if series_done.contains(&folded) {
                 continue;
             }
             series_done.push(folded);
+            if row.dismissed {
+                continue;
+            }
             let rows = profiles::series_rows(&store(state), profile.id, &series)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|r| (r.key.clone(), r))
                 .collect::<States>();
             let episodes = tv::series_episodes(catalog, &series).unwrap_or_default();
-            match up_next(&episodes, &rows) {
-                Some((episode, Some(row))) => lines.push(format!(
-                    "<li>▶ {} <span class=\"wnote\">{}</span></li>",
-                    play_link(&episode, &tree::recent_tv_title(&episode)),
-                    note(&row)
-                )),
-                Some((episode, None)) => lines.push(format!(
-                    "<li>▶ {} <span class=\"wnote\">up next</span></li>",
-                    play_link(&episode, &tree::recent_tv_title(&episode))
-                )),
-                None => {}
+            if let Some((episode, row)) = up_next(&episodes, &rows) {
+                if admits(&episode) {
+                    entries.push(Continue { item: episode, row });
+                }
             }
-        } else if row.in_progress() {
-            let label = match item.year {
-                Some(year) => format!("{} ({year})", item.title),
-                None => item.title.clone(),
-            };
-            lines.push(format!(
-                "<li>▶ {} <span class=\"wnote\">{}</span></li>",
-                play_link(&item, &label),
-                note(&row)
-            ));
+        } else if row.in_progress() && !row.dismissed && admits(&item) {
+            entries.push(Continue { item, row: Some(row) });
         }
     }
-    if lines.is_empty() {
+    if entries.is_empty() {
         return String::new();
     }
+    let mut html = String::from(
+        "<h2 id=\"continue\" style=\"font-size:1.1em;margin:1.2em 0 0\">Continue watching</h2>\
+         <div class=\"covers cont\">",
+    );
+    for entry in &entries {
+        html.push_str(&continue_cover_html(entry));
+    }
+    html.push_str("</div>");
+    html
+}
+
+/// A cover in the gallery: the poster (or an outlined placeholder)
+/// linking straight into the player, a caption with the program and
+/// where it stands, a remove button, and the details card the cards
+/// script fills on hover.
+fn continue_cover_html(entry: &Continue) -> String {
+    let item = &entry.item;
+    let (line1, line2) = match (item.kind, item.season, item.episode) {
+        (media_db::MediaKind::Tv, Some(season), Some(episode)) => (
+            item.series.clone().unwrap_or_else(|| item.title.clone()),
+            format!("S{season:02}E{episode:02}"),
+        ),
+        (media_db::MediaKind::Tv, _, _) => (item.series.clone().unwrap_or_default(), item.title.clone()),
+        _ => (
+            match item.year {
+                Some(year) => format!("{} ({year})", item.title),
+                None => item.title.clone(),
+            },
+            String::new(),
+        ),
+    };
+    let standing = match &entry.row {
+        Some(row) => note(row),
+        None => "up next".to_string(),
+    };
+    let caption = [line1.as_str(), line2.as_str(), standing.as_str()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| xml_escape(s))
+        .collect::<Vec<_>>()
+        .join("<br>");
+    let name = xml_escape(&if line2.is_empty() { line1.clone() } else { format!("{line1} {line2}") });
+    let link = if item.has_art {
+        format!(
+            "<a href=\"/play/{}\"><img src=\"{}\" alt=\"{name}\" loading=\"lazy\"></a>",
+            item.file_id,
+            crate::http::art_url(item)
+        )
+    } else {
+        format!("<a class=\"noart\" href=\"/play/{}\"><span>{name}</span></a>", item.file_id)
+    };
     format!(
-        "<h2 style=\"font-size:1.1em;margin:1em 0 .2em\">Continue watching</h2>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7;margin-top:0\">{}</ul>",
-        lines.concat()
+        "<span class=\"cover cw\" data-card=\"{id}\" data-dismiss=\"{id}\">{link}\
+         <button type=\"button\" class=\"dismiss\" title=\"Remove from Continue watching\" \
+          aria-label=\"Remove {name} from Continue watching\">×</button>\
+         <span class=\"cap\">{caption}</span><span class=\"card\"></span></span>",
+        id = item.file_id
     )
 }
 
@@ -530,6 +577,42 @@ pub async fn api_seen(State(state): State<Arc<AppState>>, headers: HeaderMap, bo
     ([(header::CONTENT_TYPE, "application/json")], json.to_string()).into_response()
 }
 
+#[derive(serde::Deserialize)]
+struct DismissReport {
+    id: i64,
+}
+
+/// POST /api/dismiss — take the gallery entry for this file off the
+/// continue-watching list: for a series, every episode's row (the
+/// entry hangs off whichever is latest); for a movie, its own.
+pub async fn api_dismiss(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    if let Err(res) = state.write_limit.admit(profiles::cookie_profile_id(&headers)) {
+        return *res;
+    }
+    let Some(profile) = current(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "choose a profile first").into_response();
+    };
+    let Ok(report) = serde_json::from_str::<DismissReport>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let detail = {
+        let conn = state.db.lock().await;
+        files::detail(&conn, report.id)
+    };
+    let Ok(Some(detail)) = detail else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(key) = profiles::detail_key(&detail) else { return StatusCode::BAD_REQUEST.into_response() };
+    let conn = store(&state);
+    let result = match detail.series.as_deref().filter(|_| detail.kind == media_db::MediaKind::Tv) {
+        Some(series) => profiles::dismiss_series(&conn, profile.id, series),
+        None => profiles::dismiss(&conn, profile.id, &key),
+    };
+    if let Err(err) = result {
+        tracing::warn!("dismissing {key}: {err:#}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// A token bucket: `capacity` calls at once, refilling at `per_sec`.
 struct Bucket {
     tokens: f64,
@@ -613,9 +696,68 @@ impl WriteLimit {
 }
 
 /// The seen ticks on listings and detail pages: a change posts to
-/// /api/seen and the note beside the title follows the answer.
+/// /api/seen and the note beside the title follows the answer. And the
+/// continue-watching gallery's remove: the × on a cover, or a right
+/// click (long press) on it for a one-item menu; either posts to
+/// /api/dismiss and drops the cover, and the section with the last one.
 pub const WATCH_SCRIPT: &str = r#"<script>
 (function () {
+  function dismiss(cover) {
+    var id = parseInt(cover.dataset.dismiss, 10);
+    fetch('/api/dismiss', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: id })
+    }).then(function (r) {
+      if (!r.ok) throw 0;
+      var strip = cover.parentNode;
+      cover.remove();
+      if (strip && !strip.querySelector('.cover')) {
+        var h = document.getElementById('continue');
+        if (h) h.remove();
+        strip.remove();
+      }
+    }).catch(function () {});
+  }
+  // Capture phase, stopping there: the cards script (which opens the
+  // details card on a tap of the cover) must never see this click.
+  document.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest('button.dismiss') : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var cover = btn.closest('[data-dismiss]');
+    if (cover) dismiss(cover);
+  }, true);
+  var menu = null, menuFor = null;
+  function closeMenu() {
+    if (menu) { menu.remove(); menu = null; menuFor = null; }
+  }
+  document.addEventListener('contextmenu', function (e) {
+    var cover = e.target && e.target.closest ? e.target.closest('[data-dismiss]') : null;
+    if (!cover) { closeMenu(); return; }
+    e.preventDefault();
+    closeMenu();
+    menuFor = cover;
+    menu = document.createElement('div');
+    menu.id = 'cmenu';
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = 'Remove from Continue watching';
+    b.addEventListener('click', function () { var c = menuFor; closeMenu(); if (c) dismiss(c); });
+    menu.appendChild(b);
+    document.body.appendChild(menu);
+    var x = Math.min(e.clientX, innerWidth - menu.offsetWidth - 8);
+    var y = Math.min(e.clientY, innerHeight - menu.offsetHeight - 8);
+    menu.style.left = Math.max(0, x) + 'px';
+    menu.style.top = Math.max(0, y) + 'px';
+    b.focus();
+  });
+  document.addEventListener('click', function (e) {
+    if (menu && !menu.contains(e.target)) closeMenu();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeMenu();
+  });
   document.addEventListener('change', function (e) {
     var box = e.target;
     if (!box || !box.matches || !box.matches('input[data-seen]')) return;
@@ -656,7 +798,7 @@ mod tests {
     fn row(key: &str, watched: bool, position_ms: i64, updated_at: i64) -> (String, WatchRow) {
         (
             key.to_string(),
-            WatchRow { key: key.to_string(), file_id: 0, position_ms, duration_ms: Some(940_000), watched, updated_at },
+            WatchRow { key: key.to_string(), file_id: 0, position_ms, duration_ms: Some(940_000), watched, updated_at, dismissed: false },
         )
     }
 

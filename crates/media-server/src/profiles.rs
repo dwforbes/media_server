@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS watch (
     duration_ms INTEGER,
     watched     INTEGER NOT NULL DEFAULT 0,
     updated_at  INTEGER NOT NULL,
+    dismissed   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (profile_id, key)
 );
 CREATE INDEX IF NOT EXISTS watch_recent ON watch(profile_id, updated_at DESC);
@@ -57,8 +58,22 @@ pub fn open(catalog_path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
     conn.execute_batch(SCHEMA)?;
+    upgrade(&conn)?;
     tracing::info!("profiles database {}", path.display());
     Ok(conn)
+}
+
+/// Columns added since the first release, for a database created before
+/// them (CREATE IF NOT EXISTS leaves an existing table alone).
+fn upgrade(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(watch)")?;
+    let columns: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<_, _>>()?;
+    if !columns.iter().any(|c| c == "dismissed") {
+        conn.execute_batch("ALTER TABLE watch ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0")?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +92,9 @@ pub struct WatchRow {
     pub duration_ms: Option<i64>,
     pub watched: bool,
     pub updated_at: i64,
+    /// Taken off the continue-watching list by hand; any new report
+    /// puts it back.
+    pub dismissed: bool,
 }
 
 impl WatchRow {
@@ -199,7 +217,7 @@ pub fn set_position(
          ON CONFLICT(profile_id, key) DO UPDATE SET
              file_id = excluded.file_id, position_ms = excluded.position_ms,
              duration_ms = COALESCE(excluded.duration_ms, duration_ms),
-             updated_at = excluded.updated_at",
+             updated_at = excluded.updated_at, dismissed = 0",
         params![profile_id, key, file_id, position_ms.max(0), duration_ms, now()],
     )?;
     Ok(())
@@ -219,7 +237,7 @@ pub fn set_finished(
          ON CONFLICT(profile_id, key) DO UPDATE SET
              file_id = excluded.file_id, position_ms = 0, watched = 1,
              duration_ms = COALESCE(excluded.duration_ms, duration_ms),
-             updated_at = excluded.updated_at",
+             updated_at = excluded.updated_at, dismissed = 0",
         params![profile_id, key, file_id, duration_ms, now()],
     )?;
     Ok(())
@@ -233,7 +251,7 @@ pub fn set_seen(conn: &Connection, profile_id: i64, key: &str, file_id: i64, see
          VALUES (?1, ?2, ?3, 0, ?4, ?5)
          ON CONFLICT(profile_id, key) DO UPDATE SET
              file_id = excluded.file_id, position_ms = 0, watched = excluded.watched,
-             updated_at = excluded.updated_at",
+             updated_at = excluded.updated_at, dismissed = 0",
         params![profile_id, key, file_id, seen as i64, now()],
     )?;
     Ok(())
@@ -247,10 +265,34 @@ fn row_from(r: &rusqlite::Row) -> rusqlite::Result<WatchRow> {
         duration_ms: r.get(3)?,
         watched: r.get::<_, i64>(4)? != 0,
         updated_at: r.get(5)?,
+        dismissed: r.get::<_, i64>(6)? != 0,
     })
 }
 
-const ROW_SELECT: &str = "SELECT key, file_id, position_ms, duration_ms, watched, updated_at FROM watch";
+const ROW_SELECT: &str =
+    "SELECT key, file_id, position_ms, duration_ms, watched, updated_at, dismissed FROM watch";
+
+/// Take a program off the continue-watching list. The position and the
+/// seen tick stay: this hides, it does not forget.
+pub fn dismiss(conn: &Connection, profile_id: i64, key: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE watch SET dismissed = 1 WHERE profile_id = ?1 AND key = ?2",
+        params![profile_id, key],
+    )?;
+    Ok(())
+}
+
+/// The same for a whole series: every episode's row, so which of them
+/// counts as latest no longer matters. Playing any episode again clears
+/// that episode's flag and makes it the latest.
+pub fn dismiss_series(conn: &Connection, profile_id: i64, series: &str) -> Result<()> {
+    let prefix = format!("tv|{}|", series.trim().to_lowercase());
+    conn.execute(
+        "UPDATE watch SET dismissed = 1 WHERE profile_id = ?1 AND substr(key, 1, length(?2)) = ?2",
+        params![profile_id, prefix],
+    )?;
+    Ok(())
+}
 
 pub fn one(conn: &Connection, profile_id: i64, key: &str) -> Result<Option<WatchRow>> {
     Ok(conn
@@ -282,10 +324,12 @@ pub fn states(conn: &Connection, profile_id: i64, keys: &[String]) -> Result<Has
     Ok(out)
 }
 
-/// Latest activity first.
+/// Latest activity first. Within one second a live row outranks a
+/// dismissed one: a report clears the flag, a dismissal leaves the time.
 pub fn recent(conn: &Connection, profile_id: i64, limit: usize) -> Result<Vec<WatchRow>> {
-    let mut stmt =
-        conn.prepare(&format!("{ROW_SELECT} WHERE profile_id = ?1 ORDER BY updated_at DESC LIMIT ?2"))?;
+    let mut stmt = conn.prepare(&format!(
+        "{ROW_SELECT} WHERE profile_id = ?1 ORDER BY updated_at DESC, dismissed ASC LIMIT ?2"
+    ))?;
     let rows = stmt.query_map(params![profile_id, limit as i64], row_from)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -371,6 +415,17 @@ mod tests {
     }
 
     #[test]
+    fn a_first_release_database_gains_the_dismissed_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&SCHEMA.replace("    dismissed   INTEGER NOT NULL DEFAULT 0,\n", "")).unwrap();
+        upgrade(&conn).unwrap();
+        upgrade(&conn).unwrap();   // idempotent
+        let p = add(&conn, "x").unwrap();
+        set_seen(&conn, p, "k", 1, true).unwrap();
+        assert!(!one(&conn, p, "k").unwrap().unwrap().dismissed);
+    }
+
+    #[test]
     fn keys_identify_programs_not_files() {
         let a = key(MediaKind::Tv, 1, Some("Curb Your Enthusiasm"), Some(2), Some(8), "x", None);
         let b = key(MediaKind::Tv, 99, Some("curb your enthusiasm "), Some(2), Some(8), "y", None);
@@ -413,6 +468,16 @@ mod tests {
         // Both rows landed within the same second: age one to order them.
         conn.execute("UPDATE watch SET updated_at = updated_at - 60 WHERE key = 'tv|s|1|1'", []).unwrap();
         assert_eq!(recent(&conn, p, 1).unwrap()[0].key, "tv|s|1|2");
+
+        // Dismissing a series flags every episode; the next report on one
+        // clears it, and within the same second that live row ranks first.
+        dismiss_series(&conn, p, "S").unwrap();
+        assert!(one(&conn, p, "tv|s|1|1").unwrap().unwrap().dismissed);
+        assert!(one(&conn, p, "tv|s|1|2").unwrap().unwrap().dismissed);
+        conn.execute("UPDATE watch SET updated_at = ?1", [now()]).unwrap();
+        set_position(&conn, p, "tv|s|1|1", 11, 1000, None).unwrap();
+        assert!(!one(&conn, p, "tv|s|1|1").unwrap().unwrap().dismissed);
+        assert_eq!(recent(&conn, p, 1).unwrap()[0].key, "tv|s|1|1", "same second: live row first");
 
         delete(&conn, p).unwrap();
         assert!(recent(&conn, p, 10).unwrap().is_empty(), "history goes with the profile");

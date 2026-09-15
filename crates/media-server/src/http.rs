@@ -77,6 +77,16 @@ p.controls input[type=checkbox]{vertical-align:middle;margin:0 .3em 0 0;position
 p.who{float:right;margin:0 0 0 1em;font-size:.9em}\
 .wnote{color:#777;font-size:.85em;margin-left:.6em;white-space:nowrap}\
 li.row input[data-seen]{flex:none;margin:0 .5em 0 0}\
+div.covers.cont{padding-bottom:1em}\
+div.covers .cover.cw{height:auto;position:relative}\
+div.covers .cover.cw>a{height:180px}\
+div.covers .cover.cw .cap{display:block;font-size:.75em;line-height:1.3;margin-top:.3em;color:#444;overflow-wrap:anywhere}\
+div.covers .cover.cw button.dismiss{position:absolute;top:4px;right:4px;width:1.7em;height:1.7em;padding:0;line-height:1;font-size:.9em;border-radius:50%;border:1px solid #888;background:rgba(255,255,255,.92);color:#333;cursor:pointer;display:none}\
+div.covers .cover.cw:hover button.dismiss,div.covers .cover.cw:focus-within button.dismiss{display:block}\
+@media (hover:none){div.covers .cover.cw button.dismiss{display:block}}\
+#cmenu{position:fixed;z-index:20;background:#fff;color:#111;border:1px solid #888;border-radius:4px;box-shadow:0 4px 14px rgba(0,0,0,.25);padding:.25em}\
+#cmenu button{display:block;width:100%;text-align:left;background:none;border:0;padding:.4em .8em;font-size:.9rem;cursor:pointer;white-space:nowrap}\
+#cmenu button:hover{background:#eee}\
 @media (max-width:40em){\
 body{margin:1em auto;padding:0 1rem 1.5rem}\
 body.player{margin:.5em auto}\
@@ -362,6 +372,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/profiles/leave", post(crate::watch::leave))
         .route("/api/watch", post(crate::watch::api_watch))
         .route("/api/seen", post(crate::watch::api_seen))
+        .route("/api/dismiss", post(crate::watch::api_dismiss))
         .layer(middleware::from_fn_with_state(state.clone(), redirect_pages))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
@@ -642,7 +653,7 @@ fn covering_child(parent: &ObjectId, child: &ObjectId) -> bool {
 /// Recursively collect the playable items under a tree node, deduplicated
 /// by file id (an item reachable through several views appears once, at
 /// its first-seen position).
-fn flatten_items(
+pub(crate) fn flatten_items(
     conn: &Connection,
     oid: &ObjectId,
     recent_count: usize,
@@ -931,13 +942,16 @@ async fn browse_page(
         ObjectId::TvSeries(series) => tv::series_episodes(&conn, series).unwrap_or_default(),
         _ => Vec::new(),
     };
-    // The profile's place: the home page offers the picker or lists what
-    // to continue; a series page says which episode comes next.
+    // The home page offers the picker until a profile is chosen. With
+    // one, every container page ends with the profile's continue-watching
+    // gallery, narrowed to what lies under that container.
     let mine = match (&node, &profile) {
-        (ObjectId::Root, Some(p)) => crate::watch::continue_html(&state, &conn, p),
         (ObjectId::Root, None) => crate::watch::home_picker_html(&state),
-        (ObjectId::TvSeries(series), Some(p)) => crate::watch::series_next_html(&state, &conn, p, series),
         _ => String::new(),
+    };
+    let cont = match &profile {
+        Some(p) => crate::watch::continue_html(&state, &conn, p, &node, state.recent_count),
+        None => String::new(),
     };
     // Series and season pages carry the description (and, for a series,
     // the IMDb rating/link) ingested from tvshow.nfo / season.nfo. The
@@ -1030,11 +1044,11 @@ async fn browse_page(
         "{head}<body>{chip}\
          <div class=\"hdr\"><div class=\"hdr-top\"><h1>{}</h1>{back_link}{search_box}</div>\
          {art}{description}</div>{mine}\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{grid}{cards_script}{watch_script}{PAGE_CLOSE}",
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{cont}{grid}{cards_script}{watch_script}{PAGE_CLOSE}",
         xml_escape(&title),
         chip = crate::watch::chip_html(profile.as_ref()),
-        cards_script = if rows.contains("data-card") || !covers.is_empty() { CARDS_SCRIPT } else { "" },
-        watch_script = if rows.contains("data-seen") { crate::watch::WATCH_SCRIPT } else { "" }
+        cards_script = if rows.contains("data-card") || !covers.is_empty() || !cont.is_empty() { CARDS_SCRIPT } else { "" },
+        watch_script = if rows.contains("data-seen") || !cont.is_empty() { crate::watch::WATCH_SCRIPT } else { "" }
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -1080,7 +1094,7 @@ fn covers_html<'a>(items: impl Iterator<Item = &'a media_db::BrowseItem>) -> Str
 /// An item's art URL, versioned by its extraction time when known so the
 /// response can be cached for a year: artwork changes re-extract the
 /// file, which changes the version and so the URL.
-fn art_url(item: &media_db::BrowseItem) -> String {
+pub(crate) fn art_url(item: &media_db::BrowseItem) -> String {
     let id = item.art_file_id.unwrap_or(item.file_id);
     match item.art_version {
         Some(v) => format!("/art/{id}?v={v}"),
