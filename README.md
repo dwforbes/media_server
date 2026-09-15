@@ -613,11 +613,12 @@ password, no email. Every page carries a small "👤 Name" chip linking back to
 the picker to switch, and the picker's "Remove a profile…" mode deletes one
 along with its history.
 
-The player reports to the server only at two moments, both as beacons so they
-survive the page going away: **where it is** when the viewer leaves (the page
-unloads, the tab goes hidden — the phone case — or the next episode is swapped in),
-and **that it finished** when a program plays to its end. Leaving inside the last
-5% of the running time counts as finishing too. With that, per profile:
+The player reports to the server sparingly, as beacons so they survive the page
+going away: **where it is** when the viewer leaves (the page unloads, the tab goes
+hidden — the phone case — or the next episode is swapped in) and once a minute
+while playback runs (so a browser killed outright loses at most a minute), and
+**that it finished** when a program plays to its end. Leaving inside the last 5%
+of the running time counts as finishing too. With that, per profile:
 
 - **Continue watching** on the home page: programs left part-way, and for a
   series whose latest activity was a finished episode, the episode after it ("up

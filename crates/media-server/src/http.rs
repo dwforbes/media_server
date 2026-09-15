@@ -2313,8 +2313,8 @@ const PLAYER_SCRIPT: &str = r#"<script>
   // With a profile chosen (data-track), the server keeps the position
   // too: told on the way out of a program — leaving the page, the tab
   // going hidden (the phone case, where pagehide is unreliable), moving
-  // to another episode — and when one plays to its end. A beacon, so
-  // the send survives the page's unload.
+  // to another episode — once a minute meanwhile, and when one plays to
+  // its end. A beacon, so the send survives the page's unload.
   function report(ev) {
     if (!v.dataset.track || !v.dataset.id) return;
     var body = JSON.stringify({ id: parseInt(v.dataset.id, 10), event: ev,
@@ -2332,6 +2332,16 @@ const PLAYER_SCRIPT: &str = r#"<script>
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'hidden' && !v.ended) report('leave');
   });
+  // And once a minute while playing, so a browser killed outright (or a
+  // laptop shut) loses at most a minute. Timed from the clock, not
+  // timeupdate ticks, and only while playback is actually running.
+  var lastReport = Date.now();
+  v.addEventListener('timeupdate', function () {
+    if (v.paused || v.ended || Date.now() - lastReport < 60000) return;
+    lastReport = Date.now();
+    report('tick');
+  });
+  v.addEventListener('play', function () { lastReport = Date.now(); });
   // Back to a page the browser kept in its back/forward cache: nothing
   // re-runs and media is paused on entry, so the video sits silent at the
   // right position with no note. Restore what a fresh fragment load would

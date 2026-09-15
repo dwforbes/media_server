@@ -418,8 +418,9 @@ pub async fn leave() -> Response {
     with_cookie(None, "/profiles")
 }
 
-/// What the player sends: on the way out of a program, the position;
-/// at its end, "ended". Seconds, as the video element counts them.
+/// What the player sends: the position on the way out of a program
+/// ("leave") and once a minute while playing ("tick"); "ended" at its
+/// end. Seconds, as the video element counts them.
 #[derive(serde::Deserialize)]
 struct WatchReport {
     id: i64,
