@@ -124,11 +124,37 @@ pub fn key(
         },
         MediaKind::Movies => Some(format!(
             "mv|{}|{}",
-            title.trim().to_lowercase(),
+            undecorated_movie_title(title, year).trim().to_lowercase(),
             year.map(|y| y.to_string()).unwrap_or_default()
         )),
         MediaKind::Music => None,
     }
+}
+
+/// The catalog title behind a movie's display title. Browse listings
+/// decorate movie titles for clients that show nothing but a name —
+/// "The Game (1997)" in most views, "8.5 · The Game" under By Rating
+/// (see tree.rs) — and a key must not depend on which view an item was
+/// seen in.
+fn undecorated_movie_title(title: &str, year: Option<i64>) -> &str {
+    let mut t = title.trim();
+    if let Some(year) = year {
+        if let Some(base) = t.strip_suffix(&format!(" ({year})")) {
+            t = base;
+        }
+    }
+    // A rating prefix: digits, a point, one digit, " · ".
+    if let Some((head, tail)) = t.split_once(" · ") {
+        let looks_like_rating = head.len() >= 3
+            && head.ends_with(|c: char| c.is_ascii_digit())
+            && head[..head.len() - 1].ends_with('.')
+            && head[..head.len() - 2].bytes().all(|b| b.is_ascii_digit())
+            && !head[..head.len() - 2].is_empty();
+        if looks_like_rating {
+            t = tail;
+        }
+    }
+    t
 }
 
 pub fn item_key(item: &media_db::BrowseItem) -> Option<String> {
@@ -432,6 +458,12 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(key(MediaKind::Tv, 7, Some("Show"), Some(1), None, "Special", None).as_deref(), Some("f|7"));
         assert_eq!(key(MediaKind::Movies, 3, None, None, None, "Heat", Some(1995)).as_deref(), Some("mv|heat|1995"));
+        // The same movie however a listing dressed its title.
+        for shown in ["Heat (1995)", "8.3 · Heat", "8.3 · Heat (1995)", "  Heat "] {
+            assert_eq!(key(MediaKind::Movies, 3, None, None, None, shown, Some(1995)).as_deref(), Some("mv|heat|1995"), "{shown}");
+        }
+        assert_eq!(key(MediaKind::Movies, 3, None, None, None, "2001 (1968)", None).as_deref(), Some("mv|2001 (1968)|"));
+        assert_eq!(key(MediaKind::Movies, 3, None, None, None, "Se7en · Remastered", None).as_deref(), Some("mv|se7en · remastered|"));
         assert_eq!(key(MediaKind::Music, 3, None, None, None, "Song", None), None);
     }
 

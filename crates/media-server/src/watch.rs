@@ -169,8 +169,10 @@ pub fn continue_html(
     recent_count: usize,
 ) -> String {
     const SHOW: usize = 12;
-    // Everything under the scope, by program key. The root is everything.
-    let in_scope: Option<std::collections::HashSet<String>> = match scope {
+    // Every file under the scope — each item's own and its merged
+    // renditions', since an entry may name any copy. The root is
+    // everything.
+    let in_scope: Option<std::collections::HashSet<i64>> = match scope {
         crate::objectid::ObjectId::Root => None,
         _ => {
             let mut seen = std::collections::HashSet::new();
@@ -178,14 +180,14 @@ pub fn continue_html(
             if let Err(err) = crate::http::flatten_items(catalog, scope, recent_count, 5, &mut seen, &mut all) {
                 tracing::warn!("continue watching: flattening scope: {err:#}");
             }
-            Some(all.iter().filter_map(profiles::item_key).collect())
+            Some(
+                all.iter()
+                    .flat_map(|i| std::iter::once(i.file_id).chain(i.renditions.iter().map(|r| r.file_id)))
+                    .collect(),
+            )
         }
     };
-    let admits = |item: &BrowseItem| {
-        in_scope
-            .as_ref()
-            .is_none_or(|set| profiles::item_key(item).is_some_and(|k| set.contains(&k)))
-    };
+    let admits = |item: &BrowseItem| in_scope.as_ref().is_none_or(|set| set.contains(&item.file_id));
 
     let recent = profiles::recent(&store(state), profile.id, 60).unwrap_or_default();
     let mut entries: Vec<Continue> = Vec::new();
