@@ -602,6 +602,42 @@ each other, and a near-total match between two "different" episodes is rejected
 as mislabeled duplicate content rather than reported as an intro. If detection
 misfires on a show, drop an `.edl` beside the episode — it wins outright.
 
+### Viewer profiles: who's watching, and where they left off
+
+The web pages keep track, per viewer, of what has been watched and where each
+program was left — so "which Curb episode was I on?" is answered by the home
+page. This is a household server, so a profile is just a name: the home page
+(and `/profiles`) shows a tile per profile, Disney-style, plus an "add" tile;
+choosing one sets a year-long cookie on that browser and nothing else — no
+password, no email. Every page carries a small "👤 Name" chip linking back to
+the picker to switch, and the picker's "Remove a profile…" mode deletes one
+along with its history.
+
+The player reports to the server only at two moments, both as beacons so they
+survive the page going away: **where it is** when the viewer leaves (the page
+unloads, the tab goes hidden — the phone case — or the next episode is swapped in),
+and **that it finished** when a program plays to its end. Leaving inside the last
+5% of the running time counts as finishing too. With that, per profile:
+
+- **Continue watching** on the home page: programs left part-way, and for a
+  series whose latest activity was a finished episode, the episode after it ("up
+  next"), latest activity first. A series page shows the same single line.
+- **Resume**: opening a program the profile left part-way seeks to that spot
+  (with the existing "start from the beginning" note); a `#123s` fragment in the
+  URL still wins.
+- **Seen ticks**: every episode and movie row in a listing (season pages,
+  genre pages, search results) leads with a checkbox, and the detail page has a
+  "Seen" line — tick or untick by hand; a note beside the title reads
+  "12:34 left · yesterday" or "watched 3 days ago". The series ratings grid rings
+  seen episodes (dashed for part-way).
+
+State lives in `profiles.db` beside the catalog, owned by the server (the
+scanner stays the catalog's only writer). Rows key on the program, not the
+file — an episode by series, season and number, a movie by title and year — so
+an enrichment remux or a re-catalogue keeps a viewer's history. Music is not
+tracked. Without a profile chosen, the pages show none of this and the player
+reports nothing, so shared links and UPnP clients are unaffected.
+
 ### Link previews when sharing pages
 
 Every page carries Open Graph tags, so a link pasted into a chat or feed unfurls

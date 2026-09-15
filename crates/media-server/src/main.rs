@@ -3,9 +3,11 @@ mod counts;
 mod didl;
 mod http;
 mod objectid;
+mod profiles;
 mod soap;
 mod ssdp;
 mod tree;
+mod watch;
 mod xml;
 
 use std::path::PathBuf;
@@ -42,6 +44,7 @@ async fn main() -> Result<()> {
     let db_path = cfg.db_path();
 
     let conn = media_db::open_ro(&db_path)?;
+    let profiles = profiles::open(&db_path)?;
     let uuid = config::load_or_create_uuid(&db_path)?;
     let ip = cfg.advertised_ip()?;
     let base_url = format!("http://{ip}:{}", cfg.bind.port());
@@ -62,6 +65,7 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         db: tokio::sync::Mutex::new(conn),
+        profiles: std::sync::Mutex::new(profiles),
         update_id: AtomicU32::new(1),
         counts: Default::default(),
         uuid: uuid.clone(),

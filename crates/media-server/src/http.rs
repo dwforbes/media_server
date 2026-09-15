@@ -17,13 +17,14 @@ use tower_http::services::ServeFile;
 
 use crate::didl::{self, xml_escape, DLNA_FEATURES};
 use crate::objectid::ObjectId;
+use crate::profiles;
 use crate::{soap, tree, xml};
 
 /// Everything before <body>: doctype, <html>/<head>, charset, viewport,
 /// the title, the device icon as favicon / home-screen icon (the same
 /// PNGs device.xml advertises) and any page-specific head markup. Every
 /// page ends with PAGE_CLOSE.
-fn page_head(title: &str, extra: &str) -> String {
+pub(crate) fn page_head(title: &str, extra: &str) -> String {
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -73,6 +74,9 @@ p.controls{display:flex;flex-wrap:wrap;gap:.3em 1.5em;align-items:baseline}\
 html a.home,html a.home:link,html a.home:visited,html a.home:hover,html a.home:active{color:inherit;text-decoration:none;font-size:1.15em;line-height:1}\
 html a.home:hover{opacity:.65}\
 p.controls input[type=checkbox]{vertical-align:middle;margin:0 .3em 0 0;position:relative;top:-.08em}\
+p.who{float:right;margin:0 0 0 1em;font-size:.9em}\
+.wnote{color:#777;font-size:.85em;margin-left:.6em;white-space:nowrap}\
+li.row input[data-seen]{flex:none;margin:0 .5em 0 0}\
 @media (max-width:40em){\
 body{margin:1em auto;padding:0 1rem 1.5rem}\
 body.player{margin:.5em auto}\
@@ -84,7 +88,7 @@ div.covers{padding-bottom:1em}\
 h1{font-size:1.5em}}\
 </style>";
 
-const PAGE_CLOSE: &str = "\n</body></html>\n";
+pub(crate) const PAGE_CLOSE: &str = "\n</body></html>\n";
 
 /// Truncate on a word boundary with an ellipsis. Long synopses are cut
 /// down for the player's hover card and for link-preview descriptions.
@@ -203,6 +207,9 @@ const CDS_SERVICE: &str = "urn:schemas-upnp-org:service:ContentDirectory:1";
 const CMS_SERVICE: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
 
 pub struct AppState {
+    /// Viewer profiles and watch state — the server's own database
+    /// (see profiles.rs); the catalog stays read-only.
+    pub profiles: std::sync::Mutex<Connection>,
     pub db: tokio::sync::Mutex<Connection>,
     pub update_id: AtomicU32,
     /// Leaf counts per browse container, generation-keyed on update_id.
@@ -285,7 +292,8 @@ async fn redirect_pages(State(state): State<Arc<AppState>>, req: Request, next: 
             || path.starts_with("/item/")
             || path.starts_with("/play/")
             || path.starts_with("/captions/")
-            || path == "/search";
+            || path == "/search"
+            || path == "/profiles";
         if is_page && req.method() == Method::GET && req.extensions().get::<Https>().is_none() {
             let rest = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
             return Redirect::temporary(&format!("{}{rest}", tls.origin())).into_response();
@@ -343,6 +351,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/subs/{id}", get(serve_subs))
         .route("/audio/{id}", get(serve_audio))
         .route("/api/captions", get(api_captions))
+        // Viewer profiles and watch state (see watch.rs).
+        .route("/profiles", get(crate::watch::profiles_page))
+        .route("/profiles/select", post(crate::watch::select))
+        .route("/profiles/add", post(crate::watch::add))
+        .route("/profiles/delete", post(crate::watch::delete))
+        .route("/profiles/leave", post(crate::watch::leave))
+        .route("/api/watch", post(crate::watch::api_watch))
+        .route("/api/seen", post(crate::watch::api_seen))
         .layer(middleware::from_fn_with_state(state.clone(), redirect_pages))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
@@ -374,7 +390,7 @@ fn csp() -> &'static str {
     static CSP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CSP.get_or_init(|| {
         use base64::Engine;
-        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT, CARDS_SCRIPT]
+        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT, CARDS_SCRIPT, crate::watch::WATCH_SCRIPT]
             .iter()
             .map(|script| {
                 let body = script
@@ -763,7 +779,11 @@ async fn playlist(
 }
 
 /// Search results page, scoped to a container and everything below it.
-async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQuery>) -> Response {
+async fn search_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<SearchQuery>,
+) -> Response {
     let scope_id = if q.scope.is_empty() { "0".to_string() } else { q.scope.clone() };
     let Some(scope) = ObjectId::parse(&scope_id) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -791,9 +811,11 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
         }
     };
 
+    let profile = crate::watch::current(&state, &headers);
+    let states = profile.as_ref().map(|p| crate::watch::states_for(&state, p, hits.iter()));
     let mut rows = String::new();
     for item in &hits {
-        rows.push_str(&listing_row(item));
+        rows.push_str(&listing_row(item, states.as_ref()));
     }
     // Movies among the hits get their covers under the list, as on any
     // grouping page.
@@ -817,15 +839,17 @@ async fn search_page(State(state): State<Arc<AppState>>, Query(q): Query<SearchQ
     };
     let head = page_head("Search", "");
     let html = format!(
-        "{head}<body>\
+        "{head}<body>{chip}\
          <h1>Search</h1>\
          <p><a href=\"/browse/{}\">← Back to {}</a></p>{}\
          <p>{summary}</p>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{cards_script}{PAGE_CLOSE}",
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{cards_script}{watch_script}{PAGE_CLOSE}",
         xml_escape(&scope_id),
         xml_escape(&scope_title),
         search_form(&scope_id, &q.q),
-        cards_script = if rows.contains("data-card") || !covers.is_empty() { CARDS_SCRIPT } else { "" }
+        chip = crate::watch::chip_html(profile.as_ref()),
+        cards_script = if rows.contains("data-card") || !covers.is_empty() { CARDS_SCRIPT } else { "" },
+        watch_script = if rows.contains("data-seen") { crate::watch::WATCH_SCRIPT } else { "" }
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -870,6 +894,7 @@ async fn browse_page(
     let Some(node) = ObjectId::parse(&oid) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let profile = crate::watch::current(&state, &headers);
     let conn = state.db.lock().await;
     let (title, parent_id, art_item) = tree::browse_metadata(&conn, &node)
         .ok()
@@ -899,10 +924,16 @@ async fn browse_page(
         .unwrap_or_default();
     let children = tree::browse_children(&conn, &node, state.recent_count);
     // A series page also gets the season × episode ratings grid.
-    let grid = match &node {
-        ObjectId::TvSeries(series) => tv::series_episodes(&conn, series)
-            .map(|episodes| episode_grid_html(&episodes))
-            .unwrap_or_default(),
+    let series_episodes = match &node {
+        ObjectId::TvSeries(series) => tv::series_episodes(&conn, series).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    // The profile's place: the home page offers the picker or lists what
+    // to continue; a series page says which episode comes next.
+    let mine = match (&node, &profile) {
+        (ObjectId::Root, Some(p)) => crate::watch::continue_html(&state, &conn, p),
+        (ObjectId::Root, None) => crate::watch::home_picker_html(&state),
+        (ObjectId::TvSeries(series), Some(p)) => crate::watch::series_next_html(&state, &conn, p, series),
         _ => String::new(),
     };
     // Series and season pages carry the description (and, for a series,
@@ -936,6 +967,14 @@ async fn browse_page(
         }
     };
     let search_box = search_form(&oid, "");
+    let states = profile.as_ref().map(|p| {
+        let listed = children.iter().filter_map(|e| match e {
+            tree::Entry::Item { item, .. } => Some(item),
+            _ => None,
+        });
+        crate::watch::states_for(&state, p, listed.chain(series_episodes.iter()))
+    });
+    let grid = episode_grid_html(&series_episodes, states.as_ref());
     // A leaf grouping of movies (a franchise, a genre, a year, All Movies)
     // also gets its covers under the listing (covers_html).
     let covers = covers_html(children.iter().filter_map(|e| match e {
@@ -955,7 +994,7 @@ async fn browse_page(
                     xml_escape(&title)
                 ));
             }
-            tree::Entry::Item { item, .. } => rows.push_str(&listing_row(&item)),
+            tree::Entry::Item { item, .. } => rows.push_str(&listing_row(&item, states.as_ref())),
         }
     }
     // A container with representative art (a series or season, borrowing
@@ -982,14 +1021,17 @@ async fn browse_page(
         art_item,
         &state.friendly_name,
     );
-    let head = page_head(&xml_escape(&title), &og);
+    let picker_style = if node == ObjectId::Root { crate::watch::PROFILES_STYLE } else { "" };
+    let head = page_head(&xml_escape(&title), &format!("{og}{picker_style}"));
     let html = format!(
-        "{head}<body>\
+        "{head}<body>{chip}\
          <div class=\"hdr\"><div class=\"hdr-top\"><h1>{}</h1>{back_link}{search_box}</div>\
-         {art}{description}</div>\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{grid}{cards_script}{PAGE_CLOSE}",
+         {art}{description}</div>{mine}\
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{grid}{cards_script}{watch_script}{PAGE_CLOSE}",
         xml_escape(&title),
-        cards_script = if rows.contains("data-card") || !covers.is_empty() { CARDS_SCRIPT } else { "" }
+        chip = crate::watch::chip_html(profile.as_ref()),
+        cards_script = if rows.contains("data-card") || !covers.is_empty() { CARDS_SCRIPT } else { "" },
+        watch_script = if rows.contains("data-seen") { crate::watch::WATCH_SCRIPT } else { "" }
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -2268,12 +2310,27 @@ const PLAYER_SCRIPT: &str = r#"<script>
     rejoin.hidden = false;
     rejoinTimer = setTimeout(dropRejoin, 30000);
   }
+  // With a profile chosen (data-track), the server keeps the position
+  // too: told on the way out of a program — leaving the page, the tab
+  // going hidden (the phone case, where pagehide is unreliable), moving
+  // to another episode — and when one plays to its end. A beacon, so
+  // the send survives the page's unload.
+  function report(ev) {
+    if (!v.dataset.track || !v.dataset.id) return;
+    var body = JSON.stringify({ id: parseInt(v.dataset.id, 10), event: ev,
+      position: v.currentTime || 0, duration: isFinite(v.duration) ? v.duration : null });
+    try { navigator.sendBeacon('/api/watch', new Blob([body], { type: 'application/json' })); } catch (e) {}
+  }
   // Catch positions the 1-second stamping missed on the way out, and
   // remember whether playback was running for the pageshow handler.
   var wasPlaying = false;
   addEventListener('pagehide', function () {
     wasPlaying = !v.paused && !v.ended;
     if (!rejoinHold && honoured) savePos(v.dataset.id, Math.floor(v.currentTime || 0));
+    if (!v.ended) report('leave');
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden' && !v.ended) report('leave');
   });
   // Back to a page the browser kept in its back/forward cache: nothing
   // re-runs and media is paused on entry, so the video sits silent at the
@@ -2542,6 +2599,7 @@ const PLAYER_SCRIPT: &str = r#"<script>
       var doc = new DOMParser().parseFromString(html, 'text/html');
       var nv = doc.getElementById('player');
       if (!nv) throw 0;
+      if (!v.ended) report('leave');   // the outgoing program's position
       v.pause();
       each(v.querySelectorAll('source, track'), function (n) { n.remove(); });
       if (nv.hasAttribute('poster')) v.setAttribute('poster', nv.getAttribute('poster'));
@@ -2550,6 +2608,8 @@ const PLAYER_SCRIPT: &str = r#"<script>
       v.dataset.id = nv.dataset.id;
       v.dataset.next = nv.dataset.next || '';
       v.dataset.segments = nv.dataset.segments || '[]';
+      v.dataset.track = nv.dataset.track || '';
+      v.dataset.resume = nv.dataset.resume || '';
       loadSegs();
       if (skipBtn) skipBtn.hidden = true;
       document.title = doc.title;
@@ -2562,13 +2622,16 @@ const PLAYER_SCRIPT: &str = r#"<script>
       attachSubs();
       ccRefresh();     // the captions panel follows the new track
       ccPost();        // and so does a popped-out window
-      offerRejoin();   // the incoming episode may have its own stored position
+      var r = parseFloat(v.dataset.resume);
+      if (r > 0) resumeAt(r);   // where the profile left the incoming episode
+      else offerRejoin();       // else the tab's own stored position, if any
     }).catch(function () {
       location.href = prefix + id;   // plain navigation as the fallback
     });
   }
   v.addEventListener('ended', function () {
     savePos(v.dataset.id, 0);   // finished: no resume offer next time
+    report('ended');
     if (box && box.checked && v.dataset.next) swapTo(v.dataset.next);
   });
   // Prior / next / next-up links: swap in place (plain clicks only —
@@ -2582,20 +2645,26 @@ const PLAYER_SCRIPT: &str = r#"<script>
   // Back/forward across swapped episodes: just render whatever the URL says.
   window.addEventListener('popstate', function () { location.reload(); });
 
+  // Pick up at t: seek once the metadata allows, with the "resuming at"
+  // note. Stamping waits until the seek has happened, so a URL is never
+  // rewritten with a position that was not acted on.
+  function resumeAt(t) {
+    honoured = false;
+    var id = v.dataset.id;
+    function seek() {
+      if (v.dataset.id === id) { try { v.currentTime = t; } catch (e) {} }
+      honoured = true;
+    }
+    if (v.readyState >= 1) seek();
+    else v.addEventListener('loadedmetadata', seek, { once: true });
+    showResuming(t);
+  }
+  // A #123s fragment wins (a shared or bookmarked position); then the
+  // profile's stored position; else the tab's own is offered.
   var start = parseFloat((location.hash || '').replace(/[^0-9.]/g, ''));
-  if (!(start > 0)) {
-    // No fragment resume in motion: offer the stored position instead.
-    offerRejoin();
-    return;
-  }
-  honoured = false;
-  function seek() {
-    try { v.currentTime = start; } catch (e) {}
-    honoured = true;
-  }
-  if (v.readyState >= 1) seek();
-  else v.addEventListener('loadedmetadata', seek, { once: true });
-  showResuming(start);
+  if (!(start > 0)) start = parseFloat(v.dataset.resume);
+  if (start > 0) resumeAt(start);
+  else offerRejoin();
 })();
 </script>"#;
 
@@ -2769,6 +2838,16 @@ async fn play_page(
     let (prev, next) = neighbours(&conn, &detail);
     let segments = queries::segments::for_file(&conn, id).unwrap_or_default();
     drop(conn);
+    // With a profile, the player reports where it gets to (data-track)
+    // and picks up where that profile left off (data-resume, seconds).
+    let profile = crate::watch::current(&state, &headers);
+    let track = profile.is_some() && profiles::detail_key(&detail).is_some();
+    let resume = crate::watch::resume_secs(&detail, &state, profile.as_ref());
+    let watch_attrs = format!(
+        "{}{}",
+        if track { " data-track=\"1\"" } else { "" },
+        resume.map(|t| format!(" data-resume=\"{t}\"")).unwrap_or_default()
+    );
     let mut heading = xml_escape(&detail.title);
     if let Some(year) = detail.year {
         heading.push_str(&format!(" ({year})"));
@@ -2930,7 +3009,7 @@ async fn play_page(
          <span class=\"card\">{card}</span></span></h2>{context_line}\
          <div class=\"videowrap\">\
          <video id=\"player\" controls autoplay playsinline{poster} \
-          data-id=\"{id}\" data-next=\"{next_id}\" data-segments=\"{segments_attr}\">\
+          data-id=\"{id}\" data-next=\"{next_id}\" data-segments=\"{segments_attr}\"{watch_attrs}>\
          <source src=\"/media/{id}\" type=\"{}\">{track}\
          Your browser cannot play this format.</video>\
          <button id=\"skipseg\" hidden style=\"position:absolute;right:1.2em;bottom:3.4em;\
@@ -3074,17 +3153,20 @@ fn is_uhd(width: Option<i64>, height: Option<i64>) -> bool {
 
 /// One listing row: 4K chip, title, and the IMDb rating (movies and
 /// episodes that have one) boxed at the right edge.
-fn listing_row(item: &media_db::BrowseItem) -> String {
+fn listing_row(item: &media_db::BrowseItem, states: Option<&crate::watch::States>) -> String {
     let chip = if item.kind == media_db::MediaKind::Music {
         String::new()
     } else {
         uhd_chip(is_uhd(item.width, item.height))
     };
+    // With a profile, a seen tick leads the row and a note ("12:34 left
+    // · yesterday") follows the title (watch::row_marks).
+    let (tick, note) = crate::watch::row_marks(item, states);
     // data-card: the row opens the item's details card on hover or focus,
     // like a cover in the grid (CARDS_SCRIPT fills it from /card/{id}).
     format!(
-        "<li class=\"row\" data-card=\"{0}\" style=\"display:flex;align-items:center\">\
-         {chip}<a href=\"/item/{0}\">{1}</a>{2}<span class=\"card\"></span></li>",
+        "<li class=\"row\" data-card=\"{0}\" data-watch style=\"display:flex;align-items:center\">\
+         {tick}{chip}<a href=\"/item/{0}\">{1}</a>{2}{note}<span class=\"card\"></span></li>",
         item.file_id,
         xml_escape(&item.title),
         rating_chip(item.rating)
@@ -3122,7 +3204,7 @@ fn rating_chip(rating: Option<f64>) -> String {
 /// episode numbers across, each box linking to the episode's page. Grey
 /// "–" for episodes without a rating; blank where a number is missing.
 /// Empty when nothing is numbered.
-fn episode_grid_html(episodes: &[media_db::BrowseItem]) -> String {
+fn episode_grid_html(episodes: &[media_db::BrowseItem], states: Option<&crate::watch::States>) -> String {
     let numbered: Vec<&media_db::BrowseItem> = episodes
         .iter()
         .filter(|e| e.season.is_some() && e.episode.is_some_and(|n| n > 0))
@@ -3159,11 +3241,18 @@ fn episode_grid_html(episodes: &[media_db::BrowseItem]) -> String {
                         }
                         None => ("#ddd", "#555", "–".to_string()),
                     };
+                    // A seen episode is ringed, one left part-way dashed.
+                    let row = states.and_then(|s| profiles::item_key(e).and_then(|k| s.get(&k)));
+                    let (ring, mark) = match row {
+                        Some(r) if r.watched => (";outline:2px solid #333;outline-offset:-2px", " · seen"),
+                        Some(r) if r.in_progress() => (";outline:2px dashed #333;outline-offset:-2px", " · part-way"),
+                        _ => ("", ""),
+                    };
                     html.push_str(&format!(
-                        "<td><a href=\"/item/{}\" title=\"S{season:02}E{n:02} · {}\" \
+                        "<td><a href=\"/item/{}\" title=\"S{season:02}E{n:02} · {}{mark}\" \
                          style=\"display:block;min-width:2.6em;padding:.15em .2em;\
                          text-align:center;font-weight:bold;text-decoration:none;\
-                         border-radius:3px;color:{colour};background:{background}\">{text}</a></td>",
+                         border-radius:3px;color:{colour};background:{background}{ring}\">{text}</a></td>",
                         e.file_id,
                         xml_escape(&e.title)
                     ));
@@ -3230,6 +3319,8 @@ async fn item_page(
     let (prev, next) = neighbours(&conn, &detail);
     drop(conn);
     let nav = neighbour_nav_html(detail.kind, detail.season, prev.as_ref(), next.as_ref());
+    let profile = crate::watch::current(&state, &headers);
+    let seen_line = crate::watch::detail_marks(&detail, &state, profile.as_ref());
 
     let mut heading = xml_escape(&detail.title);
     if let Some(year) = detail.year {
@@ -3469,10 +3560,12 @@ async fn item_page(
         )
     } else {
         format!(
-            "{head}<body class=\"detail\">\
+            "{head}<body class=\"detail\">{chip}\
              <p>{top_nav}</p>{art}<h1 style=\"margin-bottom:.2em\">{heading_html}</h1>\
-             {subtitle_html}{plot}{play_links}\
-             <table style=\"border-collapse:collapse\">{rows}</table>{nav}{PAGE_CLOSE}"
+             {subtitle_html}{plot}{play_links}{seen_line}\
+             <table style=\"border-collapse:collapse\">{rows}</table>{nav}{watch_script}{PAGE_CLOSE}",
+            chip = crate::watch::chip_html(profile.as_ref()),
+            watch_script = if seen_line.is_empty() { "" } else { crate::watch::WATCH_SCRIPT }
         )
     };
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
