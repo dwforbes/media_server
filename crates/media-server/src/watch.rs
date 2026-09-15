@@ -698,11 +698,17 @@ impl WriteLimit {
 /// The seen ticks on listings and detail pages: a change posts to
 /// /api/seen and the note beside the title follows the answer. And the
 /// continue-watching gallery's remove: the × on a cover, or a right
-/// click (long press) on it for a one-item menu; either posts to
-/// /api/dismiss and drops the cover, and the section with the last one.
+/// click (long press) on it for a one-item menu; either asks first,
+/// then posts to /api/dismiss and drops the cover, and the section with
+/// the last one.
 pub const WATCH_SCRIPT: &str = r#"<script>
 (function () {
+  // Both removal paths ask first: a cover is easy to hit by accident,
+  // and the entry only comes back by playing the program again.
   function dismiss(cover) {
+    var cap = cover.querySelector('.cap');
+    var name = cap ? cap.innerText.split('\n').slice(0, 2).join(' ') : 'this';
+    if (!confirm('Remove ' + name + ' from Continue watching?')) return;
     var id = parseInt(cover.dataset.dismiss, 10);
     fetch('/api/dismiss', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

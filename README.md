@@ -627,7 +627,8 @@ of the running time counts as finishing too. With that, per profile:
   narrowed to what lies under the page: Recently Added lists only items that are
   recently added, By Franchise only films in some franchise, a season only its
   episodes; the home page has everything. The × on a cover (or a right click /
-  long press on it) removes the entry until that program is played again.
+  long press on it) removes the entry, after a confirmation, until that program is
+  played again.
 - **Resume**: opening a program the profile left part-way seeks to that spot
   (with the existing "start from the beginning" note); a `#123s` fragment in the
   URL still wins.
