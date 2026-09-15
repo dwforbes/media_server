@@ -98,9 +98,11 @@ pub struct WatchRow {
 }
 
 impl WatchRow {
-    /// Part-way through: something to pick up again.
+    /// Part-way through: something to pick up again. Finishing and the
+    /// seen tick both zero the position, so a seen program with a
+    /// position is one being watched again.
     pub fn in_progress(&self) -> bool {
-        !self.watched && self.position_ms > 0
+        self.position_ms > 0
     }
 }
 

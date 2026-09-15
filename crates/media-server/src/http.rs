@@ -77,7 +77,8 @@ p.controls input[type=checkbox]{vertical-align:middle;margin:0 .3em 0 0;position
 p.who{float:right;margin:0 0 0 1em;font-size:.9em}\
 .wnote{color:#777;font-size:.85em;margin-left:.6em;white-space:nowrap}\
 li.row input[data-seen]{flex:none;margin:0 .5em 0 0}\
-div.covers.cont{padding-bottom:1em}\
+div.covers.cont{padding:.4em 0 .6em}\
+h2.cont{font-size:1.1em;margin:.8em 0 0}\
 div.covers .cover.cw{height:auto;position:relative}\
 div.covers .cover.cw>a{height:180px}\
 div.covers .cover.cw .cap{display:block;font-size:.75em;line-height:1.3;margin-top:.3em;color:#444;overflow-wrap:anywhere}\
@@ -233,6 +234,8 @@ pub struct AppState {
     /// (120px icon bytes, 48px icon bytes, whether user-supplied).
     pub icon: (Vec<u8>, Vec<u8>, bool),
     pub recent_count: usize,
+    /// Most entries the continue-watching gallery shows on one page.
+    pub continue_count: usize,
     pub ffmpeg: String,
     pub ffprobe: String,
     pub vtt_cache: std::path::PathBuf,
@@ -943,14 +946,15 @@ async fn browse_page(
         _ => Vec::new(),
     };
     // The home page offers the picker until a profile is chosen. With
-    // one, every container page ends with the profile's continue-watching
-    // gallery, narrowed to what lies under that container.
+    // one, every container page carries the profile's continue-watching
+    // gallery between the header and the listing, narrowed to what lies
+    // under that container.
     let mine = match (&node, &profile) {
         (ObjectId::Root, None) => crate::watch::home_picker_html(&state),
         _ => String::new(),
     };
     let cont = match &profile {
-        Some(p) => crate::watch::continue_html(&state, &conn, p, &node, state.recent_count),
+        Some(p) => crate::watch::continue_html(&state, &conn, p, &node, state.recent_count, state.continue_count),
         None => String::new(),
     };
     // Series and season pages carry the description (and, for a series,
@@ -1043,8 +1047,8 @@ async fn browse_page(
     let html = format!(
         "{head}<body>{chip}\
          <div class=\"hdr\"><div class=\"hdr-top\"><h1>{}</h1>{back_link}{search_box}</div>\
-         {art}{description}</div>{mine}\
-         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{cont}{grid}{cards_script}{watch_script}{PAGE_CLOSE}",
+         {art}{description}</div>{mine}{cont}\
+         <ul style=\"list-style:none;padding:0;line-height:1.7\">{rows}</ul>{covers}{grid}{cards_script}{watch_script}{PAGE_CLOSE}",
         xml_escape(&title),
         chip = crate::watch::chip_html(profile.as_ref()),
         cards_script = if rows.contains("data-card") || !covers.is_empty() || !cont.is_empty() { CARDS_SCRIPT } else { "" },

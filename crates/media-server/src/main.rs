@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
         base_url: base_url.clone(),
         icon,
         recent_count: cfg.recent_count,
+        continue_count: cfg.continue_count,
         max_profiles: cfg.max_profiles,
         write_limit: Default::default(),
         ffmpeg: cfg.ffmpeg_path.clone(),

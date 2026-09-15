@@ -21,6 +21,10 @@ friendly_name = "Home Media Server"
 # How many items each "Recently Added" view lists (Movies, TV Shows, Music).
 recent_count = 25
 
+# How many entries the web pages' "Continue watching" gallery shows at most
+# on a page (the most recent that lie under that page).
+continue_count = 12
+
 # How many viewer profiles (the web pages' "who's watching?" tiles) may
 # exist. Anyone on the LAN can add one, so this caps a prank or a
 # runaway script; remove profiles from /profiles to make room.

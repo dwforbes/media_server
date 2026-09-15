@@ -28,6 +28,10 @@ pub struct Config {
     /// How many items the "Recently Added" views list per media type.
     #[serde(default = "default_recent_count")]
     pub recent_count: usize,
+    /// How many entries the web pages' "Continue watching" gallery shows
+    /// at most (the most recent that lie under the page).
+    #[serde(default = "default_continue_count")]
+    pub continue_count: usize,
     /// Optional HTTPS listener for the web pages on a second port. The
     /// UPnP side stays on the plain `bind` (renderers cannot do TLS).
     pub tls: Option<TlsConfig>,
@@ -56,6 +60,9 @@ pub struct Config {
 
 fn default_max_profiles() -> usize {
     10
+}
+fn default_continue_count() -> usize {
+    12
 }
 
 fn default_ssdp_alive_secs() -> u64 {

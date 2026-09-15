@@ -159,16 +159,17 @@ struct Continue {
 /// episode after each series' latest finished one, latest activity
 /// first — narrowed to what lies under `scope` (the container the page
 /// shows), so a franchise page lists only its franchises' films and a
-/// season page only its episodes. Dismissed entries stay off until the
-/// program is played again.
+/// season page only its episodes, and capped at `show` entries after
+/// that narrowing, so every level gets its own most recent few.
+/// Dismissed entries stay off until the program is played again.
 pub fn continue_html(
     state: &AppState,
     catalog: &Connection,
     profile: &Profile,
     scope: &crate::objectid::ObjectId,
     recent_count: usize,
+    show: usize,
 ) -> String {
-    const SHOW: usize = 12;
     // Every file under the scope — each item's own and its merged
     // renditions', since an entry may name any copy. The root is
     // everything.
@@ -189,11 +190,13 @@ pub fn continue_html(
     };
     let admits = |item: &BrowseItem| in_scope.as_ref().is_none_or(|set| set.contains(&item.file_id));
 
-    let recent = profiles::recent(&store(state), profile.id, 60).unwrap_or_default();
+    // Candidates come from the latest activity; out-of-scope rows are
+    // passed over, so the window is wider than the gallery.
+    let recent = profiles::recent(&store(state), profile.id, show.saturating_mul(8).max(60)).unwrap_or_default();
     let mut entries: Vec<Continue> = Vec::new();
     let mut series_done: Vec<String> = Vec::new();
     for row in recent {
-        if entries.len() >= SHOW {
+        if entries.len() >= show {
             break;
         }
         // A vanished file drops out; a remuxed one still finds its row
@@ -229,8 +232,7 @@ pub fn continue_html(
         return String::new();
     }
     let mut html = String::from(
-        "<h2 id=\"continue\" style=\"font-size:1.1em;margin:1.2em 0 0\">Continue watching</h2>\
-         <div class=\"covers cont\">",
+        "<h2 id=\"continue\" class=\"cont\">Continue watching</h2><div class=\"covers cont\">",
     );
     for entry in &entries {
         html.push_str(&continue_cover_html(entry));
@@ -819,6 +821,10 @@ mod tests {
         let rows: States = [row("tv|show|1|1", true, 0, 10), row("tv|show|1|2", false, 500, 20)].into();
         let (next, r) = up_next(&eps, &rows).unwrap();
         assert_eq!((next.file_id, r.is_some()), (2, true));
+        // Rewatching a seen episode part-way is the same.
+        let rows: States = [row("tv|show|1|1", true, 300, 30), row("tv|show|1|2", true, 0, 20)].into();
+        let (next, r) = up_next(&eps, &rows).unwrap();
+        assert_eq!((next.file_id, r.is_some()), (1, true));
 
         // Finished S01E02 last: the first unseen after it is S02E01.
         let rows: States = [row("tv|show|1|1", true, 0, 10), row("tv|show|1|2", true, 0, 20)].into();
