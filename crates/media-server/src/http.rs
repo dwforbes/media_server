@@ -77,6 +77,8 @@ p.controls input[type=checkbox]{vertical-align:middle;margin:0 .3em 0 0;position
 p.who{float:right;margin:0 0 0 1em;font-size:.9em}\
 .wnote{color:#777;font-size:.85em;margin-left:.6em;white-space:nowrap}\
 li.row input[data-seen]{flex:none;margin:0 .5em 0 0}\
+li.row .rt{margin-left:auto;padding-left:1em;display:flex;align-items:center;gap:.6em;flex-shrink:0}\
+li.row .rt .wnote{margin:0}\
 div.covers.cont{padding:.4em 0 .6em}\
 h2.cont{font-size:1.1em;margin:.8em 0 0}\
 div.covers .cover.cw{height:auto;position:relative}\
@@ -95,6 +97,7 @@ img.art{float:none;display:block;max-width:55%;margin:0 auto 1em}\
 div.hdr{grid-template-columns:1fr;grid-template-areas:\"top\" \"art\" \"desc\"}\
 div.hdr img.art{justify-self:center;margin:0 0 .5em}\
 div.covers{padding-bottom:1em}\
+li.row .rt .wnote{display:none}\
 [data-card] .card,[data-card].flip .card,[data-card].up .card{position:fixed;left:1rem;right:1rem;top:auto;bottom:1rem;width:auto;max-width:none;max-height:60vh;overflow:auto;margin:0}\
 h1{font-size:1.5em}}\
 </style>";
@@ -3191,13 +3194,16 @@ fn listing_row(item: &media_db::BrowseItem, states: Option<&crate::watch::States
         uhd_chip(is_uhd(item.width, item.height))
     };
     // With a profile, a seen tick leads the row and a note ("12:34 left
-    // · yesterday") follows the title (watch::row_marks).
+    // · yesterday") sits at the right, just left of the rating, in one
+    // right-aligned group (watch::row_marks); the note gives way on
+    // narrow screens (BASE_STYLE).
     let (tick, note) = crate::watch::row_marks(item, states);
     // data-card: the row opens the item's details card on hover or focus,
     // like a cover in the grid (CARDS_SCRIPT fills it from /card/{id}).
     format!(
         "<li class=\"row\" data-card=\"{0}\" data-watch style=\"display:flex;align-items:center\">\
-         {tick}{chip}<a href=\"/item/{0}\">{1}</a>{2}{note}<span class=\"card\"></span></li>",
+         {tick}{chip}<a href=\"/item/{0}\">{1}</a><span class=\"rt\">{note}{2}</span>\
+         <span class=\"card\"></span></li>",
         item.file_id,
         xml_escape(&item.title),
         rating_chip(item.rating)
@@ -3224,7 +3230,7 @@ fn rating_chip(rating: Option<f64>) -> String {
     };
     let (background, colour) = rating_colours(rating);
     format!(
-        "<span title=\"IMDb rating\" style=\"margin-left:auto;flex-shrink:0;\
+        "<span title=\"IMDb rating\" style=\"flex-shrink:0;\
          font-size:.75em;font-weight:bold;color:{colour};background:{background};\
          border-radius:3px;padding:.1em .45em;min-width:2.4em;\
          text-align:center\">{rating:.1}</span>"
