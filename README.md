@@ -611,7 +611,7 @@ page. This is a household server, so a profile is just a name: the home page
 choosing one sets a year-long cookie on that browser and nothing else — no
 password, no email. Every page carries a small "👤 Name" chip linking back to
 the picker to switch, and the picker's "Remove a profile…" mode deletes one
-along with its history.
+along with its history, after a confirmation page.
 
 The player reports to the server sparingly, as beacons so they survive the page
 going away: **where it is** when the viewer leaves (the page unloads, the tab goes
@@ -637,8 +637,8 @@ of the running time counts as finishing too. With that, per profile:
 - **Seen ticks**: every episode and movie row in a listing (season pages,
   genre pages, search results) leads with a checkbox, and the detail page has a
   "Seen" line — tick or untick by hand; a note beside the title reads
-  "12:34 left · yesterday" or "watched 3 days ago". The series ratings grid rings
-  seen episodes (dashed for part-way).
+  "12:34 left · yesterday" or "watched 3 days ago"; a tick asks before it takes.
+  The series ratings grid rings seen episodes (dashed for part-way).
 
 Two guards, since anything on the LAN can call these: at most `max_profiles`
 profiles (10 unless `media-server.toml` says otherwise — the add tile disappears

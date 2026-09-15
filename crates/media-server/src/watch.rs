@@ -344,7 +344,7 @@ pub fn picker_html(profiles: &[Profile], current: Option<i64>, manage: bool, max
             name = xml_escape(&p.name),
             remove = if manage {
                 format!(
-                    "<button class=\"x\" formaction=\"/profiles/delete\">Remove {}</button>",
+                    "<button class=\"x\" formaction=\"/profiles/delete\">Remove {}…</button>",
                     xml_escape(&p.name)
                 )
             } else {
@@ -424,6 +424,9 @@ pub async fn profiles_page(
 #[derive(serde::Deserialize)]
 pub struct IdForm {
     id: i64,
+    /// Set by the confirmation page's own form; absent from the tile.
+    #[serde(default)]
+    confirm: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -472,11 +475,35 @@ pub async fn add(
     }
 }
 
+/// Removing a profile takes two steps: the tile's button lands here
+/// without `confirm` and gets a page asking; that page's form posts
+/// back with it. (The picker carries no script, so the question is a
+/// page rather than a dialog.)
 pub async fn delete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Form(form): Form<IdForm>,
 ) -> Response {
+    if form.confirm.is_none() {
+        let Ok(Some(p)) = profiles::get(&store(&state), form.id) else {
+            return Redirect::to("/profiles").into_response();
+        };
+        let head = page_head("Remove profile?", PROFILES_STYLE);
+        let html = format!(
+            "{head}<body><p><a href=\"/profiles\">← Back</a></p>\
+             <h1>Remove {name}?</h1>\
+             <p>Everything this profile has watched — seen ticks, where each program \
+             was left — goes with it. This cannot be undone.</p>\
+             <form method=\"post\" action=\"/profiles/delete\">\
+             <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+             <input type=\"hidden\" name=\"confirm\" value=\"1\">\
+             <button class=\"x\" style=\"font-size:1em;padding:.4em .9em\">Yes, remove {name}</button> \
+             <a href=\"/profiles\" style=\"margin-left:1em\">Keep it</a></form>{PAGE_CLOSE}",
+            name = xml_escape(&p.name),
+            id = p.id
+        );
+        return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+    }
     if let Err(err) = profiles::delete(&store(&state), form.id) {
         tracing::warn!("deleting profile {}: {err:#}", form.id);
     }
@@ -699,8 +726,10 @@ impl WriteLimit {
     }
 }
 
-/// The seen ticks on listings and detail pages: a change posts to
-/// /api/seen and the note beside the title follows the answer. And the
+/// The seen ticks on listings and detail pages: a change asks first
+/// (a tick is a click away from a stray tap, and unticking forgets the
+/// position), then posts to /api/seen and the note beside the title
+/// follows the answer. And the
 /// continue-watching gallery's remove: the × on a cover, or a right
 /// click (long press) on it for a one-item menu; either asks first,
 /// then posts to /api/dismiss and drops the cover, and the section with
@@ -774,6 +803,13 @@ pub const WATCH_SCRIPT: &str = r#"<script>
     var holder = box.closest('[data-watch]');
     var note = holder ? holder.querySelector('.wnote') : null;
     var seen = box.checked;
+    // The program's name: the row's link, or the detail page's heading.
+    var named = (holder && holder.querySelector('a[href^="/item/"]')) || document.querySelector('h1');
+    var name = named ? named.textContent.trim() : 'this';
+    if (!confirm((seen ? 'Mark ' : 'Unmark ') + name + ' as seen?' + (seen ? '' : ' Its position is forgotten too.'))) {
+      box.checked = !seen;
+      return;
+    }
     box.disabled = true;
     fetch('/api/seen', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
