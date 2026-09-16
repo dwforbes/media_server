@@ -611,7 +611,8 @@ page. This is a household server, so a profile is just a name: the home page
 choosing one sets a year-long cookie on that browser and nothing else — no
 password, no email. Every page carries a small "👤 Name" chip linking back to
 the picker to switch, and the picker's "Remove a profile…" mode deletes one
-along with its history, after a confirmation page.
+along with its history, after a confirmation page that asks for the word "remove"
+to be typed.
 
 The player reports to the server sparingly, as beacons so they survive the page
 going away: **where it is** when the viewer leaves (the page unloads, the tab goes

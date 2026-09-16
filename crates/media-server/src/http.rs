@@ -410,7 +410,7 @@ fn csp() -> &'static str {
     static CSP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CSP.get_or_init(|| {
         use base64::Engine;
-        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT, CARDS_SCRIPT, crate::watch::WATCH_SCRIPT]
+        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT, CARDS_SCRIPT, crate::watch::WATCH_SCRIPT, crate::watch::REMOVE_SCRIPT]
             .iter()
             .map(|script| {
                 let body = script

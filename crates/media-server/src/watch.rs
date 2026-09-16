@@ -424,10 +424,51 @@ pub async fn profiles_page(
 #[derive(serde::Deserialize)]
 pub struct IdForm {
     id: i64,
-    /// Set by the confirmation page's own form; absent from the tile.
+    /// Typed on the confirmation page ("remove"); absent from the tile.
     #[serde(default)]
     confirm: Option<String>,
 }
+
+/// The word the confirmation page asks for.
+const REMOVE_WORD: &str = "remove";
+
+fn remove_page(p: &Profile, wrong_word: bool) -> Response {
+    let head = page_head("Remove profile?", PROFILES_STYLE);
+    let note = if wrong_word {
+        format!("<p class=\"err\">Type <strong>{REMOVE_WORD}</strong> to confirm.</p>")
+    } else {
+        String::new()
+    };
+    let html = format!(
+        "{head}<body><p><a href=\"/profiles\">← Back</a></p>\
+         <h1>Remove {name}?</h1>\
+         <p>Everything this profile has watched — seen ticks, where each program \
+         was left — goes with it. This cannot be undone.</p>{note}\
+         <form method=\"post\" action=\"/profiles/delete\" id=\"remove\">\
+         <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+         <p><label>Type <strong>{REMOVE_WORD}</strong> to confirm: \
+         <input name=\"confirm\" autocomplete=\"off\" autocapitalize=\"none\" spellcheck=\"false\" \
+          autofocus style=\"padding:.35em;width:9em\"></label></p>\
+         <p><button class=\"x\" disabled style=\"font-size:1em;padding:.4em .9em\">Yes, remove {name}</button> \
+         <a href=\"/profiles\" style=\"margin-left:1em\">Keep it</a></p></form>\
+         {REMOVE_SCRIPT}{PAGE_CLOSE}",
+        name = xml_escape(&p.name),
+        id = p.id
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+/// The removal page's button wakes only once the word is typed.
+pub const REMOVE_SCRIPT: &str = r#"<script>
+(function () {
+  var form = document.getElementById('remove');
+  if (!form) return;
+  var word = form.querySelector('input[name=confirm]'), button = form.querySelector('button');
+  function sync() { button.disabled = word.value.trim().toLowerCase() !== 'remove'; }
+  word.addEventListener('input', sync);
+  sync();
+})();
+</script>"#;
 
 #[derive(serde::Deserialize)]
 pub struct NameForm {
@@ -476,33 +517,24 @@ pub async fn add(
 }
 
 /// Removing a profile takes two steps: the tile's button lands here
-/// without `confirm` and gets a page asking; that page's form posts
-/// back with it. (The picker carries no script, so the question is a
-/// page rather than a dialog.)
+/// without `confirm` and gets a page asking for the word "remove"; that
+/// page's form posts back with what was typed, and only the word
+/// itself goes through — the page's disabled button is convenience,
+/// this check is the guard.
 pub async fn delete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Form(form): Form<IdForm>,
 ) -> Response {
-    if form.confirm.is_none() {
+    let typed_word = form
+        .confirm
+        .as_deref()
+        .is_some_and(|w| w.trim().eq_ignore_ascii_case(REMOVE_WORD));
+    if !typed_word {
         let Ok(Some(p)) = profiles::get(&store(&state), form.id) else {
             return Redirect::to("/profiles").into_response();
         };
-        let head = page_head("Remove profile?", PROFILES_STYLE);
-        let html = format!(
-            "{head}<body><p><a href=\"/profiles\">← Back</a></p>\
-             <h1>Remove {name}?</h1>\
-             <p>Everything this profile has watched — seen ticks, where each program \
-             was left — goes with it. This cannot be undone.</p>\
-             <form method=\"post\" action=\"/profiles/delete\">\
-             <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-             <input type=\"hidden\" name=\"confirm\" value=\"1\">\
-             <button class=\"x\" style=\"font-size:1em;padding:.4em .9em\">Yes, remove {name}</button> \
-             <a href=\"/profiles\" style=\"margin-left:1em\">Keep it</a></form>{PAGE_CLOSE}",
-            name = xml_escape(&p.name),
-            id = p.id
-        );
-        return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+        return remove_page(&p, form.confirm.is_some());
     }
     if let Err(err) = profiles::delete(&store(&state), form.id) {
         tracing::warn!("deleting profile {}: {err:#}", form.id);
