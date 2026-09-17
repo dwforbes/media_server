@@ -607,6 +607,14 @@ each other, and a near-total match between two "different" episodes is rejected
 as mislabeled duplicate content rather than reported as an intro. If detection
 misfires on a show, drop an `.edl` beside the episode — it wins outright.
 
+Fullscreen is taken by the box around the video rather than the video itself, so
+the skip button (and the native controls) stay available. The native controls'
+fullscreen button is hidden in favour of the page's own (top right of the video),
+a double-click on the video, or `f` — a browser spends the click's gesture on the
+video-only fullscreen, so it cannot be redirected after the fact. Where the native
+button survives (Firefox) it still gives the bare video. iPhones use the system's
+own video fullscreen, which nothing can overlay.
+
 ### Viewer profiles: who's watching, and where they left off
 
 The web pages keep track, per viewer, of what has been watched and where each

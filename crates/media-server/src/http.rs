@@ -47,6 +47,11 @@ body.detail{max-width:46em;line-height:1.5}\
 body.player{max-width:60em;margin:1.5em auto;background:#111;color:#ddd;overflow-x:hidden}\
 div.videowrap{position:relative;width:100vw;margin-left:calc(50% - 50vw)}\
 div.videowrap video{display:block;width:100%;max-height:85vh;background:#000}\
+div.videowrap:fullscreen{width:100%;margin:0;background:#000}div.videowrap:fullscreen video{height:100vh;max-height:100vh}\
+video::-webkit-media-controls-fullscreen-button{display:none}\
+#fs{position:absolute;top:.8em;right:1.2em;font-size:1.1em;line-height:1;padding:.35em .5em;background:rgba(15,15,15,.7);color:#fff;border:1px solid #999;border-radius:4px;cursor:pointer;opacity:0;transition:opacity .15s}\
+div.videowrap:hover #fs,#fs:focus-visible{opacity:1}@media (hover:none){#fs{opacity:.75}}\
+div.videowrap:-webkit-full-screen{width:100%;margin:0;background:#000}div.videowrap:-webkit-full-screen video{height:100vh;max-height:100vh}\
 img.art{float:right;max-width:220px;margin:0 0 1em 1.5em;border-radius:6px}\
 div.hdr{display:grid;grid-template-columns:1fr auto;grid-template-areas:\"top art\" \"desc art\";column-gap:1.5em;row-gap:.4em;align-items:start}\
 div.hdr-top{grid-area:top}div.hdr-desc{grid-area:desc}\
@@ -2240,6 +2245,49 @@ const PLAYER_SCRIPT: &str = r#"<script>
   v.addEventListener('timeupdate', stamp);
   v.addEventListener('pause', stamp);
   v.addEventListener('seeked', stamp);
+  // Fullscreen is taken by the wrapper around the video, not the video
+  // itself: a fullscreen <video> is drawn alone, so the skip-intro
+  // button would vanish. The native controls' own fullscreen button is
+  // hidden (controlslist / the WebKit pseudo-element) in favour of the
+  // page's (#fs), a double-click on the video and the 'f' key, all of
+  // which take the wrapper — with the same native controls inside.
+  // Where a native button survives (Firefox), its video-only fullscreen
+  // is retargeted to the wrapper if the browser allows the second
+  // request; Chrome spends the gesture on the first, hence the hiding.
+  // Prefixed forms for Safari, which has no unprefixed element
+  // fullscreen; on iPhones video fullscreen is the system's own and
+  // nothing overlays it.
+  var wrap = v.parentElement;
+  function fullscreenEl() { return document.fullscreenElement || document.webkitFullscreenElement || null; }
+  function swallow(p) { if (p && p.catch) p.catch(function () {}); }
+  function enterFullscreen() {
+    if (!wrap) return;
+    var f = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
+    if (f) { try { swallow(f.call(wrap)); } catch (e) {} }
+  }
+  function exitFullscreen() {
+    var f = document.exitFullscreen || document.webkitExitFullscreen;
+    if (f) { try { swallow(f.call(document)); } catch (e) {} }
+  }
+  function retarget() {
+    if (fullscreenEl() !== v || !wrap) return;
+    var f = document.exitFullscreen || document.webkitExitFullscreen;
+    var p = null;
+    try { p = f.call(document); } catch (e) {}
+    if (p && p.then) p.then(enterFullscreen, function () {}); else enterFullscreen();
+  }
+  document.addEventListener('fullscreenchange', retarget);
+  document.addEventListener('webkitfullscreenchange', retarget);
+  function toggleFullscreen() { if (fullscreenEl()) exitFullscreen(); else enterFullscreen(); }
+  var fsBtn = document.getElementById('fs');
+  if (fsBtn) fsBtn.addEventListener('click', toggleFullscreen);
+  v.addEventListener('dblclick', function (e) { e.preventDefault(); toggleFullscreen(); });
+  function fsSync() {
+    var on = fullscreenEl() === wrap;
+    if (fsBtn) { fsBtn.title = on ? 'Leave fullscreen (f)' : 'Fullscreen (f)'; fsBtn.setAttribute('aria-label', on ? 'Leave fullscreen' : 'Fullscreen'); }
+  }
+  document.addEventListener('fullscreenchange', fsSync);
+  document.addEventListener('webkitfullscreenchange', fsSync);
   // Arrow keys skip 10 s and space toggles play/pause, wherever focus
   // is. Registered on the capture phase and stopping propagation so the
   // native controls (which seek by their own step and toggle on space
@@ -2252,7 +2300,7 @@ const PLAYER_SCRIPT: &str = r#"<script>
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable)) return false;
     var space = e.key === ' ' || e.key === 'Spacebar';
     if (space && tag === 'BUTTON') return false;
-    return space || e.key === 'ArrowLeft' || e.key === 'ArrowRight';
+    return space || e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'f' || e.key === 'F';
   }
   document.addEventListener('keydown', function (e) {
     if (!ownsKey(e)) return;
@@ -2266,6 +2314,11 @@ const PLAYER_SCRIPT: &str = r#"<script>
       } else {
         v.pause();
       }
+      return;
+    }
+    if (e.key === 'f' || e.key === 'F') {
+      if (e.repeat) return;
+      toggleFullscreen();
       return;
     }
     var step = e.key === 'ArrowLeft' ? -10 : 10;
@@ -3077,14 +3130,15 @@ async fn play_page(
          <span class=\"infowrap\"><a href=\"/item/{id}\">details</a>\
          <span class=\"card\">{card}</span></span></h2>{context_line}\
          <div class=\"videowrap\">\
-         <video id=\"player\" controls autoplay playsinline{poster} \
+         <video id=\"player\" controls controlslist=\"nofullscreen\" autoplay playsinline{poster} \
           data-id=\"{id}\" data-next=\"{next_id}\" data-segments=\"{segments_attr}\"{watch_attrs}>\
          <source src=\"/media/{id}\" type=\"{}\">{track}\
          Your browser cannot play this format.</video>\
+         <button id=\"fs\" type=\"button\" title=\"Fullscreen (f)\" aria-label=\"Fullscreen\">⛶</button>\
          <button id=\"skipseg\" hidden style=\"position:absolute;right:1.2em;bottom:3.4em;\
           font-size:1em;padding:.55em 1.1em;background:rgba(15,15,15,.85);color:#fff;\
           border:1px solid #999;border-radius:4px;cursor:pointer\">Skip</button></div>\
-         <p class=\"hint\"><span>← / → skip 10 seconds · space play/pause</span>\
+         <p class=\"hint\"><span>← / → skip 10 seconds · space play/pause · f fullscreen</span>\
          <span id=\"rejoin\" hidden></span>\
          <span class=\"right\"><button id=\"cc\" type=\"button\" data-swap aria-pressed=\"false\" \
           aria-controls=\"cc-panel\" title=\"Captions panel: every line along the \
