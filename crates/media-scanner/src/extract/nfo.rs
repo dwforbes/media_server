@@ -21,6 +21,28 @@ pub struct NfoData {
     pub show_title: Option<String>,
     pub season: Option<i64>,
     pub episode: Option<i64>,
+    /// Episode <aired>, as an ISO date (YYYY-MM-DD, or just the year).
+    pub aired: Option<String>,
+    /// Series <premiered> (tvshow.nfo), the same form.
+    pub premiered: Option<String>,
+}
+
+/// A date as Kodi writes it — "2001-10-14" — or the year alone. Anything
+/// else (a locale format, prose) is dropped rather than guessed at.
+fn iso_date(value: &str) -> Option<String> {
+    let v = value.trim();
+    let ok = match v.len() {
+        4 => v.bytes().all(|b| b.is_ascii_digit()),
+        10 => {
+            let b = v.as_bytes();
+            b[4] == b'-' && b[7] == b'-'
+                && [0, 1, 2, 3, 5, 6, 8, 9].iter().all(|&i| b[i].is_ascii_digit())
+                && (1..=12).contains(&v[5..7].parse::<u32>().unwrap_or(0))
+                && (1..=31).contains(&v[8..10].parse::<u32>().unwrap_or(0))
+        }
+        _ => false,
+    };
+    (ok && (1801..2200).contains(&v[..4].parse::<i64>().unwrap_or(0))).then(|| v.to_string())
 }
 
 /// Read the sidecar if it exists. Unparseable or missing files are simply
@@ -127,6 +149,16 @@ fn parse(text: &str) -> Result<NfoData> {
                     "plot" => {
                         data.plot.get_or_insert(value);
                     }
+                    "aired" => {
+                        if let Some(d) = iso_date(&value) {
+                            data.aired.get_or_insert(d);
+                        }
+                    }
+                    "premiered" => {
+                        if let Some(d) = iso_date(&value) {
+                            data.premiered.get_or_insert(d);
+                        }
+                    }
                     // Only a real title id ("tt" + digits) is kept: the
                     // value ends up in links on the web pages.
                     "uniqueid" if uniqueid_is_imdb => {
@@ -192,6 +224,21 @@ mod tests {
         assert_eq!(data.plot.as_deref(), Some("a < b & c then <more>"));
         assert_eq!(data.imdb_id.as_deref(), Some("tt0000001"));
         assert_eq!(data.genres, vec!["&unknown;".to_string()]);
+    }
+
+    #[test]
+    fn parses_air_dates_and_rejects_odd_ones() {
+        let data = parse(
+            "<episodedetails><title>Pilot</title><aired>2000-10-15</aired></episodedetails>",
+        )
+        .unwrap();
+        assert_eq!(data.aired.as_deref(), Some("2000-10-15"));
+        let data = parse("<tvshow><title>X</title><premiered>2000</premiered></tvshow>").unwrap();
+        assert_eq!(data.premiered.as_deref(), Some("2000"));
+        for odd in ["15/10/2000", "2000-13-01", "October 2000", "20001015", "1799-01-01"] {
+            let data = parse(&format!("<episodedetails><aired>{odd}</aired></episodedetails>")).unwrap();
+            assert_eq!(data.aired, None, "{odd}");
+        }
     }
 
     #[test]

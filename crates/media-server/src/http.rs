@@ -1123,20 +1123,42 @@ fn series_meta_html(meta: &media_db::queries::tv::SeriesMeta) -> String {
         out.push_str(&format!("<p style=\"max-width:38em\">{}</p>", xml_escape(plot)));
     }
     let imdb = meta.imdb_id.as_deref().and_then(imdb_title_id);
-    let line = match (meta.rating, imdb) {
-        (Some(rating), Some(id)) => Some(format!(
+    let mut bits: Vec<String> = Vec::new();
+    if let Some(premiered) = &meta.premiered {
+        bits.push(format!("Premiered {}", xml_escape(&long_date(premiered))));
+    }
+    match (meta.rating, imdb) {
+        (Some(rating), Some(id)) => bits.push(format!(
             "IMDb {rating:.1} / 10 — <a href=\"https://www.imdb.com/title/{id}/\">{id}</a>"
         )),
-        (Some(rating), None) => Some(format!("IMDb {rating:.1} / 10")),
-        (None, Some(id)) => Some(format!(
+        (Some(rating), None) => bits.push(format!("IMDb {rating:.1} / 10")),
+        (None, Some(id)) => bits.push(format!(
             "IMDb — <a href=\"https://www.imdb.com/title/{id}/\">{id}</a>"
         )),
-        (None, None) => None,
-    };
-    if let Some(line) = line {
-        out.push_str(&format!("<p style=\"color:#666\">{line}</p>"));
+        (None, None) => {}
+    }
+    if !bits.is_empty() {
+        out.push_str(&format!("<p style=\"color:#666\">{}</p>", bits.join(" · ")));
     }
     out
+}
+
+/// "2001-10-14" as "14 October 2001"; a bare year, or anything else, as
+/// it is.
+fn long_date(iso: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ];
+    let parts: Vec<&str> = iso.split('-').collect();
+    if let [y, m, d] = parts[..] {
+        if let (Ok(m), Ok(d)) = (m.parse::<usize>(), d.parse::<u32>()) {
+            if (1..=12).contains(&m) {
+                return format!("{d} {} {y}", MONTHS[m - 1]);
+            }
+        }
+    }
+    iso.to_string()
 }
 
 fn srt_to_vtt(srt: &str) -> String {
@@ -3216,6 +3238,9 @@ fn info_card(id: i64, detail: &files::ItemDetail, context: &str, link_imdb: bool
         (None, Some(id)) => facts.push(format!("<a href=\"https://www.imdb.com/title/{id}/\">IMDb</a>")),
         (None, None) => {}
     }
+    if let Some(aired) = &detail.aired {
+        facts.push(format!("aired {}", xml_escape(&long_date(aired))));
+    }
     if let Some(genre) = &detail.genre {
         facts.push(xml_escape(genre));
     }
@@ -3479,6 +3504,9 @@ async fn item_page(
             format!("<a href=\"https://www.imdb.com/title/{id}/\">{id}</a>"),
         )),
         (None, None) => {}
+    }
+    if let Some(aired) = &detail.aired {
+        facts.push(("Aired", xml_escape(&long_date(aired))));
     }
     // Genre and director labels link into their browse categories.
     if !genre_pairs.is_empty() {

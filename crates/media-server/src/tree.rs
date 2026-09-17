@@ -127,11 +127,21 @@ fn root_title(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
-fn season_title(season: i64) -> String {
-    if season == 0 {
-        "Specials".to_string()
-    } else {
-        format!("Season {season}")
+/// "Season 2 (2001)" — the year is the season's earliest air date on
+/// hand, when the sidecars carry any.
+fn season_title(season: i64, year: Option<i64>) -> String {
+    let base = if season == 0 { "Specials".to_string() } else { format!("Season {season}") };
+    match year {
+        Some(y) => format!("{base} ({y})"),
+        None => base,
+    }
+}
+
+/// "Curb Your Enthusiasm (2000)" — the premiere year, like a movie's.
+fn series_title(series: &str, year: Option<i64>) -> String {
+    match year {
+        Some(y) => format!("{series} ({y})"),
+        None => series.to_string(),
     }
 }
 
@@ -288,9 +298,9 @@ pub fn browse_children(
                 container(&TvUhd, oid, "4K"),
                 container(&TvFolders, oid, "Folders"),
             ];
-            for (series, art) in tv::series_list(conn)? {
+            for (series, art, year) in tv::series_list(conn)? {
                 out.push(with_art(
-                    container(&TvSeries(series.clone()), oid, series),
+                    container(&TvSeries(series.clone()), oid, series_title(&series, year)),
                     art,
                 ));
             }
@@ -318,12 +328,12 @@ pub fn browse_children(
         }
         TvSeries(series) => tv::seasons(conn, series)?
             .into_iter()
-            .map(|(season, art)| {
+            .map(|(season, art, year)| {
                 with_art(
                     container(
                         &TvSeason { series: series.clone(), season },
                         oid,
-                        season_title(season),
+                        season_title(season, year),
                     ),
                     art,
                 )
@@ -449,9 +459,16 @@ pub fn browse_metadata(conn: &Connection, oid: &ObjectId) -> Result<Entry> {
         }
         MusicFolders => container(oid, &Music, "Folders"),
         Tv => container(oid, &Root, "TV Shows"),
-        TvSeries(s) => with_art(container(oid, &Tv, s.clone()), tv::series_art(conn, s)?),
+        TvSeries(s) => with_art(
+            container(oid, &Tv, series_title(s, tv::series_year(conn, s)?)),
+            tv::series_art(conn, s)?,
+        ),
         TvSeason { series, season } => with_art(
-            container(oid, &TvSeries(series.clone()), season_title(*season)),
+            container(
+                oid,
+                &TvSeries(series.clone()),
+                season_title(*season, tv::season_year(conn, series, *season)?),
+            ),
             tv::season_art(conn, series, *season)?,
         ),
         TvFolders => container(oid, &Tv, "Folders"),

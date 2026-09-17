@@ -16,17 +16,18 @@ pub fn finalize_episode(
     plot: Option<&str>,
     rating: Option<f64>,
     imdb_id: Option<&str>,
+    aired: Option<&str>,
 ) -> Result<()> {
     let tx = conn.transaction()?;
     files::update_tech(&tx, file_id, tech)?;
     tx.execute(
-        "INSERT INTO tv_episodes(file_id, series, season, episode, title, plot, rating, imdb_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO tv_episodes(file_id, series, season, episode, title, plot, rating, imdb_id, aired)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(file_id) DO UPDATE SET
              series = excluded.series, season = excluded.season,
              episode = excluded.episode, title = excluded.title, plot = excluded.plot,
-             rating = excluded.rating, imdb_id = excluded.imdb_id",
-        params![file_id, series, season, episode, title, plot, rating, imdb_id],
+             rating = excluded.rating, imdb_id = excluded.imdb_id, aired = excluded.aired",
+        params![file_id, series, season, episode, title, plot, rating, imdb_id, aired],
     )?;
     files::mark_ready(&tx, file_id)?;
     tx.commit()?;
@@ -90,36 +91,82 @@ pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<BrowseItem>> {
 
 /// Series grouped case-insensitively (release names vary in casing):
 /// (display name, art file id).
-pub fn series_list(conn: &Connection) -> Result<Vec<(String, Option<i64>)>> {
+/// A series in the listing: (name, art file id, year).
+pub type SeriesEntry = (String, Option<i64>, Option<i64>);
+/// A season in a series' listing: (season, art file id, year).
+pub type SeasonEntry = (i64, Option<i64>, Option<i64>);
+
+/// Every series as (name, art file id, year): the art is promoted from
+/// an episode, the year is the tvshow.nfo premiere, else the earliest
+/// episode air date on hand.
+pub fn series_list(conn: &Connection) -> Result<Vec<SeriesEntry>> {
     let mut stmt = conn.prepare(
         "SELECT t.series,
                 (SELECT f2.id FROM tv_episodes t2 JOIN files f2 ON f2.id = t2.file_id
                   WHERE f2.status = 'ready' AND f2.art IS NOT NULL
-                    AND t2.series = t.series COLLATE NOCASE LIMIT 1)
+                    AND t2.series = t.series COLLATE NOCASE LIMIT 1),
+                COALESCE((SELECT substr(s.premiered, 1, 4) FROM tv_series s
+                           WHERE s.name = t.series COLLATE NOCASE AND s.premiered IS NOT NULL),
+                         MIN(substr(t.aired, 1, 4)))
          FROM tv_episodes t JOIN files f ON f.id = t.file_id
          WHERE f.status = 'ready'
          GROUP BY t.series COLLATE NOCASE
          ORDER BY t.series COLLATE NOCASE",
     )?;
-    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, year_from(r.get::<_, Option<String>>(2)?))))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// Seasons of a series as (season, art file id): each season is
+/// The year in a stored date's first four characters, if they are one.
+fn year_from(date: Option<String>) -> Option<i64> {
+    date.as_deref()
+        .and_then(|d| d.get(..4))
+        .and_then(|y| y.parse::<i64>().ok())
+        .filter(|y| (1801..2200).contains(y))
+}
+
+/// A series' year on its own (see series_list).
+pub fn series_year(conn: &Connection, series: &str) -> Result<Option<i64>> {
+    let date: Option<String> = conn.query_row(
+        "SELECT COALESCE((SELECT substr(s.premiered, 1, 4) FROM tv_series s
+                           WHERE s.name = ?1 COLLATE NOCASE AND s.premiered IS NOT NULL),
+                         (SELECT MIN(substr(t.aired, 1, 4)) FROM tv_episodes t
+                            JOIN files f ON f.id = t.file_id
+                           WHERE f.status = 'ready' AND t.series = ?1 COLLATE NOCASE))",
+        [series],
+        |r| r.get(0),
+    )?;
+    Ok(year_from(date))
+}
+
+/// A season's year: its earliest episode air date on hand.
+pub fn season_year(conn: &Connection, series: &str, season: i64) -> Result<Option<i64>> {
+    let date: Option<String> = conn.query_row(
+        "SELECT MIN(substr(t.aired, 1, 4)) FROM tv_episodes t JOIN files f ON f.id = t.file_id
+         WHERE f.status = 'ready' AND t.series = ?1 COLLATE NOCASE AND t.season = ?2",
+        params![series, season],
+        |r| r.get(0),
+    )?;
+    Ok(year_from(date))
+}
+
+/// Seasons of a series as (season, art file id, year): each season is
 /// represented by the artwork of its first episode that has any (usually
-/// the season or series poster every episode in the folder inherits).
-pub fn seasons(conn: &Connection, series: &str) -> Result<Vec<(i64, Option<i64>)>> {
+/// the season or series poster every episode in the folder inherits),
+/// and dated by its earliest episode air date.
+pub fn seasons(conn: &Connection, series: &str) -> Result<Vec<SeasonEntry>> {
     let mut stmt = conn.prepare(
         "SELECT t.season,
                 (SELECT f2.id FROM tv_episodes t2 JOIN files f2 ON f2.id = t2.file_id
                   WHERE f2.status = 'ready' AND f2.art IS NOT NULL
                     AND t2.series = ?1 COLLATE NOCASE AND t2.season = t.season
-                  ORDER BY t2.episode LIMIT 1)
+                  ORDER BY t2.episode LIMIT 1),
+                MIN(substr(t.aired, 1, 4))
          FROM tv_episodes t JOIN files f ON f.id = t.file_id
          WHERE f.status = 'ready' AND t.series = ?1 COLLATE NOCASE
          GROUP BY t.season ORDER BY t.season",
     )?;
-    let rows = stmt.query_map([series], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map([series], |r| Ok((r.get(0)?, r.get(1)?, year_from(r.get::<_, Option<String>>(2)?))))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -140,6 +187,8 @@ pub struct SeriesMeta {
     pub plot: Option<String>,
     pub rating: Option<f64>,
     pub imdb_id: Option<String>,
+    /// First air date (ISO), from tvshow.nfo <premiered>.
+    pub premiered: Option<String>,
 }
 
 pub fn upsert_series(
@@ -148,12 +197,14 @@ pub fn upsert_series(
     plot: Option<&str>,
     rating: Option<f64>,
     imdb_id: Option<&str>,
+    premiered: Option<&str>,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO tv_series(name, plot, rating, imdb_id) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO tv_series(name, plot, rating, imdb_id, premiered) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(name) DO UPDATE SET
-             plot = excluded.plot, rating = excluded.rating, imdb_id = excluded.imdb_id",
-        params![name, plot, rating, imdb_id],
+             plot = excluded.plot, rating = excluded.rating, imdb_id = excluded.imdb_id,
+             premiered = excluded.premiered",
+        params![name, plot, rating, imdb_id, premiered],
     )?;
     Ok(())
 }
@@ -169,10 +220,10 @@ pub fn upsert_season(conn: &Connection, series: &str, season: i64, plot: Option<
 
 pub fn series_info(conn: &Connection, series: &str) -> Result<Option<SeriesMeta>> {
     let mut stmt =
-        conn.prepare("SELECT plot, rating, imdb_id FROM tv_series WHERE name = ?1")?;
+        conn.prepare("SELECT plot, rating, imdb_id, premiered FROM tv_series WHERE name = ?1")?;
     Ok(stmt
         .query_row([series], |r| {
-            Ok(SeriesMeta { plot: r.get(0)?, rating: r.get(1)?, imdb_id: r.get(2)? })
+            Ok(SeriesMeta { plot: r.get(0)?, rating: r.get(1)?, imdb_id: r.get(2)?, premiered: r.get(3)? })
         })
         .optional()?)
 }

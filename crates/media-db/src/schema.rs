@@ -1,6 +1,6 @@
 /// Schema version stored in SQLite's `user_version` pragma. Bump when adding
 /// a migration below; the server refuses to open a mismatched database.
-pub const SCHEMA_VERSION: i32 = 16;
+pub const SCHEMA_VERSION: i32 = 17;
 
 /// Migrations indexed by target version: MIGRATIONS[0] takes 0 -> 1, etc.
 pub const MIGRATIONS: &[&str] = &[
@@ -225,5 +225,15 @@ pub const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE files ADD COLUMN frame_rate REAL;
     UPDATE files SET nfo_mtime = -1 WHERE kind IN ('movies','tv');
+    "#,
+    // 16 -> 17: air dates. An episode's <aired> and a series' <premiered>
+    // (ISO dates, as Kodi writes them) from the .nfo sidecars; a season's
+    // year is derived from its first episode. The nfo-stale poke
+    // re-ingests every episode's sidecar (tvshow.nfo is re-read on every
+    // reconcile anyway).
+    r#"
+    ALTER TABLE tv_episodes ADD COLUMN aired TEXT;
+    ALTER TABLE tv_series ADD COLUMN premiered TEXT;
+    UPDATE files SET nfo_mtime = -1 WHERE kind = 'tv';
     "#,
 ];

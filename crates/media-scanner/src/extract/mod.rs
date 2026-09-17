@@ -145,13 +145,14 @@ fn try_extract(
             let plot = nfo.as_ref().and_then(|n| n.plot.clone());
             let rating = nfo.as_ref().and_then(|n| n.rating);
             let ep_imdb = nfo.as_ref().and_then(|n| n.imdb_id.clone());
+            let aired = nfo.as_ref().and_then(|n| n.aired.clone());
             let title = nfo
                 .and_then(|n| n.title)
                 .or_else(|| parsed.map(|p| p.title))
                 .unwrap_or_else(|| nameparse::clean_name(&stem));
             tv::finalize_episode(
                 conn, file_id, &tech, &series, season, episode, &title, plot.as_deref(),
-                rating, ep_imdb.as_deref(),
+                rating, ep_imdb.as_deref(), aired.as_deref(),
             )?;
             store_segments(conn, file_id, &abs, &tech, &chapters)?;
         }
@@ -320,8 +321,11 @@ pub fn ingest_tv_dir_nfo(conn: &Connection, root: &Root, rel: &str) -> Result<()
     if abs.file_name().and_then(|n| n.to_str()) == Some(SHOW_NFO) {
         // The series name: nfo <title>, else the folder name.
         let Some(series) = data.title.clone().or_else(|| dir_name(dir)) else { return Ok(()) };
+        // <premiered> as Kodi writes it; a hand-written <year> stands in.
+        let premiered = data.premiered.clone().or_else(|| data.year.map(|y| y.to_string()));
         tv::upsert_series(
             conn, &series, data.plot.as_deref(), data.rating, data.imdb_id.as_deref(),
+            premiered.as_deref(),
         )?;
         tracing::debug!("ingested series metadata for {series:?} from {}/{rel}", root.path);
     } else {

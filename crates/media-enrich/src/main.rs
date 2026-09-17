@@ -190,6 +190,9 @@ struct NfoProbe {
     has_imdb: bool,
     has_set: bool,
     has_title: bool,
+    /// <aired> (episodes) / <premiered> (tvshow.nfo): air dates.
+    has_aired: bool,
+    has_premiered: bool,
     /// `<uniqueid type="tmdb">` — the identity, when the sidecar names one.
     tmdb_id: Option<i64>,
 }
@@ -226,6 +229,8 @@ fn nfo_state(nfo_path: &Path) -> NfoProbe {
         has_imdb: text.contains("type=\"imdb\""),
         has_set: text.contains("<set"),
         has_title: text.contains("<title>") || text.contains("<title "),
+        has_aired: text.contains("<aired>") || text.contains("<aired/>"),
+        has_premiered: text.contains("<premiered>") || text.contains("<premiered/>"),
         tmdb_id: tmdb_uniqueid(&text),
     }
 }
@@ -869,13 +874,15 @@ fn main() -> Result<()> {
                 .unwrap_or_default();
             let Some(parsed) = nameparse::episode(&stem, &parent_dirs) else { continue };
 
-            // A generated episode .nfo without a <plot> predates episode
-            // overviews; upgrade it in place (like movie ratings).
+            // A generated episode .nfo without a <plot>, an IMDb id or an
+            // <aired> predates that feature; upgrade it in place (like
+            // movie ratings).
             let probe = nfo_state(&path.with_extension("nfo"));
-            let (ep_state, ep_has_plot, ep_has_imdb) = (probe.state, probe.has_plot, probe.has_imdb);
-            let write_nfo = match ep_state {
+            let write_nfo = match probe.state {
                 NfoState::Missing => true,
-                NfoState::Generated => args.refresh || !ep_has_plot || !ep_has_imdb,
+                NfoState::Generated => {
+                    args.refresh || !probe.has_plot || !probe.has_imdb || !probe.has_aired
+                }
                 NfoState::HandWritten => args.refresh && args.force,
             };
             // Series folder: the file's directory, or its parent when the
@@ -932,7 +939,9 @@ fn main() -> Result<()> {
         let write_show_nfo = is_series_folder
             && match show_probe.state {
                 NfoState::Missing => true,
-                NfoState::Generated => args.refresh || !show_probe.has_plot || !show_probe.has_imdb,
+                NfoState::Generated => {
+                    args.refresh || !show_probe.has_plot || !show_probe.has_imdb || !show_probe.has_premiered
+                }
                 NfoState::HandWritten => args.refresh && args.force,
             };
         // Season-level season.nfo (the season's own TMDB overview), one
@@ -1157,6 +1166,7 @@ fn main() -> Result<()> {
         title: String,
         plot: String,
         imdb_id: Option<String>,
+        aired: Option<String>,
     }
     // Series tvshow.nfo writes are deferred like the episodes': the series
     // IMDb id joins the same ratings-dataset pass.
@@ -1165,6 +1175,7 @@ fn main() -> Result<()> {
         name: String,
         plot: Option<String>,
         imdb_id: Option<String>,
+        premiered: Option<String>,
     }
     let mut pending_episodes: Vec<PendingEpisode> = Vec::new();
     let mut pending_shows: Vec<PendingShow> = Vec::new();
@@ -1187,11 +1198,15 @@ fn main() -> Result<()> {
                 std::thread::sleep(Duration::from_millis(args.delay_ms));
                 season_data.insert(ep.season, data);
             }
-            let (title, overview) = season_data[&ep.season]
+            let tmdb::EpisodeInfo { title, overview, aired } = season_data[&ep.season]
                 .episodes
                 .get(&ep.episode)
                 .cloned()
-                .unwrap_or_else(|| (format!("Episode {}", ep.episode), String::new()));
+                .unwrap_or_else(|| tmdb::EpisodeInfo {
+                    title: format!("Episode {}", ep.episode),
+                    overview: String::new(),
+                    aired: None,
+                });
             let imdb_id = tmdb
                 .episode_imdb_id(info.tmdb_id, ep.season, ep.episode)
                 .unwrap_or_default();
@@ -1204,6 +1219,7 @@ fn main() -> Result<()> {
                 title,
                 plot: overview,
                 imdb_id,
+                aired,
             });
         }
 
@@ -1227,6 +1243,7 @@ fn main() -> Result<()> {
                 name: info.name.clone(),
                 plot: info.plot.clone(),
                 imdb_id: info.imdb_id.clone(),
+                premiered: info.first_air_date.clone(),
             });
         }
 
@@ -1284,7 +1301,7 @@ fn main() -> Result<()> {
                 &pe.nfo_path,
                 render_episode_nfo(
                     &pe.show, pe.season, pe.episode, &pe.title, &pe.plot,
-                    rating, pe.imdb_id.as_deref(),
+                    rating, pe.imdb_id.as_deref(), pe.aired.as_deref(),
                 ),
             ) {
                 Ok(()) => nfos_written += 1,
@@ -1301,7 +1318,10 @@ fn main() -> Result<()> {
             let rating = show.imdb_id.as_ref().and_then(|id| ep_ratings.get(id)).copied();
             match write_sidecar(
                 &show.nfo_path,
-                render_show_nfo(&show.name, show.plot.as_deref(), rating, show.imdb_id.as_deref()),
+                render_show_nfo(
+                    &show.name, show.plot.as_deref(), rating, show.imdb_id.as_deref(),
+                    show.premiered.as_deref(),
+                ),
             ) {
                 Ok(()) => nfos_written += 1,
                 Err(err) => eprintln!("{}: nfo not written: {err:#}", show.nfo_path.display()),
@@ -1333,14 +1353,15 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Series-level tvshow.nfo (Kodi convention: sits in the series folder).
-/// <plot> and the imdb uniqueid are always present (possibly empty) so
-/// the upgrade checks can tell "TMDB has nothing" apart from "predates
-/// the feature" — same convention as the episode sidecars.
+/// <plot>, <premiered> and the imdb uniqueid are always present (possibly
+/// empty) so the upgrade checks can tell "TMDB has nothing" apart from
+/// "predates the feature" — same convention as the episode sidecars.
 fn render_show_nfo(
     name: &str,
     plot: Option<&str>,
     rating: Option<f64>,
     imdb_id: Option<&str>,
+    premiered: Option<&str>,
 ) -> String {
     let rating_line = rating
         .map(|r| format!("  <rating>{r:.1}</rating>\n"))
@@ -1349,10 +1370,12 @@ fn render_show_nfo(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
          <!-- {MARKER} (TMDB) -->\n<tvshow>\n\
          \x20 <title>{}</title>\n\
-         \x20 <plot>{}</plot>\n{rating_line}\
+         \x20 <plot>{}</plot>\n\
+         \x20 <premiered>{}</premiered>\n{rating_line}\
          \x20 <uniqueid type=\"imdb\">{}</uniqueid>\n</tvshow>\n",
         xml_escape(name),
         xml_escape(plot.unwrap_or("")),
+        xml_escape(premiered.unwrap_or("")),
         xml_escape(imdb_id.unwrap_or(""))
     )
 }
@@ -1380,10 +1403,11 @@ fn render_episode_nfo(
     plot: &str,
     rating: Option<f64>,
     imdb_id: Option<&str>,
+    aired: Option<&str>,
 ) -> String {
-    // <plot> and the imdb uniqueid are always present (possibly empty) so
-    // the upgrade checks can tell "TMDB has nothing" apart from "predates
-    // the feature".
+    // <plot>, <aired> and the imdb uniqueid are always present (possibly
+    // empty) so the upgrade checks can tell "TMDB has nothing" apart from
+    // "predates the feature".
     let rating_line = rating
         .map(|r| format!("  <rating>{r:.1}</rating>\n"))
         .unwrap_or_default();
@@ -1394,10 +1418,12 @@ fn render_episode_nfo(
          \x20 <season>{season}</season>\n\
          \x20 <episode>{episode}</episode>\n\
          \x20 <title>{}</title>\n\
+         \x20 <aired>{}</aired>\n\
          \x20 <plot>{}</plot>\n{rating_line}\
          \x20 <uniqueid type=\"imdb\">{}</uniqueid>\n</episodedetails>\n",
         xml_escape(show),
         xml_escape(title),
+        xml_escape(aired.unwrap_or("")),
         xml_escape(plot),
         xml_escape(imdb_id.unwrap_or(""))
     )
@@ -1461,6 +1487,22 @@ mod tests {
         assert_eq!(tmdb_uniqueid("<uniqueid type=\"imdb\">tt0120616</uniqueid>"), None);
         assert_eq!(tmdb_uniqueid("<uniqueid type=\"tmdb\"></uniqueid>"), None);
         assert_eq!(tmdb_uniqueid("<movie><title>x</title></movie>"), None);
+    }
+
+    #[test]
+    fn air_dates_are_written_and_their_absence_marks_an_upgrade() {
+        let ep = render_episode_nfo("Show", 1, 2, "Pilot", "About.", Some(8.1), Some("tt0000002"), Some("2000-10-15"));
+        assert!(ep.contains("<aired>2000-10-15</aired>"));
+        assert!(probe(&ep).has_aired);
+        let ep_undated = render_episode_nfo("Show", 1, 2, "Pilot", "About.", None, None, None);
+        assert!(ep_undated.contains("<aired></aired>"), "present but empty: TMDB had none");
+        assert!(probe(&ep_undated).has_aired, "an empty tag still counts as written");
+        assert!(!probe("<!-- generated by media-enrich (TMDB) -->\n<episodedetails><title>x</title><plot>p</plot><uniqueid type=\"imdb\">tt0000001</uniqueid></episodedetails>").has_aired);
+
+        let show = render_show_nfo("Show", Some("p"), None, Some("tt0000003"), Some("2000-10-15"));
+        assert!(show.contains("<premiered>2000-10-15</premiered>"));
+        assert!(probe(&show).has_premiered);
+        assert!(!probe("<tvshow><title>x</title><plot>p</plot></tvshow>").has_premiered);
     }
 
     fn probe(text: &str) -> NfoProbe {

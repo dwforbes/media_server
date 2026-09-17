@@ -25,14 +25,33 @@ pub struct SeriesInfo {
     pub poster_path: Option<String>,
     pub plot: Option<String>,
     pub imdb_id: Option<String>,
+    /// First air date, ISO (YYYY-MM-DD).
+    pub first_air_date: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeInfo {
+    pub title: String,
+    pub overview: String,
+    /// Air date, ISO (YYYY-MM-DD).
+    pub aired: Option<String>,
 }
 
 /// One season of a series: its own overview plus every episode's
-/// (title, overview) keyed by episode number.
+/// title, overview and air date keyed by episode number.
 #[derive(Default)]
 pub struct SeasonInfo {
     pub overview: Option<String>,
-    pub episodes: HashMap<i64, (String, String)>,
+    pub episodes: HashMap<i64, EpisodeInfo>,
+}
+
+/// A TMDB date field as an ISO date, or nothing (TMDB sends "" for
+/// unknown dates).
+fn iso_date(v: Option<&Value>) -> Option<String> {
+    v.and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-')
+        .map(str::to_string)
 }
 
 pub struct Tmdb {
@@ -234,6 +253,7 @@ impl Tmdb {
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
+            first_air_date: iso_date(source.get("first_air_date")),
         }))
     }
 
@@ -264,7 +284,14 @@ impl Tmdb {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    out.episodes.insert(number, (name.to_string(), overview));
+                    out.episodes.insert(
+                        number,
+                        EpisodeInfo {
+                            title: name.to_string(),
+                            overview,
+                            aired: iso_date(episode.get("air_date")),
+                        },
+                    );
                 }
             }
         }

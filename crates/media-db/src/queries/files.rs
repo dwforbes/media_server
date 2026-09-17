@@ -445,6 +445,8 @@ pub struct ItemDetail {
     pub series: Option<String>,
     pub season: Option<i64>,
     pub episode: Option<i64>,
+    /// Episode air date (ISO), from the .nfo <aired>.
+    pub aired: Option<String>,
     pub imdb_id: Option<String>,
     pub collection: Option<String>,
     /// The tag-level album artist, when set. The browse tree files tracks
@@ -469,7 +471,7 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                   JOIN genres g ON g.id = tg.genre_id WHERE tg.file_id = f.id),
                 t.rating, t.imdb_id, m.collection, mu.album_artist,
                 f.audio_profile, f.audio_bitrate, f.audio_sample_rate, f.audio_bit_depth,
-                f.audio_channels, f.frame_rate
+                f.audio_channels, f.frame_rate, t.aired
          FROM files f
          LEFT JOIN movies m        ON m.file_id  = f.id
          LEFT JOIN tv_episodes t   ON t.file_id  = f.id
@@ -520,6 +522,7 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
                 series: r.get(20)?,
                 season: r.get(21)?,
                 episode: r.get(22)?,
+                aired: r.get(41)?,
                 artist: r.get(26)?,
                 album: r.get(27)?,
                 track_no: r.get(28)?,

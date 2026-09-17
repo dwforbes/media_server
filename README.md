@@ -217,6 +217,11 @@ routers/APs mistreat multicast in creative ways. Two escape hatches:
   `season.nfo` (series pages add the IMDb rating and a link to the IMDb entry),
   and — on a series page — a season × episode **ratings grid**, every cell a
   colour-coded rating box linking to that episode.
+  **Air dates**: an episode's `<aired>` shows on its detail page and card, and
+  series and seasons carry their year in the listing — "Curb Your Enthusiasm
+  (2000)" from `tvshow.nfo`'s `<premiered>` (else the earliest episode on hand),
+  "Season 2 (2001)" from its earliest episode. media-enrich writes both tags from
+  TMDB; sidecars that predate them are upgraded in place on its next run.
 
 ### Remote announcers (media-announcer)
 
