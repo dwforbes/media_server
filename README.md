@@ -111,8 +111,9 @@ best-first — naive clients that only read the first `<res>` stream the best co
 capable ones offer the choice. The Folders view always mirrors the actual files.
 
 The detail page of a video also says which **captions** it has: "web" ones (a
-same-name `.srt` sidecar, what the pages serve), embedded text tracks, both, or
-none.
+same-name `.srt` sidecar, what the pages serve), embedded tracks — text, or
+bitmap (PGS/VobSub), which players such as VLC show but the web player cannot —
+both, or none.
 
 **Cover art** is served at `/art/{id}` and advertised per item (and per music album
 container) via `upnp:albumArtURI`, so capable clients show posters and album covers.

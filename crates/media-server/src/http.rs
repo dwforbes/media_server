@@ -1169,56 +1169,74 @@ fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// The ordinal (among subtitle streams) of the text subtitle track worth
-/// showing — full English captions, SDH preferred, forced tracks last (see
-/// media_db::subtitles). None when the file has no text subtitles (bitmap
-/// PGS/VobSub can't become WebVTT).
-///
-/// The answer is remembered beside the VTT cache (good while newer than
-/// the media file) — "none" as an empty `{id}.nosubs`, a track as its
-/// ordinal in `{id}.subs` — so a program costs one probe rather than one
-/// per page view; and probes take a permit from `state.probes`, the
-/// small semaphore every ffmpeg/ffprobe spawn shares, so a burst of
-/// requests queues instead of forking a process apiece.
-async fn text_sub_stream(state: &AppState, id: i64, path: &std::path::Path) -> Option<usize> {
-    let marker = state.vtt_cache.join(format!("{id}.nosubs"));
-    let found_marker = state.vtt_cache.join(format!("{id}.subs"));
+/// What a file carries by way of embedded subtitles: a text track worth
+/// showing (its ordinal among subtitle streams — full English captions,
+/// SDH preferred, forced tracks last; see media_db::subtitles), only
+/// bitmap tracks (PGS/VobSub, which players like VLC draw but can't
+/// become WebVTT), or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbeddedSubs {
+    None,
+    Text(usize),
+    BitmapOnly,
+}
+
+/// The answer is remembered as `{id}.subs` beside the VTT cache ("none",
+/// "bitmap", or the ordinal), good while newer than the media file, so a
+/// program costs one probe rather than one per page view; and probes take
+/// a permit from `state.probes`, the small semaphore every ffmpeg/ffprobe
+/// spawn shares, so a burst of requests queues instead of forking a
+/// process apiece.
+async fn embedded_subs(state: &AppState, id: i64, path: &std::path::Path) -> EmbeddedSubs {
+    let marker = state.vtt_cache.join(format!("{id}.subs"));
+    // An earlier build kept "none" as an empty `{id}.nosubs`, written for
+    // bitmap-only files too; it is not trusted, only tidied away.
+    let _ = std::fs::remove_file(state.vtt_cache.join(format!("{id}.nosubs")));
     let media_time = file_mtime(path);
-    let fresh = |m: &std::path::Path| {
-        matches!((file_mtime(m), media_time), (Some(mt), Some(media)) if mt >= media)
-    };
-    if fresh(&marker) {
-        return None;
-    }
-    if fresh(&found_marker) {
-        if let Some(ordinal) = std::fs::read_to_string(&found_marker)
-            .ok()
-            .and_then(|s| s.trim().parse::<usize>().ok())
-        {
-            return Some(ordinal);
+    if matches!((file_mtime(&marker), media_time), (Some(mt), Some(media)) if mt >= media) {
+        match std::fs::read_to_string(&marker).unwrap_or_default().trim() {
+            "none" => return EmbeddedSubs::None,
+            "bitmap" => return EmbeddedSubs::BitmapOnly,
+            n => {
+                if let Ok(ordinal) = n.parse::<usize>() {
+                    return EmbeddedSubs::Text(ordinal);
+                }
+            }
         }
     }
-    let _permit = state.probes.acquire().await.ok()?;
-    let out = tokio::process::Command::new(&state.ffprobe)
+    let Ok(_permit) = state.probes.acquire().await else { return EmbeddedSubs::None };
+    let Ok(out) = tokio::process::Command::new(&state.ffprobe)
         .args(media_db::subtitles::ffprobe_args())
         .arg(path)
         .output()
         .await
-        .ok()?;
+    else {
+        return EmbeddedSubs::None;
+    };
     if !out.status.success() {
-        return None;
+        return EmbeddedSubs::None;
     }
     let tracks = media_db::subtitles::parse_ffprobe(&String::from_utf8_lossy(&out.stdout));
-    let found = media_db::subtitles::best_text_track(&tracks).map(|t| t.ordinal);
-    match found {
-        None => {
-            let _ = std::fs::write(&marker, b"");
-        }
-        Some(ordinal) => {
-            let _ = std::fs::write(&found_marker, ordinal.to_string());
-        }
-    }
+    let found = match media_db::subtitles::best_text_track(&tracks) {
+        Some(t) => EmbeddedSubs::Text(t.ordinal),
+        None if tracks.is_empty() => EmbeddedSubs::None,
+        None => EmbeddedSubs::BitmapOnly,
+    };
+    let record = match found {
+        EmbeddedSubs::None => "none".to_string(),
+        EmbeddedSubs::BitmapOnly => "bitmap".to_string(),
+        EmbeddedSubs::Text(n) => n.to_string(),
+    };
+    let _ = std::fs::write(&marker, record);
     found
+}
+
+/// The text track the web player can use, if any (see embedded_subs).
+async fn text_sub_stream(state: &AppState, id: i64, path: &std::path::Path) -> Option<usize> {
+    match embedded_subs(state, id, path).await {
+        EmbeddedSubs::Text(n) => Some(n),
+        _ => None,
+    }
 }
 
 /// Subtitles as WebVTT: the .srt sidecar when present, else the embedded
@@ -3489,15 +3507,21 @@ async fn item_page(
     // same-name .srt sidecar, and text tracks embedded in the file.
     if detail.kind != media_db::MediaKind::Music {
         if let Some(servable) = &servable {
+            // Bitmap-only tracks count: a player like VLC draws them,
+            // even though the web player cannot.
             let web = sidecar::is_regular_within(&servable.abs_path.with_extension("srt"), sidecar::MAX_TEXT);
-            let embedded = text_sub_stream(&state, id, &servable.abs_path).await.is_some();
-            let which = match (embedded, web) {
-                (true, true) => "Embedded and web (.srt sidecar)",
-                (true, false) => "Embedded",
-                (false, true) => "Web (.srt sidecar)",
-                (false, false) => "None",
+            let embedded = match embedded_subs(&state, id, &servable.abs_path).await {
+                EmbeddedSubs::Text(_) => Some("Embedded"),
+                EmbeddedSubs::BitmapOnly => Some("Embedded (bitmap: for players such as VLC, not the web player)"),
+                EmbeddedSubs::None => None,
             };
-            facts.push(("Captions", which.to_string()));
+            let which = match (embedded, web) {
+                (Some(e), true) => format!("{e} and web (.srt sidecar)"),
+                (Some(e), false) => e.to_string(),
+                (None, true) => "Web (.srt sidecar)".to_string(),
+                (None, false) => "None".to_string(),
+            };
+            facts.push(("Captions", which));
         }
     }
     facts.push(("File size", human_size(detail.size)));
