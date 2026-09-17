@@ -318,12 +318,12 @@ pub fn home_picker_html(state: &AppState) -> String {
 
 pub const PROFILES_STYLE: &str = "<style>\
 div.tiles{display:flex;flex-wrap:wrap;gap:1.4em 1.8em;margin:1.2em 0}\
-div.tiles form{display:flex;flex-direction:column;align-items:center;gap:.5em;width:7em;text-align:center;overflow-wrap:anywhere}\
-button.tile{width:6em;height:6em;border-radius:50%;border:3px solid transparent;color:#fff;font-size:1.4em;font-weight:bold;cursor:pointer}\
+div.tiles form{display:flex;flex-direction:column;align-items:center;gap:.5em;width:8.5rem;text-align:center;overflow-wrap:anywhere}\
+button.tile{width:8.5rem;height:8.5rem;flex:none;padding:0;border-radius:50%;border:3px solid transparent;color:#fff;font-size:1.4em;font-weight:bold;cursor:pointer}\
 button.tile:hover,button.tile:focus{border-color:#0645ad}\
 button.tile.current{border-color:#333}\
 button.tile.add{background:#eee;color:#555;font-size:2.2em;font-weight:normal;border-style:dashed;border-color:#aaa}\
-div.tiles input{width:100%;box-sizing:border-box}\
+div.tiles input{width:100%;box-sizing:border-box;text-align:center}\
 button.x{font-size:.75em;color:#c00;background:none;border:1px solid #c00;border-radius:3px;cursor:pointer}\
 p.err{color:#c00}\
 </style>";
