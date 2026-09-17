@@ -1174,16 +1174,28 @@ fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
 /// media_db::subtitles). None when the file has no text subtitles (bitmap
 /// PGS/VobSub can't become WebVTT).
 ///
-/// "None" is remembered as `{id}.nosubs` beside the VTT cache (good while
-/// newer than the media file), so a program without captions costs one
-/// probe rather than one per page view; and probes take a permit from
-/// `state.probes`, the small semaphore every ffmpeg/ffprobe spawn shares,
-/// so a burst of requests queues instead of forking a process apiece.
+/// The answer is remembered beside the VTT cache (good while newer than
+/// the media file) — "none" as an empty `{id}.nosubs`, a track as its
+/// ordinal in `{id}.subs` — so a program costs one probe rather than one
+/// per page view; and probes take a permit from `state.probes`, the
+/// small semaphore every ffmpeg/ffprobe spawn shares, so a burst of
+/// requests queues instead of forking a process apiece.
 async fn text_sub_stream(state: &AppState, id: i64, path: &std::path::Path) -> Option<usize> {
     let marker = state.vtt_cache.join(format!("{id}.nosubs"));
-    if let (Some(marker_time), Some(media_time)) = (file_mtime(&marker), file_mtime(path)) {
-        if marker_time >= media_time {
-            return None;
+    let found_marker = state.vtt_cache.join(format!("{id}.subs"));
+    let media_time = file_mtime(path);
+    let fresh = |m: &std::path::Path| {
+        matches!((file_mtime(m), media_time), (Some(mt), Some(media)) if mt >= media)
+    };
+    if fresh(&marker) {
+        return None;
+    }
+    if fresh(&found_marker) {
+        if let Some(ordinal) = std::fs::read_to_string(&found_marker)
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+        {
+            return Some(ordinal);
         }
     }
     let _permit = state.probes.acquire().await.ok()?;
@@ -1198,8 +1210,13 @@ async fn text_sub_stream(state: &AppState, id: i64, path: &std::path::Path) -> O
     }
     let tracks = media_db::subtitles::parse_ffprobe(&String::from_utf8_lossy(&out.stdout));
     let found = media_db::subtitles::best_text_track(&tracks).map(|t| t.ordinal);
-    if found.is_none() {
-        let _ = std::fs::write(&marker, b"");
+    match found {
+        None => {
+            let _ = std::fs::write(&marker, b"");
+        }
+        Some(ordinal) => {
+            let _ = std::fs::write(&found_marker, ordinal.to_string());
+        }
     }
     found
 }
@@ -3345,6 +3362,7 @@ async fn item_page(
     let detail = files::detail(&conn, id);
     let genre_pairs = queries::genres_for_file(&conn, id).unwrap_or_default();
     let director_pairs = queries::directors_for_file(&conn, id).unwrap_or_default();
+    let servable = files::servable(&conn, id).ok().flatten();
     let detail = match detail {
         Ok(Some(d)) => d,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
@@ -3466,6 +3484,21 @@ async fn item_page(
     }
     if let Some(container) = &detail.container {
         facts.push(("Container", xml_escape(container)));
+    }
+    // Which captions a video has: "web" ones the pages serve from a
+    // same-name .srt sidecar, and text tracks embedded in the file.
+    if detail.kind != media_db::MediaKind::Music {
+        if let Some(servable) = &servable {
+            let web = sidecar::is_regular_within(&servable.abs_path.with_extension("srt"), sidecar::MAX_TEXT);
+            let embedded = text_sub_stream(&state, id, &servable.abs_path).await.is_some();
+            let which = match (embedded, web) {
+                (true, true) => "Embedded and web (.srt sidecar)",
+                (true, false) => "Embedded",
+                (false, true) => "Web (.srt sidecar)",
+                (false, false) => "None",
+            };
+            facts.push(("Captions", which.to_string()));
+        }
     }
     facts.push(("File size", human_size(detail.size)));
     facts.push(("MIME type", xml_escape(&detail.mime)));

@@ -110,6 +110,10 @@ episode number) are merged into a single entry carrying one `<res>` per file,
 best-first — naive clients that only read the first `<res>` stream the best copy,
 capable ones offer the choice. The Folders view always mirrors the actual files.
 
+The detail page of a video also says which **captions** it has: "web" ones (a
+same-name `.srt` sidecar, what the pages serve), embedded text tracks, both, or
+none.
+
 **Cover art** is served at `/art/{id}` and advertised per item (and per music album
 container) via `upnp:albumArtURI`, so capable clients show posters and album covers.
 Sources, in order: a `<stem>-poster.jpg/png` sidecar (movies/TV — what media-enrich
