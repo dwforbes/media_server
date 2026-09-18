@@ -3157,7 +3157,7 @@ async fn play_page(
          <source src=\"/media/{id}\" type=\"{}\">{track}\
          Your browser cannot play this format.</video>\
          <button id=\"fs\" type=\"button\" title=\"Fullscreen (f)\" aria-label=\"Fullscreen\">⛶</button>\
-         <button id=\"skipseg\" hidden style=\"position:absolute;right:1.2em;bottom:3.4em;\
+         <button id=\"skipseg\" hidden style=\"position:absolute;right:1.2em;bottom:6em;\
           font-size:1em;padding:.55em 1.1em;background:rgba(15,15,15,.85);color:#fff;\
           border:1px solid #999;border-radius:4px;cursor:pointer\">Skip</button></div>\
          <p class=\"hint\"><span>← / → skip 10 seconds · space play/pause · f fullscreen</span>\
