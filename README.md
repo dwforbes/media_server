@@ -647,7 +647,8 @@ of the running time counts as finishing too. With that, per profile:
   recently added, By Franchise only films in some franchise, a season only its
   episodes; the home page has everything. Each page shows at most
   `continue_count` entries (12 by default), the most recent under that page. The
-  × on a cover (or a right click /
+  section folds away at a click on its heading — it can be a lot of scrolling on a
+  phone — and the browser remembers the choice. The × on a cover (or a right click /
   long press on it) removes the entry, after a confirmation, until that program is
   played again.
 - **Resume**: opening a program the profile left part-way seeks to that spot

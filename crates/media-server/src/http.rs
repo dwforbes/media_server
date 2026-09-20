@@ -85,7 +85,8 @@ li.row input[data-seen]{flex:none;margin:0 .5em 0 0}\
 li.row .rt{margin-left:auto;padding-left:1em;display:flex;align-items:center;gap:.6em;flex-shrink:0}\
 li.row .rt .wnote{margin:0}\
 div.covers.cont{padding:.4em 0 .6em}\
-h2.cont{font-size:1.1em;margin:.8em 0 0}\
+details.cont{margin:.8em 0 0}details.cont>summary{cursor:pointer}\
+details.cont>summary h2{display:inline;font-size:1.1em;margin:0}details.cont>summary .n{color:#777;font-size:.9em}\
 div.covers .cover.cw{height:auto;position:relative}\
 div.covers .cover.cw>a{height:180px}\
 div.covers .cover.cw .cap{display:block;font-size:.75em;line-height:1.3;margin-top:.3em;color:#444;overflow-wrap:anywhere}\
@@ -415,7 +416,7 @@ fn csp() -> &'static str {
     static CSP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CSP.get_or_init(|| {
         use base64::Engine;
-        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT, CARDS_SCRIPT, crate::watch::WATCH_SCRIPT, crate::watch::REMOVE_SCRIPT]
+        let hashes: Vec<String> = [PLAYER_SCRIPT, CC_PANEL_SCRIPT, CAPTIONS_SCRIPT, CARDS_SCRIPT, crate::watch::WATCH_SCRIPT, crate::watch::REMOVE_SCRIPT, crate::watch::CONTINUE_SCRIPT]
             .iter()
             .map(|script| {
                 let body = script

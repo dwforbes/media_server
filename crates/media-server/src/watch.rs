@@ -231,15 +231,39 @@ pub fn continue_html(
     if entries.is_empty() {
         return String::new();
     }
-    let mut html = String::from(
-        "<h2 id=\"continue\" class=\"cont\">Continue watching</h2><div class=\"covers cont\">",
+    // A <details>, open as served: the heading is its summary, so the
+    // section folds away (a long gallery is a lot of scrolling on a
+    // phone) with no script at all; CONTINUE_SCRIPT, right behind it,
+    // only remembers the choice per browser. The count tells a folded
+    // section's size.
+    let mut html = format!(
+        "<details id=\"continue\" class=\"cont\" open><summary><h2>Continue watching</h2> \
+         <span class=\"n\">({})</span></summary><div class=\"covers cont\">",
+        entries.len()
     );
     for entry in &entries {
         html.push_str(&continue_cover_html(entry));
     }
-    html.push_str("</div>");
+    html.push_str("</div></details>");
+    html.push_str(CONTINUE_SCRIPT);
     html
 }
+
+/// Remembers whether the continue-watching section is folded, per
+/// browser. It sits immediately after the section rather than with the
+/// page's other scripts at the end of the body: on a long listing the
+/// browser paints before it has parsed that far, and a remembered fold
+/// would show as the gallery flashing open and shut.
+pub const CONTINUE_SCRIPT: &str = r#"<script>
+(function () {
+  var d = document.getElementById('continue');
+  if (!d) return;
+  try { if (localStorage.getItem('continue-folded') === '1') d.open = false; } catch (e) {}
+  d.addEventListener('toggle', function () {
+    try { localStorage.setItem('continue-folded', d.open ? '0' : '1'); } catch (e) {}
+  });
+})();
+</script>"#;
 
 /// A cover in the gallery: the poster (or an outlined placeholder)
 /// linking straight into the player, a caption with the program and
@@ -782,10 +806,15 @@ pub const WATCH_SCRIPT: &str = r#"<script>
       if (!r.ok) throw 0;
       var strip = cover.parentNode;
       cover.remove();
-      if (strip && !strip.querySelector('.cover')) {
-        var h = document.getElementById('continue');
-        if (h) h.remove();
-        strip.remove();
+      // The section goes with its last cover; else its count follows.
+      var section = document.getElementById('continue');
+      var left = strip ? strip.querySelectorAll('.cover').length : 0;
+      if (!left) {
+        if (section) section.remove();
+        else if (strip) strip.remove();
+      } else if (section) {
+        var n = section.querySelector('summary .n');
+        if (n) n.textContent = '(' + left + ')';
       }
     }).catch(function () {});
   }
