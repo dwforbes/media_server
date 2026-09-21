@@ -534,6 +534,26 @@ pub fn detail(conn: &Connection, file_id: i64) -> Result<Option<ItemDetail>> {
     .map_err(Into::into)
 }
 
+/// When each video file entered the catalog (unix seconds), by absolute
+/// path — every status, since a file is "arrived" from its first
+/// sighting. For tools that treat new media differently from old.
+pub fn video_added_times(conn: &Connection) -> Result<HashMap<PathBuf, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.path, f.rel_path, f.added_at
+         FROM files f JOIN roots r ON r.id = f.root_id
+         WHERE f.kind IN ('movies', 'tv')",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+    })?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (root, rel, added_at) = row?;
+        out.insert(PathBuf::from(root).join(rel), added_at);
+    }
+    Ok(out)
+}
+
 /// Where the artwork for one file lives.
 pub enum ArtSource {
     /// A sidecar image file on disk.

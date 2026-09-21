@@ -133,11 +133,15 @@ const BITMAP_SUBS: &[&str] = &["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitl
 
 /// What the remux will do, decided from the probe (and whether a usable
 /// .srt sidecar sits beside the file).
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Plan {
     pub video: Vec<usize>,
     /// (input index, gets an AAC twin)
     pub audio: Vec<(usize, bool)>,
+    /// With loudness normalization on: each twin's measured level (of
+    /// its stereo downmix) and the gain it is encoded with, if any — a
+    /// twin is an encode already, so raising a quiet one costs nothing.
+    pub twin_levels: Vec<TwinLevel>,
     pub subtitles: Vec<usize>,
     /// Mux the .srt sidecar in as the mov_text subtitle track.
     pub embed_srt: bool,
@@ -146,9 +150,21 @@ pub struct Plan {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TwinLevel {
+    /// Input index of the track the twin is made from.
+    pub index: usize,
+    pub measured: crate::loudness::Measurement,
+    pub gain: Option<f64>,
+}
+
 impl Plan {
     pub fn twins(&self) -> usize {
         self.audio.iter().filter(|(_, twin)| *twin).count()
+    }
+
+    fn twin_gain(&self, index: usize) -> Option<f64> {
+        self.twin_levels.iter().find(|t| t.index == index).and_then(|t| t.gain)
     }
 }
 
@@ -246,15 +262,25 @@ pub fn ffmpeg_args(
         if *twin {
             push("-map".into());
             push(format!("0:{idx}"));
+            // MP4 has no per-track title; the handler name is what
+            // players list in their audio-track menu. A raised twin says
+            // so there (which is also how the loudness step knows).
+            let gain = plan.twin_gain(*idx);
+            let name = match gain {
+                Some(g) => crate::loudness::label(g, true),
+                None => crate::loudness::TWIN_LABEL.to_string(),
+            };
             twin_opts.extend([
                 format!("-c:a:{audio_out}"), "aac".into(),
                 format!("-b:a:{audio_out}"), "192k".into(),
                 format!("-ac:a:{audio_out}"), "2".into(),
-                // MP4 has no per-track title; the handler name is what
-                // players list in their audio-track menu.
-                format!("-metadata:s:a:{audio_out}"), "handler_name=Stereo (AAC)".into(),
+                format!("-metadata:s:a:{audio_out}"), format!("handler_name={name}"),
                 format!("-disposition:a:{audio_out}"), "default".into(),
             ]);
+            if let Some(g) = gain {
+                // A linear gain commutes with the downmix that follows.
+                twin_opts.extend([format!("-filter:a:{audio_out}"), format!("volume={g:.1}dB")]);
+            }
             audio_out += 1;
         }
         push("-map".into());
@@ -334,7 +360,15 @@ fn is_mkv(path: &Path) -> bool {
 }
 
 /// Remux one file if it qualifies. With `dry_run`, probe and plan only.
-pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: bool) -> Result<Outcome> {
+/// With a loudness policy, each stereo twin's downmix is measured first
+/// and a quiet one is encoded with the gain the policy allows.
+pub fn remux_if_applicable(
+    ffmpeg: &str,
+    ffprobe: &str,
+    media: &Path,
+    dry_run: bool,
+    loudness: Option<&crate::loudness::Policy>,
+) -> Result<Outcome> {
     if !is_mkv(media) {
         return Ok(Outcome::Skipped("not mkv".into()));
     }
@@ -351,12 +385,28 @@ pub fn remux_if_applicable(ffmpeg: &str, ffprobe: &str, media: &Path, dry_run: b
     let srt_text = if srt_bytes.is_empty() { None } else { decode_subtitle_text(&srt_bytes) };
 
     let before = probe(ffprobe, media)?;
-    let plan = match plan(&before, srt_text.is_some()) {
+    let mut plan = match plan(&before, srt_text.is_some()) {
         Ok(plan) => plan,
         Err(why) => return Ok(Outcome::Skipped(why)),
     };
     if dry_run {
         return Ok(Outcome::WouldRemux(plan));
+    }
+    if let Some(policy) = loudness {
+        let twinned: Vec<usize> = plan.audio.iter().filter(|(_, twin)| *twin).map(|(i, _)| *i).collect();
+        for index in twinned {
+            // A failed measurement costs the raise, not the remux.
+            match crate::loudness::measure(ffmpeg, media, &format!("0:{index}"), Some("stereo")) {
+                Ok(measured) => {
+                    let gain = match policy.decide(&measured) {
+                        crate::loudness::Verdict::Gain(g) => Some(g),
+                        _ => None,
+                    };
+                    plan.twin_levels.push(TwinLevel { index, measured, gain });
+                }
+                Err(err) => eprintln!("{}: twin loudness not measured: {err:#}", media.display()),
+            }
+        }
     }
 
     let dir = media.parent().unwrap_or_else(|| Path::new("."));

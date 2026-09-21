@@ -93,6 +93,26 @@ pub struct EnrichConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub ffmpeg_path: Option<String>,
+    /// Read by media-enrich: retag hev1 HEVC MP4s as hvc1 (default on).
+    /// Accepted here; the scanner does not act on it.
+    #[serde(default = "default_true")]
+    #[allow(dead_code)]
+    pub fix_hevc_tags: bool,
+    /// Read by media-enrich: give quiet, newly arrived videos a raised
+    /// default audio track. Accepted here, with its three settings; the
+    /// scanner does not act on them.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub normalize_loudness: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub loudness_since: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub loudness_target: Option<f64>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub loudness_min_gain: Option<f64>,
 }
 
 fn default_true() -> bool {

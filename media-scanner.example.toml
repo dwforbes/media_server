@@ -61,6 +61,20 @@ embed_subtitles = true
 # web player needs no on-demand extraction. Only adds sidecars; on by
 # default.
 #extract_subtitles = true
+# Films mastered far below everything else (a theatrical mix can sit 15 dB
+# under a TV episode): measure the default audio track of newly arrived
+# videos and, when it is well under the target and its peaks leave room,
+# add a copy raised by a plain linear gain as the new default track, the
+# original right behind it. Never compresses; files in the normal range
+# are left alone. Replaces whole media files — opt-in.
+#normalize_loudness = true
+# "Newly arrived" = catalogued on or after this day (UTC). Unset: from the
+# step's first run on. Older films one at a time: media-enrich --loudness-path.
+#loudness_since = "2026-09-21"
+# Raise towards this integrated loudness (LUFS), and only when the raise
+# would be at least this many dB.
+#loudness_target = -24.0
+#loudness_min_gain = 4.0
 #ffmpeg_path = "ffmpeg"
 
 [[roots]]

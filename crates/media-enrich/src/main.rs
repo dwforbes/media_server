@@ -1,4 +1,6 @@
 mod imdb;
+mod loudness;
+mod loudness_state;
 mod remux;
 mod captions_state;
 mod subtitles;
@@ -9,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use captions_state::{CaptionsState, Stamp};
+use loudness_state::LoudnessState;
 use clap::Parser;
 use media_db::mime::VIDEO_EXTENSIONS;
 use media_db::nameparse;
@@ -72,6 +75,17 @@ struct Args {
     /// libraries whose sidecars were corrected before records existed.
     #[arg(long)]
     adopt_sidecar_captions: bool,
+    /// Give newly arrived videos whose audio is mastered far below the
+    /// rest a louder default track (a linear gain within the track's own
+    /// headroom; the original stays behind it). Also enabled by
+    /// normalize_loudness = true in the [enrich] section.
+    #[arg(long)]
+    normalize_loudness: bool,
+    /// Measure (and, when it qualifies, normalize) this file or folder
+    /// now, whenever it arrived. Repeatable. Works without
+    /// --normalize-loudness, and with --dry-run to see the numbers only.
+    #[arg(long, value_name = "PATH")]
+    loudness_path: Vec<PathBuf>,
     /// Re-download the cached IMDb ratings dataset when older than this.
     #[arg(long, default_value_t = 7)]
     ratings_max_age_days: u64,
@@ -155,6 +169,21 @@ struct EnrichSection {
     /// Apple's players require. On by default.
     #[serde(default = "default_true")]
     fix_hevc_tags: bool,
+    /// Add a louder default audio track to newly arrived videos mastered
+    /// far below the target (see loudness.rs). Replaces the file after
+    /// verification. Opt-in.
+    #[serde(default)]
+    normalize_loudness: bool,
+    /// "YYYY-MM-DD": videos that entered the catalog on or after this
+    /// day count as newly arrived. Unset: from this step's first run on.
+    #[serde(default)]
+    loudness_since: Option<String>,
+    /// Integrated loudness quiet tracks are raised towards, LUFS.
+    #[serde(default = "default_loudness_target")]
+    loudness_target: f64,
+    /// Raises smaller than this many dB are not worth a rewrite.
+    #[serde(default = "default_loudness_min_gain")]
+    loudness_min_gain: f64,
     #[serde(default = "default_ffmpeg")]
     ffmpeg_path: String,
     #[serde(flatten)]
@@ -163,6 +192,14 @@ struct EnrichSection {
 
 fn default_ffmpeg() -> String {
     "ffmpeg".into()
+}
+
+fn default_loudness_target() -> f64 {
+    -24.0
+}
+
+fn default_loudness_min_gain() -> f64 {
+    4.0
 }
 
 fn default_true() -> bool {
@@ -426,7 +463,10 @@ fn extract_embedded_subtitles(config: &ScannerConfig, dry_run: bool, captions: &
 /// `.{stem}.subtitles-tmp*.mp4/.srt`)?
 fn is_enrich_temp(name: &str) -> bool {
     name.starts_with('.')
-        && (name.contains(".remux-tmp") || name.contains(".subtitles-tmp") || name.contains(".subtitles-extract"))
+        && (name.contains(".remux-tmp")
+            || name.contains(".subtitles-tmp")
+            || name.contains(".subtitles-extract")
+            || name.contains(".loudness-tmp"))
 }
 
 /// Remove every temp output left under the video roots by earlier runs
@@ -463,7 +503,14 @@ fn remove_stale_temps(config: &ScannerConfig) {
 
 /// Remux every eligible .mkv under the video roots to .mp4. Dry run:
 /// probe and report only.
-fn remux_mkv_files(config: &ScannerConfig, dry_run: bool) {
+/// Returns the level of every stereo twin measured along the way, by the
+/// new file's path, so the loudness step need not measure it again.
+fn remux_mkv_files(
+    config: &ScannerConfig,
+    dry_run: bool,
+    loudness: Option<&loudness::Policy>,
+) -> Vec<(PathBuf, remux::TwinLevel)> {
+    let mut twin_levels: Vec<(PathBuf, remux::TwinLevel)> = Vec::new();
     let mut remuxed = 0usize;
     let mut planned = 0usize;
     let mut skipped: Vec<(PathBuf, String)> = Vec::new();
@@ -482,7 +529,7 @@ fn remux_mkv_files(config: &ScannerConfig, dry_run: bool) {
             .collect();
         paths.sort();
         for path in paths {
-            match remux::remux_if_applicable(&config.enrich.ffmpeg_path, &config.ffprobe_path, &path, dry_run) {
+            match remux::remux_if_applicable(&config.enrich.ffmpeg_path, &config.ffprobe_path, &path, dry_run, loudness) {
                 Ok(remux::Outcome::WouldRemux(plan)) => {
                     planned += 1;
                     println!("would remux: {}{}", path.display(), describe_plan(&plan));
@@ -490,6 +537,10 @@ fn remux_mkv_files(config: &ScannerConfig, dry_run: bool) {
                 Ok(remux::Outcome::Remuxed(plan)) => {
                     remuxed += 1;
                     println!("remuxed to mp4: {}{}", path.display(), describe_plan(&plan));
+                    // The first twin is the default track: the one that counts.
+                    if let Some(level) = plan.twin_levels.first() {
+                        twin_levels.push((path.with_extension("mp4"), *level));
+                    }
                 }
                 Ok(remux::Outcome::Skipped(why)) => skipped.push((path, why)),
                 Err(err) => eprintln!("{}: remux failed: {err:#}", path.display()),
@@ -509,6 +560,197 @@ fn remux_mkv_files(config: &ScannerConfig, dry_run: bool) {
     } else if remuxed > 0 {
         println!("mkv files remuxed to mp4: {remuxed}");
     }
+    twin_levels
+}
+
+/// "YYYY-MM-DD" as unix seconds at the start of that day (UTC).
+fn parse_day(text: &str) -> Option<i64> {
+    let mut parts = text.trim().splitn(3, '-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.parse().ok()?;
+    if !(1970..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86_400)
+}
+
+/// The containers the loudness step can rewrite.
+fn is_loudness_candidate(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| ["mp4", "m4v", "mov", "mkv"].iter().any(|k| e.eq_ignore_ascii_case(k)))
+}
+
+fn video_files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .flatten()
+        .filter(|e| e.file_type().is_file() && is_loudness_candidate(e.path()))
+        .map(|e| e.into_path())
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// What the loudness step is asked to do this run.
+struct LoudnessJob<'a> {
+    policy: loudness::Policy,
+    /// Look at everything that arrived since the cutoff.
+    auto: bool,
+    /// Files and folders named on the command line: looked at whenever
+    /// they arrived.
+    explicit: &'a [PathBuf],
+    dry_run: bool,
+    /// Twins remux measured earlier in this run, by the new file's path.
+    twin_levels: &'a [(PathBuf, remux::TwinLevel)],
+}
+
+/// Give quiet, newly arrived videos a raised default track (loudness.rs).
+/// "Newly arrived" is the catalog's word: a file whose added-at is on or
+/// after the cutoff, or that the scanner has not catalogued yet.
+fn normalize_loudness(config: &ScannerConfig, job: &LoudnessJob, state: &mut LoudnessState) {
+    let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
+    for path in job.explicit {
+        if path.is_dir() {
+            candidates.extend(video_files_under(path).into_iter().map(|p| (p, true)));
+        } else if path.is_file() {
+            candidates.push((path.clone(), true));
+        } else {
+            eprintln!("loudness: {} is not a file or folder", path.display());
+        }
+    }
+    if job.auto {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let since = match config.enrich.loudness_since.as_deref() {
+            Some(text) => parse_day(text).or_else(|| {
+                eprintln!("loudness: loudness_since = {text:?} is not a YYYY-MM-DD date; automatic pass skipped");
+                None
+            }),
+            None => {
+                if !state.started() {
+                    println!(
+                        "loudness: media arriving from now on is measured; what is already here is left alone (set loudness_since in [enrich] to reach back, or name files with --loudness-path)"
+                    );
+                }
+                Some(state.since_or_start(now))
+            }
+        };
+        let db_path = config.db_path.clone().unwrap_or_else(media_db::open::default_db_path);
+        let added = media_db::open_ro(&db_path)
+            .and_then(|conn| media_db::queries::files::video_added_times(&conn));
+        match (since, added) {
+            (Some(since), Ok(added)) => {
+                for root in config.roots.iter().filter(|r| (r.kind == "movies" || r.kind == "tv") && r.path.is_dir()) {
+                    for path in video_files_under(&root.path) {
+                        let arrived_since = added.get(&path).is_none_or(|t| *t >= since);
+                        if arrived_since && !candidates.iter().any(|(p, _)| *p == path) {
+                            candidates.push((path, false));
+                        }
+                    }
+                }
+            }
+            (Some(_), Err(err)) => eprintln!(
+                "loudness: the catalog could not be read ({err:#}), so new media cannot be told from old; automatic pass skipped"
+            ),
+            (None, _) => {}
+        }
+    }
+
+    let (mut settled, mut looked, mut raised) = (0usize, 0usize, 0usize);
+    for (path, named) in candidates {
+        // A named file is always looked at; the rest only when new to
+        // this step or changed since.
+        if !named && state.settled(&path) {
+            settled += 1;
+            continue;
+        }
+        if let Some((_, level)) = job.twin_levels.iter().find(|(p, _)| *p == path) {
+            let note = match level.gain {
+                Some(_) => "stereo twin raised at remux",
+                None => "stereo twin measured at remux: left as it is",
+            };
+            state.record(&path, note, Some(&level.measured), level.gain);
+            continue;
+        }
+        looked += 1;
+        let outcome = loudness::normalize_if_applicable(
+            &config.enrich.ffmpeg_path, &config.ffprobe_path, &path, &job.policy, job.dry_run,
+        );
+        let shown = path.display();
+        let (note, measured, gain): (String, Option<loudness::Measurement>, Option<f64>) = match outcome {
+            Ok(loudness::Outcome::Skipped(why)) => {
+                if named {
+                    println!("loudness: {shown} — skipped: {why}");
+                }
+                (why, None, None)
+            }
+            Ok(loudness::Outcome::AlreadyNormalized) => {
+                if named {
+                    println!("loudness: {shown} — already carries a normalized track");
+                }
+                if !job.dry_run {
+                    state.confirm_done(&path);
+                }
+                continue;
+            }
+            Ok(loudness::Outcome::Normal(m)) => {
+                println!(
+                    "loudness: {shown} — {:.1} LUFS, peak {:.1} dBTP: within range, left alone",
+                    m.integrated, m.true_peak
+                );
+                ("within range".into(), Some(m), None)
+            }
+            Ok(loudness::Outcome::NoHeadroom { measured: m, wanted, headroom }) => {
+                println!(
+                    "loudness: {shown} — {:.1} LUFS would take {wanted:+.1} dB, but its peaks ({:.1} dBTP) leave {headroom:.1} dB: left alone (more would mean compressing the mix)",
+                    m.integrated, m.true_peak
+                );
+                ("quiet, but no headroom for a linear raise".into(), Some(m), None)
+            }
+            Ok(loudness::Outcome::WouldNormalize { measured: m, gain }) => {
+                println!(
+                    "loudness: {shown} — {:.1} LUFS, peak {:.1} dBTP: would add a {gain:+.1} dB default track",
+                    m.integrated, m.true_peak
+                );
+                continue;
+            }
+            Ok(loudness::Outcome::Normalized { before, after, gain }) => {
+                raised += 1;
+                println!(
+                    "loudness: {shown} — {:.1} LUFS, peak {:.1} dBTP: added a {gain:+.1} dB default track (now {:.1} LUFS, peak {:.1} dBTP); the original follows it",
+                    before.integrated, before.true_peak, after.integrated, after.true_peak
+                );
+                ("normalized".into(), Some(before), Some(gain))
+            }
+            Err(err) => {
+                eprintln!("loudness: {shown} — failed: {err:#}");
+                // Remembered like any other look: retried when the file
+                // changes or is named, not on every run.
+                (format!("failed: {err:#}"), None, None)
+            }
+        };
+        if !job.dry_run {
+            state.record(&path, &note, measured.as_ref(), gain);
+        }
+    }
+    if looked > 0 || raised > 0 {
+        println!(
+            "loudness: {looked} looked at, {raised} given a raised track, {settled} unchanged since an earlier look{}",
+            if job.dry_run { " (dry run)" } else { "" }
+        );
+    }
 }
 
 fn describe_plan(plan: &remux::Plan) -> String {
@@ -517,6 +759,14 @@ fn describe_plan(plan: &remux::Plan) -> String {
         0 => {}
         1 => out.push_str(" (+ stereo AAC twin for the AC-3/E-AC-3 track)"),
         n => out.push_str(&format!(" (+ stereo AAC twins for {n} AC-3/E-AC-3 tracks)")),
+    }
+    for level in &plan.twin_levels {
+        if let Some(gain) = level.gain {
+            out.push_str(&format!(
+                " [twin raised {gain:+.1} dB from {:.1} LUFS]",
+                level.measured.integrated
+            ));
+        }
     }
     for note in &plan.notes {
         out.push_str(&format!(" [{note}]"));
@@ -706,11 +956,17 @@ fn main() -> Result<()> {
     let do_remux = args.remux_mkv || config.enrich.remux_mkv;
     let do_extract = !args.no_extract_subtitles && config.enrich.extract_subtitles;
     let do_hvc1 = !args.no_fix_hevc_tags && config.enrich.fix_hevc_tags;
+    let do_loudness = args.normalize_loudness || config.enrich.normalize_loudness;
+    let loudness_policy = loudness::Policy {
+        target: config.enrich.loudness_target,
+        min_gain: config.enrich.loudness_min_gain.max(1.0),
+    };
+    let mut loudness_state = LoudnessState::load(&state_dir);
     if args.dry_run {
         // Remux and extraction planning are probe-only, so the dry run can
         // show them in full.
         if do_remux {
-            remux_mkv_files(&config, true);
+            remux_mkv_files(&config, true, None);
         }
         if do_extract {
             extract_embedded_subtitles(&config, true, &mut captions);
@@ -724,12 +980,28 @@ fn main() -> Result<()> {
         if do_subs {
             embed_sidecar_subtitles(&config, true, args.adopt_sidecar_captions, &mut captions);
         }
+        // Measuring only reads, so a dry run shows the real numbers (at
+        // the cost of decoding the audio of whatever is new).
+        if do_loudness || !args.loudness_path.is_empty() {
+            let job = LoudnessJob {
+                policy: loudness_policy,
+                auto: do_loudness,
+                explicit: &args.loudness_path,
+                dry_run: true,
+                twin_levels: &[],
+            };
+            normalize_loudness(&config, &job, &mut loudness_state);
+        }
     } else {
         // Remux first so subtitle embedding sees the resulting MP4s, and
         // subtitles before titles so the title pass sees the final file.
-        if do_remux {
-            remux_mkv_files(&config, false);
-        }
+        // A stereo twin is an encode already: with loudness on, a quiet
+        // one is raised as it is made.
+        let twin_levels = if do_remux {
+            remux_mkv_files(&config, false, do_loudness.then_some(&loudness_policy))
+        } else {
+            Vec::new()
+        };
         if do_subs {
             embed_sidecar_subtitles(&config, false, args.adopt_sidecar_captions, &mut captions);
         }
@@ -745,6 +1017,22 @@ fn main() -> Result<()> {
         }
         if do_strip {
             strip_embedded_titles(&config);
+        }
+        // Last, so the file it measures (and whose size and mtime it
+        // remembers) is the one every other step has finished with.
+        if do_loudness || !args.loudness_path.is_empty() {
+            let job = LoudnessJob {
+                policy: loudness_policy,
+                auto: do_loudness,
+                explicit: &args.loudness_path,
+                dry_run: false,
+                twin_levels: &twin_levels,
+            };
+            normalize_loudness(&config, &job, &mut loudness_state);
+            loudness_state.forget_missing();
+            if let Err(err) = loudness_state.save() {
+                eprintln!("could not save the loudness memory: {err}");
+            }
         }
         // Pairs the embed step did not meet under the roots it walked are
         // gone (video or sidecar removed); only that step meets every pair.

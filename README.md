@@ -758,6 +758,49 @@ stem and stay valid, and the catalog carries the original's added-at date across
 change so Recently Added doesn't fill with conversions. `--dry-run` shows the full plan
 (it only probes). Opt-in; needs `ffmpeg` (`ffmpeg_path`) and `ffprobe`.
 
+### Loudness: films mastered far below everything else
+
+A theatrical mix can sit 15 dB under a TV episode — Halloween (1978) measures
+−38 LUFS where −24 is usual — which means riding the volume between programs. No
+player honours a gain tag on a video file, so the only fix that reaches every client
+(VLC, a TV's own app, the web player) is a track in the file. With
+`normalize_loudness = true` in the `[enrich]` section (or `media-enrich
+--normalize-loudness`), enrichment measures the default audio track of **newly
+arrived** videos — EBU R 128 integrated loudness and true peak, one audio-only decode,
+a minute or two per film — and, when a track is well under the target *and* its peaks
+leave room, adds a copy raised by a **plain linear gain** as the new default track,
+with the original right behind it:
+
+```
+loudness: Movies/Halloween (1978).mp4 — -38.2 LUFS, peak -12.3 dBTP: added a +10.2 dB
+          default track (now -28.0 LUFS, peak -2.1 dBTP); the original follows it
+```
+
+Nothing is ever compressed or limited. The gain is the smaller of what the target
+asks for and what the track's own headroom allows (peaks stay under −2 dBTP), so the
+mix is untouched and cannot clip; a quiet file whose peaks already sit near full scale
+is reported and left alone, since raising it would take dynamic-range compression —
+a change to the mix, which is not this tool's to make. Files within `loudness_min_gain`
+(4 dB) of `loudness_target` (−24 LUFS) are left alone too, which is most of them.
+
+- **Going forward only.** "Newly arrived" is the catalog's word: a file whose added-at
+  is on or after `loudness_since = "YYYY-MM-DD"`, or — with no date set — after this
+  step's first run. The existing library is never walked for this. To do one older
+  film (or a folder), name it: `media-enrich --loudness-path "/mnt/media/Movies/Halloween
+  (1978).mp4"`, with `--dry-run` to see the numbers only.
+- **The raised track** is AAC in the source's channel layout (5.1 stays 5.1), labelled
+  "Normalized +10.2 dB (media-enrich)" in players' audio menus — which is also how a
+  later run knows the file is done. Every other stream is copied bit-for-bit, the
+  caption record survives, and the file keeps its mtime.
+- **With MKV remuxing**, the stereo AAC twin is an encode already, so a quiet one is
+  raised as it is made ("Stereo (AAC), normalized +9.0 dB") at no cost in quality; a
+  bare twin from an earlier remux is replaced by a raised one rather than stacked on.
+- Like the other steps that replace a media file, the mux goes to a temp file beside
+  the original and is verified — stream census, duration, and a measurement of the
+  new track against the arithmetic — before an atomic rename. What each file measured
+  is remembered beside the catalog (`enrich-loudness.json`), so nothing is decoded
+  twice. Opt-in; needs `ffmpeg` and `ffprobe`.
+
 ## Security posture
 
 Everything here is unauthenticated by design — it is a LAN media server — so the
