@@ -49,8 +49,8 @@ div.videowrap{position:relative;width:100vw;margin-left:calc(50% - 50vw)}\
 div.videowrap video{display:block;width:100%;max-height:85vh;background:#000}\
 div.videowrap:fullscreen{width:100%;margin:0;background:#000}div.videowrap:fullscreen video{height:100vh;max-height:100vh}\
 video::-webkit-media-controls-fullscreen-button{display:none}\
-#fs{position:absolute;top:.8em;right:1.2em;font-size:1.1em;line-height:1;padding:.35em .5em;background:rgba(15,15,15,.7);color:#fff;border:1px solid #999;border-radius:4px;cursor:pointer;opacity:0;transition:opacity .15s}\
-div.videowrap:hover #fs,#fs:focus-visible{opacity:1}@media (hover:none){#fs{opacity:.75}}\
+#fs{position:absolute;top:.8em;right:1.2em;font-size:1.1em;line-height:1;padding:.35em .5em;background:rgba(15,15,15,.7);color:#fff;border:1px solid #999;border-radius:4px;cursor:pointer;opacity:0;transition:opacity .3s;pointer-events:none}\
+div.videowrap.active #fs,#fs:focus-visible{opacity:1;pointer-events:auto}\
 div.videowrap:-webkit-full-screen{width:100%;margin:0;background:#000}div.videowrap:-webkit-full-screen video{height:100vh;max-height:100vh}\
 img.art{float:right;max-width:220px;margin:0 0 1em 1.5em;border-radius:6px}\
 div.hdr{display:grid;grid-template-columns:1fr auto;grid-template-areas:\"top art\" \"desc art\";column-gap:1.5em;row-gap:.4em;align-items:start}\
@@ -2304,6 +2304,33 @@ const PLAYER_SCRIPT: &str = r#"<script>
   function toggleFullscreen() { if (fullscreenEl()) exitFullscreen(); else enterFullscreen(); }
   var fsBtn = document.getElementById('fs');
   if (fsBtn) fsBtn.addEventListener('click', toggleFullscreen);
+  // The button shows while the viewer is doing something — the pointer
+  // moving over the video, a tap on it, a key — and fades a few seconds
+  // after, the way the native controls do; while paused it stays. A
+  // faded button is also inert, so a tap where it was reaches the
+  // video's own controls instead.
+  var activeTimer = null;
+  function setActive(on) {
+    if (!wrap) return;
+    wrap.classList.toggle('active', on);
+    if (activeTimer) { clearTimeout(activeTimer); activeTimer = null; }
+    if (on && !v.paused) activeTimer = setTimeout(function () { setActive(false); }, 3000);
+  }
+  function poke() { setActive(true); }
+  if (wrap) {
+    // Capture phase: the video's own controls stop these bubbling.
+    wrap.addEventListener('pointermove', poke, true);
+    wrap.addEventListener('pointerdown', poke, true);
+    wrap.addEventListener('touchstart', poke, { capture: true, passive: true });
+    // A mouse leaving the video takes the button with it; a finger
+    // lifting off "leaves" too, and must not (the fade timer handles it).
+    wrap.addEventListener('pointerleave', function (e) {
+      if (e.pointerType === 'mouse' && !v.paused) setActive(false);
+    });
+  }
+  document.addEventListener('keydown', poke);
+  v.addEventListener('pause', function () { setActive(true); });
+  v.addEventListener('play', function () { setActive(true); });
   v.addEventListener('dblclick', function (e) { e.preventDefault(); toggleFullscreen(); });
   function fsSync() {
     var on = fullscreenEl() === wrap;
