@@ -657,7 +657,9 @@ of the running time counts as finishing too. With that, per profile:
 - **Seen ticks**: every episode and movie row in a listing (season pages,
   genre pages, search results) leads with a checkbox, and the detail page has a
   "Seen" line — tick or untick by hand; a note beside the title reads
-  "12:34 left · yesterday" or "watched 3 days ago"; a tick asks before it takes.
+  "12:34 left · yesterday" or "watched 3 days ago"; a tick asks before it takes, and
+  a × beside a "left" note (on hover) forgets that position — a spot check of a
+  new file is not a viewing — which also takes it out of Continue watching.
   The series ratings grid rings seen episodes (dashed for part-way).
 
 Two guards, since anything on the LAN can call these: at most `max_profiles`

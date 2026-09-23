@@ -81,6 +81,8 @@ html a.home:hover{opacity:.65}\
 p.controls input[type=checkbox]{vertical-align:middle;margin:0 .3em 0 0;position:relative;top:-.08em}\
 p.who{float:right;margin:0 0 0 1em;font-size:.9em}\
 .wnote{color:#777;font-size:.85em;margin-left:.6em;white-space:nowrap}\
+.wnote button.forget{margin-left:.35em;width:1.4em;height:1.4em;padding:0;line-height:1;font-size:.95em;vertical-align:-.1em;border-radius:50%;border:1px solid #aaa;background:#fff;color:#555;cursor:pointer;opacity:0;transition:opacity .15s}\
+[data-watch]:hover .wnote button.forget,.wnote button.forget:focus-visible{opacity:1}@media (hover:none){.wnote button.forget{opacity:.8}}\
 li.row input[data-seen]{flex:none;margin:0 .5em 0 0}\
 li.row .rt{margin-left:auto;padding-left:1em;display:flex;align-items:center;gap:.6em;flex-shrink:0}\
 li.row .rt .wnote{margin:0}\
@@ -385,6 +387,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/watch", post(crate::watch::api_watch))
         .route("/api/seen", post(crate::watch::api_seen))
         .route("/api/dismiss", post(crate::watch::api_dismiss))
+        .route("/api/forget", post(crate::watch::api_forget))
         .layer(middleware::from_fn_with_state(state.clone(), redirect_pages))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)

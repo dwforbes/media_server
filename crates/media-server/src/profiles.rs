@@ -300,6 +300,20 @@ fn row_from(r: &rusqlite::Row) -> rusqlite::Result<WatchRow> {
 const ROW_SELECT: &str =
     "SELECT key, file_id, position_ms, duration_ms, watched, updated_at, dismissed FROM watch";
 
+/// Forget where a program was left — a spot check is not a viewing. A
+/// seen tick stays; a row with nothing else to say goes.
+pub fn forget_position(conn: &Connection, profile_id: i64, key: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE watch SET position_ms = 0, updated_at = ?3 WHERE profile_id = ?1 AND key = ?2",
+        params![profile_id, key, now()],
+    )?;
+    conn.execute(
+        "DELETE FROM watch WHERE profile_id = ?1 AND key = ?2 AND watched = 0",
+        params![profile_id, key],
+    )?;
+    Ok(())
+}
+
 /// Take a program off the continue-watching list. The position and the
 /// seen tick stay: this hides, it does not forget.
 pub fn dismiss(conn: &Connection, profile_id: i64, key: &str) -> Result<()> {
@@ -502,6 +516,15 @@ mod tests {
         // Both rows landed within the same second: age one to order them.
         conn.execute("UPDATE watch SET updated_at = updated_at - 60 WHERE key = 'tv|s|1|1'", []).unwrap();
         assert_eq!(recent(&conn, p, 1).unwrap()[0].key, "tv|s|1|2");
+
+        // Forgetting a position: a seen row keeps its tick, an unseen one goes.
+        set_position(&conn, p, "tv|s|1|2", 12, 700_000, None).unwrap();
+        forget_position(&conn, p, "tv|s|1|2").unwrap();
+        let row = one(&conn, p, "tv|s|1|2").unwrap().unwrap();
+        assert!(row.watched && row.position_ms == 0);
+        set_position(&conn, p, "tv|s|1|9", 19, 700_000, None).unwrap();
+        forget_position(&conn, p, "tv|s|1|9").unwrap();
+        assert!(one(&conn, p, "tv|s|1|9").unwrap().is_none());
 
         // Dismissing a series flags every episode; the next report on one
         // clears it, and within the same second that live row ranks first.

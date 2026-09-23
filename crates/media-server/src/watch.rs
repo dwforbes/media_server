@@ -87,6 +87,20 @@ pub fn note(row: &WatchRow) -> String {
     }
 }
 
+/// The note as markup: with a position to forget, a small × follows it
+/// (shown on hover; WATCH_SCRIPT asks, then posts /api/forget).
+pub fn note_html(row: Option<&WatchRow>, file_id: i64) -> String {
+    let text = row.map(note).unwrap_or_default();
+    let forget = match row {
+        Some(r) if r.in_progress() => format!(
+            "<button type=\"button\" class=\"forget\" data-forget=\"{file_id}\" \
+             title=\"Forget this position\" aria-label=\"Forget this position\">×</button>"
+        ),
+        _ => String::new(),
+    };
+    format!("<span class=\"wnote\">{text}{forget}</span>")
+}
+
 /// The seen tick and the note for one listing row. Empty without a
 /// profile, and for music.
 pub fn row_marks(item: &BrowseItem, states: Option<&States>) -> (String, String) {
@@ -98,11 +112,7 @@ pub fn row_marks(item: &BrowseItem, states: Option<&States>) -> (String, String)
         "<input type=\"checkbox\" data-seen=\"{}\" title=\"Seen\" aria-label=\"Seen\"{checked}>",
         item.file_id
     );
-    let note = format!(
-        "<span class=\"wnote\">{}</span>",
-        row.map(note).unwrap_or_default()
-    );
-    (tick, note)
+    (tick, note_html(row, item.file_id))
 }
 
 /// The seen line on a detail page.
@@ -113,10 +123,9 @@ pub fn detail_marks(detail: &files::ItemDetail, state: &AppState, profile: Optio
     let row = profiles::one(&store(state), profile.id, &key).ok().flatten();
     let checked = if row.as_ref().is_some_and(|r| r.watched) { " checked" } else { "" };
     format!(
-        "<p class=\"controls\" data-watch><label><input type=\"checkbox\" data-seen=\"{}\"{checked}> Seen</label>\
-         <span class=\"wnote\">{}</span></p>",
+        "<p class=\"controls\" data-watch><label><input type=\"checkbox\" data-seen=\"{}\"{checked}> Seen</label>{}</p>",
         detail.file_id,
-        row.as_ref().map(note).unwrap_or_default()
+        note_html(row.as_ref(), detail.file_id)
     )
 }
 
@@ -665,6 +674,40 @@ pub async fn api_seen(State(state): State<Arc<AppState>>, headers: HeaderMap, bo
 }
 
 #[derive(serde::Deserialize)]
+struct ForgetReport {
+    id: i64,
+}
+
+/// POST /api/forget — drop the stored position for this program (a
+/// spot check is not a viewing); the seen tick, if any, stays. Answers
+/// with the note to show.
+pub async fn api_forget(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    if let Err(res) = state.write_limit.admit(profiles::cookie_profile_id(&headers)) {
+        return *res;
+    }
+    let Some(profile) = current(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "choose a profile first").into_response();
+    };
+    let Ok(report) = serde_json::from_str::<ForgetReport>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let detail = {
+        let conn = state.db.lock().await;
+        files::detail(&conn, report.id)
+    };
+    let Ok(Some(detail)) = detail else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(key) = profiles::detail_key(&detail) else { return StatusCode::BAD_REQUEST.into_response() };
+    let conn = store(&state);
+    if let Err(err) = profiles::forget_position(&conn, profile.id, &key) {
+        tracing::warn!("forgetting the position of {}: {err:#}", detail.file_id);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    let note = profiles::one(&conn, profile.id, &key).ok().flatten().map(|r| note(&r)).unwrap_or_default();
+    let json = serde_json::json!({ "note": note });
+    ([(header::CONTENT_TYPE, "application/json")], json.to_string()).into_response()
+}
+
+#[derive(serde::Deserialize)]
 struct DismissReport {
     id: i64,
 }
@@ -827,6 +870,32 @@ pub const WATCH_SCRIPT: &str = r#"<script>
     e.stopPropagation();
     var cover = btn.closest('[data-dismiss]');
     if (cover) dismiss(cover);
+  }, true);
+  // The × on a "12:34 left" note: forget that position (a spot check is
+  // not a viewing). The note re-renders from the answer — empty, or the
+  // seen tick's own wording — and the × goes with the position.
+  document.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest('button.forget') : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var holder = btn.closest('[data-watch]');
+    var named = (holder && holder.querySelector('a[href^="/item/"]')) || document.querySelector('h1');
+    var name = named ? named.textContent.trim() : 'this';
+    if (!confirm('Forget where ' + name + ' was left? It starts from the beginning next time.')) return;
+    var note = btn.closest('.wnote');
+    btn.disabled = true;
+    fetch('/api/forget', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: parseInt(btn.dataset.forget, 10) })
+    }).then(function (r) {
+      if (!r.ok) throw 0;
+      return r.json();
+    }).then(function (j) {
+      if (note) note.textContent = j.note || '';
+    }).catch(function () {
+      btn.disabled = false;
+    });
   }, true);
   var menu = null, menuFor = null;
   function closeMenu() {
