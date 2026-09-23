@@ -314,11 +314,12 @@ pub fn forget_position(conn: &Connection, profile_id: i64, key: &str) -> Result<
     Ok(())
 }
 
-/// Take a program off the continue-watching list. The position and the
-/// seen tick stay: this hides, it does not forget.
+/// Take a program off the continue-watching list, and forget where it
+/// was left — "I'm done with this" means starting over next time. The
+/// seen tick stays.
 pub fn dismiss(conn: &Connection, profile_id: i64, key: &str) -> Result<()> {
     conn.execute(
-        "UPDATE watch SET dismissed = 1 WHERE profile_id = ?1 AND key = ?2",
+        "UPDATE watch SET dismissed = 1, position_ms = 0 WHERE profile_id = ?1 AND key = ?2",
         params![profile_id, key],
     )?;
     Ok(())
@@ -330,7 +331,8 @@ pub fn dismiss(conn: &Connection, profile_id: i64, key: &str) -> Result<()> {
 pub fn dismiss_series(conn: &Connection, profile_id: i64, series: &str) -> Result<()> {
     let prefix = format!("tv|{}|", series.trim().to_lowercase());
     conn.execute(
-        "UPDATE watch SET dismissed = 1 WHERE profile_id = ?1 AND substr(key, 1, length(?2)) = ?2",
+        "UPDATE watch SET dismissed = 1, position_ms = 0
+         WHERE profile_id = ?1 AND substr(key, 1, length(?2)) = ?2",
         params![profile_id, prefix],
     )?;
     Ok(())
@@ -526,11 +528,15 @@ mod tests {
         forget_position(&conn, p, "tv|s|1|9").unwrap();
         assert!(one(&conn, p, "tv|s|1|9").unwrap().is_none());
 
-        // Dismissing a series flags every episode; the next report on one
-        // clears it, and within the same second that live row ranks first.
+        // Dismissing a series flags every episode and forgets their
+        // positions (the ticks stay); the next report on one clears the
+        // flag, and within the same second that live row ranks first.
+        set_position(&conn, p, "tv|s|1|1", 11, 400_000, None).unwrap();
         dismiss_series(&conn, p, "S").unwrap();
-        assert!(one(&conn, p, "tv|s|1|1").unwrap().unwrap().dismissed);
-        assert!(one(&conn, p, "tv|s|1|2").unwrap().unwrap().dismissed);
+        let row = one(&conn, p, "tv|s|1|1").unwrap().unwrap();
+        assert!(row.dismissed && row.position_ms == 0 && !row.watched);
+        let row = one(&conn, p, "tv|s|1|2").unwrap().unwrap();
+        assert!(row.dismissed && row.position_ms == 0 && row.watched);
         conn.execute("UPDATE watch SET updated_at = ?1", [now()]).unwrap();
         set_position(&conn, p, "tv|s|1|1", 11, 1000, None).unwrap();
         assert!(!one(&conn, p, "tv|s|1|1").unwrap().unwrap().dismissed);

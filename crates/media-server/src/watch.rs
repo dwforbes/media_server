@@ -713,8 +713,9 @@ struct DismissReport {
 }
 
 /// POST /api/dismiss — take the gallery entry for this file off the
-/// continue-watching list: for a series, every episode's row (the
-/// entry hangs off whichever is latest); for a movie, its own.
+/// continue-watching list and forget where it was left: for a series,
+/// every episode's row (the entry hangs off whichever is latest); for a
+/// movie, its own.
 pub async fn api_dismiss(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
     if let Err(res) = state.write_limit.admit(profiles::cookie_profile_id(&headers)) {
         return *res;
@@ -840,7 +841,7 @@ pub const WATCH_SCRIPT: &str = r#"<script>
   function dismiss(cover) {
     var cap = cover.querySelector('.cap');
     var name = cap ? cap.innerText.split('\n').slice(0, 2).join(' ') : 'this';
-    if (!confirm('Remove ' + name + ' from Continue watching?')) return;
+    if (!confirm('Remove ' + name + ' from Continue watching? Its position is forgotten too.')) return;
     var id = parseInt(cover.dataset.dismiss, 10);
     fetch('/api/dismiss', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
