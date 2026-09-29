@@ -235,6 +235,19 @@ fn item_og_meta(base: &str, path: &str, detail: &files::ItemDetail, site: &str) 
 const CDS_SERVICE: &str = "urn:schemas-upnp-org:service:ContentDirectory:1";
 const CMS_SERVICE: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
 
+/// ConnectionManager's SourceProtocolInfo: one generic http-get entry
+/// per MIME type served. Answers GetProtocolInfo and the initial event.
+pub fn source_protocol_info() -> String {
+    VIDEO_EXTENSIONS
+        .iter()
+        .chain(AUDIO_EXTENSIONS)
+        .map(|(_, mime)| format!("http-get:*:{mime}:*"))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub struct AppState {
     /// Viewer profiles and watch state — the server's own database
     /// (see profiles.rs); the catalog stays read-only.
@@ -265,6 +278,8 @@ pub struct AppState {
     /// another ffmpeg. The entry is removed (after the cache file lands)
     /// just before the sender is dropped, which is what wakes the waiters.
     pub subs_inflight: std::sync::Mutex<std::collections::HashMap<i64, tokio::sync::watch::Receiver<()>>>,
+    /// GENA subscribers and the ring that wakes their NOTIFYs (gena.rs).
+    pub events: crate::gena::Publisher,
     /// Permits for ffprobe/ffmpeg children (see text_sub_stream): the
     /// cap on how many a flood of requests can have running at once. By
     /// handle, so an audio stream can carry its permit for as long as
@@ -343,8 +358,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/scpd/cms.xml", get(|| async { xml_response(xml::CMS_SCPD.to_string()) }))
         .route("/control/cds", post(cds_control))
         .route("/control/cms", post(cms_control))
-        .route("/event/cds", any(event_stub))
-        .route("/event/cms", any(event_stub))
+        .route("/event/cds", any(crate::gena::cds))
+        .route("/event/cms", any(crate::gena::cms))
         .route("/media/{id}", get(serve_media))
         .route("/art/{id}", get(serve_art))
         .route("/art/{id}/og.jpg", get(serve_art_og))
@@ -3796,11 +3811,6 @@ fn icon_response(bytes: Vec<u8>) -> Response {
         .into_response()
 }
 
-/// GENA eventing is not implemented; polling clients work fine without it.
-async fn event_stub() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
-}
-
 fn soap_fault(code: u32, description: &str) -> Response {
     let mut resp = xml_response(soap::fault(code, description));
     *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
@@ -3964,21 +3974,11 @@ async fn cms_control(headers: HeaderMap, _body: String) -> Response {
         .unwrap_or_default();
 
     match action.as_str() {
-        "GetProtocolInfo" => {
-            let source = VIDEO_EXTENSIONS
-                .iter()
-                .chain(AUDIO_EXTENSIONS)
-                .map(|(_, mime)| format!("http-get:*:{mime}:*"))
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
-                .join(",");
-            xml_response(soap::envelope(
-                CMS_SERVICE,
-                "GetProtocolInfo",
-                &[("Source", xml_escape(&source)), ("Sink", String::new())],
-            ))
-        }
+        "GetProtocolInfo" => xml_response(soap::envelope(
+            CMS_SERVICE,
+            "GetProtocolInfo",
+            &[("Source", xml_escape(&source_protocol_info())), ("Sink", String::new())],
+        )),
         "GetCurrentConnectionIDs" => xml_response(soap::envelope(
             CMS_SERVICE,
             "GetCurrentConnectionIDs",

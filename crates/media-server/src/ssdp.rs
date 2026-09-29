@@ -8,7 +8,7 @@ use tokio::net::UdpSocket;
 
 const SSDP_ADDR: &str = "239.255.255.250:1900";
 const MAX_AGE: u32 = 1800;
-const SERVER_ID: &str = "Darwin/UPnP/1.0 RustMediaServer/0.1";
+pub const SERVER_ID: &str = "Darwin/UPnP/1.0 RustMediaServer/0.1";
 
 /// The notification targets a MediaServer:1 advertises, as (NT, USN) pairs.
 fn targets(uuid: &str) -> Vec<(String, String)> {

@@ -275,7 +275,14 @@ config and the network.
   is written last — it is retried a few times with a growing delay before being
   catalogued as-is. The reconcile pass skips files modified within the same window.
 - The server polls `PRAGMA data_version` (2 s); any scanner commit bumps the
-  ContentDirectory `SystemUpdateID`, so browsing clients refresh on their next poll.
+  ContentDirectory `SystemUpdateID`, so browsing clients refresh on their next poll —
+  and clients that subscribed to events (GENA: `SUBSCRIBE` at `/event/cds` with a
+  callback URL) are told at once, by an HTTP `NOTIFY` carrying the new id. Leases run
+  up to 30 minutes and are renewed by the client; callbacks are accepted only on
+  private, link-local or loopback addresses, and a subscriber that stops answering is
+  simply dropped when its lease lapses. Whether a stale listing actually refreshes is
+  then up to the client: some re-browse on the event, some only compare the id on
+  their next Browse, and some ignore both.
 - Every node in the UPnP tree has a stable, parseable object id (`mv:year:1995`,
   `mu:album:<b64>:<b64>`, `dir:<root>:<b64 path>`, `it:<file id>`) that maps directly to
   a query — no in-memory tree to invalidate.
@@ -845,7 +852,8 @@ anything that can reach it). The controls that follow from that:
 
 ## Not implemented (v1)
 
-- GENA eventing (clients poll instead).
+- `ContainerUpdateIDs` in events — only `SystemUpdateID` is evented; Browse replies
+  carry the current id for every container.
 - DLNA.ORG_PN media profiles — protocolInfo is the permissive generic form, which VLC,
   BubbleUPnP, and most TVs accept.
 - Transcoding.

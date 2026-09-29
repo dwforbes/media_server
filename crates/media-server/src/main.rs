@@ -1,6 +1,7 @@
 mod config;
 mod counts;
 mod didl;
+mod gena;
 mod http;
 mod objectid;
 mod profiles;
@@ -93,11 +94,15 @@ async fn main() -> Result<()> {
             redirect_pages: t.redirect_pages,
         }),
         subs_inflight: Default::default(),
+        events: Default::default(),
     });
 
     // Bump SystemUpdateID whenever the scanner commits, so browsing clients
-    // know to refresh. data_version changes on any other-connection commit.
+    // know to refresh — polling ones on their next Browse, subscribed ones
+    // by a NOTIFY (gena.rs). data_version changes on any other-connection
+    // commit.
     spawn_db_watch(&db_path, state.clone())?;
+    tokio::spawn(gena::publish_loop(state.clone()));
 
     let interfaces = cfg.ssdp_interfaces();
     tracing::info!(
@@ -223,6 +228,7 @@ fn spawn_db_watch(db_path: &std::path::Path, state: Arc<AppState>) -> Result<()>
                     if last >= 0 && version != last {
                         let id = state.update_id.fetch_add(1, Ordering::Relaxed) + 1;
                         tracing::info!("catalog changed; SystemUpdateID -> {id}");
+                        state.events.changed();
                     }
                     last = version;
                 }
