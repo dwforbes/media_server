@@ -315,7 +315,7 @@ fn continue_cover_html(entry: &Continue) -> String {
         format!("<a class=\"noart\" href=\"/play/{}\"><span>{name}</span></a>", item.file_id)
     };
     format!(
-        "<span class=\"cover cw\" data-card=\"{id}\" data-dismiss=\"{id}\">{link}\
+        "<span class=\"cover cw\" data-card=\"{id}\" data-dismiss=\"{id}\" data-name=\"{name}\">{link}\
          <button type=\"button\" class=\"dismiss\" title=\"Remove from Continue watching\" \
           aria-label=\"Remove {name} from Continue watching\">×</button>\
          <span class=\"cap\">{caption}</span><span class=\"card\"></span></span>",
@@ -833,33 +833,70 @@ impl WriteLimit {
 /// continue-watching gallery's remove: the × on a cover, or a right
 /// click (long press) on it for a one-item menu; either asks first,
 /// then posts to /api/dismiss and drops the cover, and the section with
-/// the last one.
+/// the last one. Every question is asked through the page's own
+/// <dialog> (built on first use), not window.confirm: the browser's
+/// dialog is a sheet that, on Safari and iPads, can swallow a click or
+/// two before it answers, and it cannot be styled or extended.
 pub const WATCH_SCRIPT: &str = r#"<script>
 (function () {
+  // The question box: one <dialog> for the page, made when first needed.
+  // Resolves true for the action button, false for Cancel, Escape or a
+  // click on the backdrop. The action button starts focused, so Enter
+  // says yes as the browser's own dialog would.
+  var box = null;
+  function ask(question, action) {
+    if (!box) {
+      box = document.createElement('dialog');
+      box.id = 'ask';
+      var form = document.createElement('form');
+      form.method = 'dialog';
+      var q = document.createElement('p');
+      var acts = document.createElement('div');
+      acts.className = 'acts';
+      var no = document.createElement('button');
+      no.type = 'submit'; no.value = ''; no.textContent = 'Cancel';
+      var yes = document.createElement('button');
+      yes.type = 'submit'; yes.value = 'yes'; yes.className = 'ok';
+      acts.appendChild(no); acts.appendChild(yes);
+      form.appendChild(q); form.appendChild(acts);
+      box.appendChild(form);
+      box.addEventListener('click', function (e) { if (e.target === box) box.close(''); });
+      document.body.appendChild(box);
+    }
+    return new Promise(function (resolve) {
+      box.querySelector('p').textContent = question;
+      box.querySelector('button.ok').textContent = action;
+      box.returnValue = '';
+      box.onclose = function () { resolve(box.returnValue === 'yes'); };
+      box.showModal();
+      box.querySelector('button.ok').focus();
+    });
+  }
   // Both removal paths ask first: a cover is easy to hit by accident,
   // and the entry only comes back by playing the program again.
   function dismiss(cover) {
-    var cap = cover.querySelector('.cap');
-    var name = cap ? cap.innerText.split('\n').slice(0, 2).join(' ') : 'this';
-    if (!confirm('Remove ' + name + ' from Continue watching? Its position is forgotten too.')) return;
-    var id = parseInt(cover.dataset.dismiss, 10);
-    fetch('/api/dismiss', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: id })
-    }).then(function (r) {
-      if (!r.ok) throw 0;
-      var strip = cover.parentNode;
-      cover.remove();
-      // The section goes with its last cover; else its count follows.
-      var section = document.getElementById('continue');
-      var left = strip ? strip.querySelectorAll('.cover').length : 0;
-      if (!left) {
-        if (section) section.remove();
-        else if (strip) strip.remove();
-      } else if (section) {
-        var n = section.querySelector('summary .n');
-        if (n) n.textContent = '(' + left + ')';
-      }
+    var name = cover.dataset.name || 'this';
+    ask('Remove ' + name + ' from Continue watching? Its position is forgotten too.', 'Remove').then(function (yes) {
+      if (!yes) return;
+      var id = parseInt(cover.dataset.dismiss, 10);
+      return fetch('/api/dismiss', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: id })
+      }).then(function (r) {
+        if (!r.ok) throw 0;
+        var strip = cover.parentNode;
+        cover.remove();
+        // The section goes with its last cover; else its count follows.
+        var section = document.getElementById('continue');
+        var left = strip ? strip.querySelectorAll('.cover').length : 0;
+        if (!left) {
+          if (section) section.remove();
+          else if (strip) strip.remove();
+        } else if (section) {
+          var n = section.querySelector('summary .n');
+          if (n) n.textContent = '(' + left + ')';
+        }
+      });
     }).catch(function () {});
   }
   // Capture phase, stopping there: the cards script (which opens the
@@ -883,17 +920,19 @@ pub const WATCH_SCRIPT: &str = r#"<script>
     var holder = btn.closest('[data-watch]');
     var named = (holder && holder.querySelector('a[href^="/item/"]')) || document.querySelector('h1');
     var name = named ? named.textContent.trim() : 'this';
-    if (!confirm('Forget where ' + name + ' was left? It starts from the beginning next time.')) return;
     var note = btn.closest('.wnote');
-    btn.disabled = true;
-    fetch('/api/forget', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: parseInt(btn.dataset.forget, 10) })
-    }).then(function (r) {
-      if (!r.ok) throw 0;
-      return r.json();
-    }).then(function (j) {
-      if (note) note.textContent = j.note || '';
+    ask('Forget where ' + name + ' was left? It starts from the beginning next time.', 'Forget').then(function (yes) {
+      if (!yes) return;
+      btn.disabled = true;
+      return fetch('/api/forget', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: parseInt(btn.dataset.forget, 10) })
+      }).then(function (r) {
+        if (!r.ok) throw 0;
+        return r.json();
+      }).then(function (j) {
+        if (note) note.textContent = j.note || '';
+      });
     }).catch(function () {
       btn.disabled = false;
     });
@@ -929,31 +968,31 @@ pub const WATCH_SCRIPT: &str = r#"<script>
     if (e.key === 'Escape') closeMenu();
   });
   document.addEventListener('change', function (e) {
-    var box = e.target;
-    if (!box || !box.matches || !box.matches('input[data-seen]')) return;
-    var holder = box.closest('[data-watch]');
+    var tick = e.target;
+    if (!tick || !tick.matches || !tick.matches('input[data-seen]')) return;
+    var holder = tick.closest('[data-watch]');
     var note = holder ? holder.querySelector('.wnote') : null;
-    var seen = box.checked;
+    var seen = tick.checked;
     // The program's name: the row's link, or the detail page's heading.
     var named = (holder && holder.querySelector('a[href^="/item/"]')) || document.querySelector('h1');
     var name = named ? named.textContent.trim() : 'this';
-    if (!confirm((seen ? 'Mark ' : 'Unmark ') + name + ' as seen?' + (seen ? '' : ' Its position is forgotten too.'))) {
-      box.checked = !seen;
-      return;
-    }
-    box.disabled = true;
-    fetch('/api/seen', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: parseInt(box.dataset.seen, 10), seen: seen })
+    ask((seen ? 'Mark ' : 'Unmark ') + name + ' as seen?' + (seen ? '' : ' Its position is forgotten too.'),
+        seen ? 'Mark seen' : 'Unmark').then(function (yes) {
+      if (!yes) throw 0;
+      tick.disabled = true;
+      return fetch('/api/seen', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: parseInt(tick.dataset.seen, 10), seen: seen })
+      });
     }).then(function (r) {
       if (!r.ok) throw 0;
       return r.json();
     }).then(function (j) {
       if (note) note.textContent = j.note || '';
     }).catch(function () {
-      box.checked = !seen;
+      tick.checked = !seen;
     }).then(function () {
-      box.disabled = false;
+      tick.disabled = false;
     });
   });
 })();

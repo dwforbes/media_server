@@ -99,6 +99,12 @@ div.covers .cover.cw:hover button.dismiss,div.covers .cover.cw:focus-within butt
 #cmenu{position:fixed;z-index:20;background:#fff;color:#111;border:1px solid #888;border-radius:4px;box-shadow:0 4px 14px rgba(0,0,0,.25);padding:.25em}\
 #cmenu button{display:block;width:100%;text-align:left;background:none;border:0;padding:.4em .8em;font-size:.9rem;cursor:pointer;white-space:nowrap}\
 #cmenu button:hover{background:#eee}\
+dialog#ask{padding:0;border:1px solid #888;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.3);width:min(26em,90vw);background:#fff;color:#111;font-size:1rem}\
+dialog#ask::backdrop{background:rgba(0,0,0,.4)}\
+dialog#ask form{margin:0;padding:1.1em 1.3em}dialog#ask p{margin:0 0 1.1em;line-height:1.5}\
+dialog#ask .acts{display:flex;justify-content:flex-end;gap:.6em}\
+dialog#ask button{font:inherit;padding:.4em 1.1em;border-radius:5px;border:1px solid #888;background:#f4f4f4;color:#111;cursor:pointer}\
+dialog#ask button.ok{background:#0645ad;border-color:#0645ad;color:#fff}dialog#ask button:hover{filter:brightness(.93)}\
 @media (max-width:40em){\
 body{margin:1em auto;padding:0 1rem 1.5rem}\
 body.player{margin:.5em auto}\
