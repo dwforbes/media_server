@@ -746,10 +746,18 @@ and Safari won't open it, even when the streams inside are plain H.264/HEVC + AA
 With `remux_mkv = true` in the `[enrich]` section (or `media-enrich --remux-mkv`),
 enrichment rewrites eligible `.mkv` files as `.mp4` with the video and audio streams
 copied bit-for-bit — the equivalent of `ffmpeg -i in.mkv -map 0 -c copy -c:s mov_text
--tag:v hvc1 -movflags +faststart out.mp4`. One thing is added: an AC-3 / E-AC-3 track
-(which Chrome and Firefox cannot decode in any container) gains a **stereo AAC twin
-inserted ahead of it as the default track**, so browsers play the file while receivers
-and TVs still find the original Dolby Digital track behind it.
+-tag:v hvc1 -movflags +faststart out.mp4`. One thing is added: a **stereo AAC twin
+inserted ahead of the original as the default track**, for every AC-3 / E-AC-3 track
+(which Chrome and Firefox cannot decode in any container) and for the track that plays
+by default when it is wider than stereo (Firefox skips a 5.1 AAC track and plays
+whatever comes next — a commentary, as likely as not). Browsers play the twin;
+receivers, TVs and VLC still find the original behind it. A file this pass made
+earlier is recognised by the twin's name and left alone.
+
+The same pass looks at `.mp4` files, since a rip can arrive as one: when its default
+track would earn a twin, the file is rewritten in place with the twin ahead. An `.mp4`
+whose default track already plays in browsers is left untouched — this costs one
+`ffprobe` per `.mp4` per enrichment run and nothing more.
 
 Only clean candidates are converted; everything else is listed as "kept as-is" with
 the reason: video other than H.264/HEVC/AV1, audio MP4 can't carry natively (DTS,
@@ -801,9 +809,10 @@ a change to the mix, which is not this tool's to make. Files within `loudness_mi
   "Normalized +10.2 dB (media-enrich)" in players' audio menus — which is also how a
   later run knows the file is done. Every other stream is copied bit-for-bit, the
   caption record survives, and the file keeps its mtime.
-- **With MKV remuxing**, the stereo AAC twin is an encode already, so a quiet one is
+- **With remuxing**, the stereo AAC twin is an encode already, so a quiet one is
   raised as it is made ("Stereo (AAC), normalized +9.0 dB") at no cost in quality; a
-  bare twin from an earlier remux is replaced by a raised one rather than stacked on.
+  bare twin from an earlier remux is replaced by a raised one made afresh from the
+  Dolby or multichannel original behind it, rather than stacked on.
 - Like the other steps that replace a media file, the mux goes to a temp file beside
   the original and is verified — stream census, duration, and a measurement of the
   new track against the arithmetic — before an atomic rename. What each file measured

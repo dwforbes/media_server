@@ -3,11 +3,18 @@
 //! Matroska trips up browsers (Firefox won't range-stream it, Safari won't
 //! open it) while the streams inside are usually fine. Equivalent to
 //!   ffmpeg -i in.mkv -map 0 -c copy -c:s mov_text -tag:v hvc1 -movflags +faststart out.mp4
-//! with one addition: Dolby Digital (AC-3 / E-AC-3) audio, which Chrome and
-//! Firefox cannot decode in any container, gets a stereo AAC twin inserted
-//! *ahead* of it as the default track. The original track is kept for
-//! players and receivers that prefer it. Nothing is ever re-encoded except
-//! that added audio track.
+//! with one addition: a stereo AAC twin inserted *ahead* of an audio track
+//! as the default, for Dolby Digital (AC-3 / E-AC-3, which Chrome and
+//! Firefox cannot decode in any container) and for a default track with
+//! more than two channels (Firefox skips a 5.1 AAC track and plays
+//! whatever comes next, a commentary as likely as not). The original
+//! track is kept for players and receivers that prefer it. Nothing is
+//! ever re-encoded except that added audio track.
+//!
+//! The same pass looks at .mp4 files, since a rip can arrive as one:
+//! when its default track would earn a twin, the file is rewritten in
+//! place with the twin ahead. An .mp4 whose default track already plays
+//! in browsers is left alone.
 //!
 //! Like subtitle embedding this replaces a whole media file, so the same
 //! discipline applies: strict preconditions (only codecs MP4 carries
@@ -47,6 +54,12 @@ pub struct Stream {
     pub language: Option<String>,
     /// Carries a Dolby Vision configuration record.
     pub dovi: bool,
+    /// Audio: channel count as ffprobe reports it (0 when unknown).
+    pub channels: usize,
+    /// The default disposition: what plays when nobody chooses.
+    pub default: bool,
+    /// Title and handler name, where a twin of ours says what it is.
+    pub label: String,
 }
 
 /// Stream census plus duration, as ffprobe reports them.
@@ -61,7 +74,8 @@ pub fn probe(ffprobe: &str, path: &Path) -> Result<Probe> {
         .args([
             "-v", "error",
             "-show_entries",
-            "stream=index,codec_type,codec_name:stream_tags=language:stream_side_data=side_data_type:format=duration",
+            "stream=index,codec_type,codec_name,channels:stream_tags=language,title,handler_name:\
+             stream_disposition=default:stream_side_data=side_data_type:format=duration",
             // Wrapped form: the [STREAM]/[SIDE_DATA] markers delimit streams.
             "-of", "default",
         ])
@@ -88,32 +102,40 @@ fn parse_probe(text: &str) -> Probe {
                     codec: String::new(),
                     language: None,
                     dovi: false,
+                    channels: 0,
+                    default: false,
+                    label: String::new(),
                 })
             }
             "[/STREAM]" => probe.streams.extend(current.take()),
             _ => {
-                if let Some(d) = line.strip_prefix("duration=") {
-                    probe.duration = d.parse().unwrap_or(0.0);
+                let Some((key, v)) = line.split_once('=') else { continue };
+                if key == "duration" {
+                    probe.duration = v.parse().unwrap_or(0.0);
                     continue;
                 }
                 let Some(s) = current.as_mut() else { continue };
-                if let Some(v) = line.strip_prefix("index=") {
-                    s.index = v.parse().unwrap_or(0);
-                } else if let Some(v) = line.strip_prefix("codec_type=") {
-                    s.kind = match v {
-                        "video" => StreamKind::Video,
-                        "audio" => StreamKind::Audio,
-                        "subtitle" => StreamKind::Subtitle,
-                        _ => StreamKind::Other,
-                    };
-                } else if let Some(v) = line.strip_prefix("codec_name=") {
-                    s.codec = v.to_string();
-                } else if let Some(v) = line.strip_prefix("TAG:language=") {
-                    s.language = Some(v.to_string()).filter(|l| !l.is_empty() && l != "und");
-                } else if let Some(v) = line.strip_prefix("side_data_type=") {
-                    if v.to_ascii_lowercase().contains("dovi") {
-                        s.dovi = true;
+                // Matroska reports its tag names in capitals.
+                match key.to_ascii_lowercase().as_str() {
+                    "index" => s.index = v.parse().unwrap_or(0),
+                    "codec_type" => {
+                        s.kind = match v {
+                            "video" => StreamKind::Video,
+                            "audio" => StreamKind::Audio,
+                            "subtitle" => StreamKind::Subtitle,
+                            _ => StreamKind::Other,
+                        }
                     }
+                    "codec_name" => s.codec = v.to_string(),
+                    "channels" => s.channels = v.parse().unwrap_or(0),
+                    "disposition:default" => s.default = v == "1",
+                    "tag:language" => s.language = Some(v.to_string()).filter(|l| !l.is_empty() && l != "und"),
+                    "tag:title" | "tag:handler_name" => {
+                        s.label.push_str(v);
+                        s.label.push(' ');
+                    }
+                    "side_data_type" => s.dovi |= v.to_ascii_lowercase().contains("dovi"),
+                    _ => {}
                 }
             }
         }
@@ -126,8 +148,21 @@ const VIDEO_OK: &[&str] = &["h264", "hevc", "av1"];
 /// Audio codecs copied as-is. FLAC, Vorbis, DTS, TrueHD and PCM are either
 /// experimental in MP4 or not carried at all — files with those are skipped.
 const AUDIO_COPY: &[&str] = &["aac", "mp3", "opus", "alac", "ac3", "eac3"];
-/// Audio codecs that also get a browser-playable AAC twin.
+/// Audio codecs that always get a browser-playable AAC twin. A track of
+/// any codec gets one when it is the default and wider than stereo.
 const AUDIO_TWIN: &[&str] = &["ac3", "eac3"];
+
+/// A channel count as a person would say it.
+pub fn layout_name(channels: usize) -> String {
+    match channels {
+        0 => String::new(),
+        1 => "mono".into(),
+        2 => "stereo".into(),
+        6 => "5.1".into(),
+        8 => "7.1".into(),
+        n => format!("{n}ch"),
+    }
+}
 const TEXT_SUBS: &[&str] = &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text", "subviewer"];
 const BITMAP_SUBS: &[&str] = &["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"];
 
@@ -142,6 +177,12 @@ pub struct Plan {
     /// its stereo downmix) and the gain it is encoded with, if any — a
     /// twin is an encode already, so raising a quiet one costs nothing.
     pub twin_levels: Vec<TwinLevel>,
+    /// What each twin stands in for ("eac3 5.1", "aac 5.1"), in order.
+    pub twin_reasons: Vec<String>,
+    /// The track that plays by default is among the twinned: the case
+    /// that matters for browsers, and the only one worth rewriting an
+    /// .mp4 for.
+    pub default_twin: bool,
     pub subtitles: Vec<usize>,
     /// Mux the .srt sidecar in as the mov_text subtitle track.
     pub embed_srt: bool,
@@ -172,8 +213,16 @@ impl Plan {
 /// reason it is not. `srt_sidecar` says a usable same-stem .srt exists:
 /// with one, bitmap subtitle tracks are dropped instead of disqualifying
 /// the file, and it is embedded whenever no text track would survive.
+///
+/// Twins: every Dolby track, and the track that plays by default (the
+/// default-flagged one, else the first) when it is wider than stereo —
+/// unless a twin of ours already sits ahead of it, which is how a file
+/// this pass made earlier is recognised and left alone.
 pub fn plan(probe: &Probe, srt_sidecar: bool) -> std::result::Result<Plan, String> {
     let mut plan = Plan::default();
+    let audio = || probe.streams.iter().filter(|s| s.kind == StreamKind::Audio);
+    let playing = audio().find(|s| s.default).or_else(|| audio().next()).map(|s| s.index);
+    let mut previous: Option<&Stream> = None;
     for s in &probe.streams {
         match s.kind {
             StreamKind::Video => {
@@ -190,7 +239,15 @@ pub fn plan(probe: &Probe, srt_sidecar: bool) -> std::result::Result<Plan, Strin
                 if !AUDIO_COPY.contains(&s.codec.as_str()) {
                     return Err(format!("audio codec {} is not MP4-safe", s.codec));
                 }
-                plan.audio.push((s.index, AUDIO_TWIN.contains(&s.codec.as_str())));
+                let is_playing = Some(s.index) == playing;
+                let twinned = previous.is_some_and(|p| p.label.contains(crate::loudness::TWIN_LABEL));
+                let twin = !twinned && (AUDIO_TWIN.contains(&s.codec.as_str()) || (is_playing && s.channels > 2));
+                if twin {
+                    plan.twin_reasons.push(format!("{} {}", s.codec, layout_name(s.channels)).trim_end().to_string());
+                    plan.default_twin |= is_playing;
+                }
+                plan.audio.push((s.index, twin));
+                previous = Some(s);
             }
             StreamKind::Subtitle => {
                 if BITMAP_SUBS.contains(&s.codec.as_str()) {
@@ -275,7 +332,7 @@ pub fn ffmpeg_args(
                 format!("-b:a:{audio_out}"), "192k".into(),
                 format!("-ac:a:{audio_out}"), "2".into(),
                 format!("-metadata:s:a:{audio_out}"), format!("handler_name={name}"),
-                format!("-disposition:a:{audio_out}"), "default".into(),
+                format!("-disposition:a:{audio_out}"), if audio_out == 0 { "default".into() } else { "0".into() },
             ]);
             if let Some(g) = gain {
                 // A linear gain commutes with the downmix that follows.
@@ -330,7 +387,10 @@ pub fn ffmpeg_args(
 }
 
 pub enum Outcome {
+    /// An .mkv left alone, and why.
     Skipped(String),
+    /// An .mp4 whose default track already plays in browsers.
+    Fine,
     /// Dry run: what a real run would do.
     WouldRemux(Plan),
     Remuxed(Plan),
@@ -353,15 +413,21 @@ pub(crate) fn temp_beside(dir: &Path, stem: &str, tag: &str, ext: &str) -> PathB
     dir.join(format!(".{stem}.{tag}-{}.{ext}", std::process::id()))
 }
 
-fn is_mkv(path: &Path) -> bool {
+fn ext_is(path: &Path, ext: &str) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("mkv"))
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
 
-/// Remux one file if it qualifies. With `dry_run`, probe and plan only.
-/// With a loudness policy, each stereo twin's downmix is measured first
-/// and a quiet one is encoded with the gain the policy allows.
+fn is_mkv(path: &Path) -> bool {
+    ext_is(path, "mkv")
+}
+
+/// Remux one file if it qualifies: an .mkv to .mp4, or an .mp4 in place
+/// when its default track needs a stereo twin. With `dry_run`, probe and
+/// plan only. With a loudness policy, each stereo twin's downmix is
+/// measured first and a quiet one is encoded with the gain the policy
+/// allows.
 pub fn remux_if_applicable(
     ffmpeg: &str,
     ffprobe: &str,
@@ -369,11 +435,12 @@ pub fn remux_if_applicable(
     dry_run: bool,
     loudness: Option<&crate::loudness::Policy>,
 ) -> Result<Outcome> {
-    if !is_mkv(media) {
-        return Ok(Outcome::Skipped("not mkv".into()));
+    let mkv = is_mkv(media);
+    if !mkv && !ext_is(media, "mp4") {
+        return Ok(Outcome::Skipped("not mkv or mp4".into()));
     }
-    let target = media.with_extension("mp4");
-    if target.exists() {
+    let target = if mkv { media.with_extension("mp4") } else { media.to_path_buf() };
+    if mkv && target.exists() {
         return Ok(Outcome::Skipped("an .mp4 with this name already exists".into()));
     }
     // A usable .srt sidecar lets bitmap subtitles be dropped rather than
@@ -387,8 +454,14 @@ pub fn remux_if_applicable(
     let before = probe(ffprobe, media)?;
     let mut plan = match plan(&before, srt_text.is_some()) {
         Ok(plan) => plan,
-        Err(why) => return Ok(Outcome::Skipped(why)),
+        Err(why) if mkv => return Ok(Outcome::Skipped(why)),
+        Err(_) => return Ok(Outcome::Fine),
     };
+    // An .mp4 is only worth rewriting for the track browsers will play;
+    // sidecars alone are the embed step's business.
+    if !mkv && !plan.default_twin {
+        return Ok(Outcome::Fine);
+    }
     if dry_run {
         return Ok(Outcome::WouldRemux(plan));
     }
@@ -479,10 +552,12 @@ pub fn remux_if_applicable(
         }
     }
     std::fs::rename(&temp, &target).with_context(|| format!("placing {}", target.display()))?;
-    if let Err(err) = std::fs::remove_file(media) {
-        // Both files now exist; the catalog will merge them as renditions
-        // until the .mkv goes. Loud, but not fatal.
-        eprintln!("{}: remuxed, but the original could not be removed: {err}", media.display());
+    if mkv {
+        if let Err(err) = std::fs::remove_file(media) {
+            // Both files now exist; the catalog will merge them as renditions
+            // until the .mkv goes. Loud, but not fatal.
+            eprintln!("{}: remuxed, but the original could not be removed: {err}", media.display());
+        }
     }
     Ok(Outcome::Remuxed(plan))
 }
@@ -492,18 +567,128 @@ mod tests {
     use super::*;
 
     fn s(index: usize, kind: StreamKind, codec: &str) -> Stream {
-        Stream { index, kind, codec: codec.into(), language: None, dovi: false }
+        Stream { index, kind, codec: codec.into(), language: None, dovi: false, channels: 0, default: false, label: String::new() }
+    }
+
+    fn audio(index: usize, codec: &str, channels: usize, default: bool, label: &str) -> Stream {
+        Stream { channels, default, label: label.into(), ..s(index, StreamKind::Audio, codec) }
+    }
+
+    fn joined(plan: &Plan) -> String {
+        ffmpeg_args(plan, Path::new("in.mkv"), None, None, Path::new("out.mp4"))
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn a_wide_default_track_gets_a_twin_whatever_its_codec() {
+        // The Bourne layout: 5.1 AAC default, stereo AAC commentary.
+        let p = Probe {
+            streams: vec![
+                s(0, StreamKind::Video, "hevc"),
+                audio(1, "aac", 6, true, "Surround AAC 5.1 "),
+                audio(2, "aac", 2, false, "Commentary "),
+                s(3, StreamKind::Subtitle, "subrip"),
+            ],
+            duration: 1.0,
+        };
+        let plan = plan(&p, false).unwrap();
+        assert_eq!(plan.audio, vec![(1, true), (2, false)]);
+        assert!(plan.default_twin);
+        assert_eq!(plan.twin_reasons, vec!["aac 5.1"]);
+        let j = joined(&plan);
+        assert!(j.contains("-map 0:0 -map 0:1 -map 0:1 -map 0:2 -map 0:3"), "{j}");
+        assert!(j.contains("-c:a:0 aac -b:a:0 192k -ac:a:0 2"), "{j}");
+        assert!(j.contains("-disposition:a:0 default"), "{j}");
+        assert!(j.contains("-disposition:a:1 0"), "{j}");
+        assert!(j.contains("-disposition:a:2 0"), "{j}");
+    }
+
+    #[test]
+    fn wide_tracks_that_do_not_play_by_default_are_left_alone() {
+        // Stereo AAC default, a 5.1 AAC alternate: browsers are fine.
+        let p = Probe {
+            streams: vec![
+                s(0, StreamKind::Video, "h264"),
+                audio(1, "aac", 2, true, ""),
+                audio(2, "aac", 6, false, ""),
+            ],
+            duration: 1.0,
+        };
+        let stereo_first = plan(&p, false).unwrap();
+        assert_eq!(stereo_first.audio, vec![(1, false), (2, false)]);
+        assert!(!stereo_first.default_twin);
+        // No default flag anywhere: the first track is the one that plays.
+        let p = Probe {
+            streams: vec![s(0, StreamKind::Video, "h264"), audio(1, "aac", 6, false, ""), audio(2, "aac", 6, false, "")],
+            duration: 1.0,
+        };
+        let unflagged = plan(&p, false).unwrap();
+        assert_eq!(unflagged.audio, vec![(1, true), (2, false)]);
+        assert!(unflagged.default_twin);
+    }
+
+    #[test]
+    fn an_earlier_twin_is_recognised_and_not_doubled() {
+        // The shape this pass leaves behind: our twin, then the original.
+        let p = Probe {
+            streams: vec![
+                s(0, StreamKind::Video, "h264"),
+                audio(1, "aac", 2, true, "Stereo (AAC) "),
+                audio(2, "eac3", 6, false, ""),
+                audio(3, "aac", 6, false, "Isolated score "),
+            ],
+            duration: 1.0,
+        };
+        let done = plan(&p, false).unwrap();
+        assert_eq!(done.audio, vec![(1, false), (2, false), (3, false)]);
+        assert!(!done.default_twin);
+        assert!(done.twin_reasons.is_empty());
+        // A raised twin counts the same.
+        let p = Probe {
+            streams: vec![
+                s(0, StreamKind::Video, "h264"),
+                audio(1, "aac", 2, true, "Stereo (AAC), normalized +6.0 dB (media-enrich) "),
+                audio(2, "aac", 6, false, ""),
+            ],
+            duration: 1.0,
+        };
+        assert_eq!(plan(&p, false).unwrap().twins(), 0);
+    }
+
+    #[test]
+    fn only_the_first_twin_is_default() {
+        let p = Probe {
+            streams: vec![s(0, StreamKind::Video, "h264"), audio(1, "eac3", 6, true, ""), audio(2, "ac3", 2, false, "Commentary ")],
+            duration: 1.0,
+        };
+        let plan = plan(&p, false).unwrap();
+        assert_eq!(plan.twins(), 2);
+        assert_eq!(plan.twin_reasons, vec!["eac3 5.1", "ac3 stereo"]);
+        let j = joined(&plan);
+        assert!(j.contains("-disposition:a:0 default"), "{j}");
+        assert!(j.contains("-disposition:a:1 0"), "{j}");
+        assert!(j.contains("-disposition:a:2 0"), "{j}");
+        assert!(j.contains("-disposition:a:3 0"), "{j}");
+        assert_eq!(layout_name(8), "7.1");
+        assert_eq!(layout_name(3), "3ch");
     }
 
     #[test]
     fn parses_ffprobe_default_output_with_side_data() {
-        let text = "[STREAM]\nindex=0\ncodec_name=hevc\ncodec_type=video\nTAG:language=und\n[SIDE_DATA]\nside_data_type=DOVI configuration record\n[/SIDE_DATA]\n[/STREAM]\n[STREAM]\nindex=1\ncodec_name=eac3\ncodec_type=audio\nTAG:language=eng\n[/STREAM]\n[FORMAT]\nduration=5400.123000\n[/FORMAT]\n";
+        let text = "[STREAM]\nindex=0\ncodec_name=hevc\ncodec_type=video\nDISPOSITION:default=1\nTAG:language=und\n[SIDE_DATA]\nside_data_type=DOVI configuration record\n[/SIDE_DATA]\n[/STREAM]\n[STREAM]\nindex=1\ncodec_name=eac3\ncodec_type=audio\nchannels=6\nDISPOSITION:default=1\nTAG:language=eng\nTAG:title=Surround\n[/STREAM]\n[STREAM]\nindex=2\ncodec_name=aac\ncodec_type=audio\nchannels=2\nDISPOSITION:default=0\nTAG:handler_name=Stereo (AAC)\n[/STREAM]\n[FORMAT]\nduration=5400.123000\n[/FORMAT]\n";
         let p = parse_probe(text);
-        assert_eq!(p.streams.len(), 2);
+        assert_eq!(p.streams.len(), 3);
         assert!(p.streams[0].dovi);
         assert_eq!(p.streams[0].language, None);
         assert_eq!(p.streams[1].language.as_deref(), Some("eng"));
         assert_eq!(p.streams[1].kind, StreamKind::Audio);
+        assert_eq!(p.streams[1].channels, 6);
+        assert!(p.streams[1].default && !p.streams[2].default);
+        assert_eq!(p.streams[1].label, "Surround ");
+        assert_eq!(p.streams[2].label, "Stereo (AAC) ");
         assert!((p.duration - 5400.123).abs() < 1e-6);
     }
 

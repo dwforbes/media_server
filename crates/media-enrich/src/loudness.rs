@@ -293,11 +293,13 @@ fn plan(probe: &Probe, media: &Path) -> std::result::Result<Plan, String> {
         .or_else(|| probe.audio().next())
         .ok_or("no audio stream")?;
     // A stereo twin remux made without this step: raise a fresh twin
-    // from the Dolby track behind it rather than re-encode an encode.
+    // from the Dolby or multichannel track behind it rather than
+    // re-encode an encode.
     let behind = probe.audio().skip_while(|s| s.index != playing.index).nth(1);
     let (source, layout, channels_out, drop) = match behind {
         Some(original)
-            if playing.label.contains(TWIN_LABEL) && matches!(original.codec.as_str(), "ac3" | "eac3") =>
+            if playing.label.contains(TWIN_LABEL)
+                && (matches!(original.codec.as_str(), "ac3" | "eac3") || original.channels > 2) =>
         {
             (original.index, Some("stereo"), 2, Some(playing.index))
         }

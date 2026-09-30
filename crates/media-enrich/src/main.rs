@@ -56,8 +56,10 @@ struct Args {
     /// embed_subtitles = true in the config's [enrich] section).
     #[arg(long)]
     embed_subtitles: bool,
-    /// Remux MKV files to MP4 (stream copy; AC-3/E-AC-3 audio gains a stereo
-    /// AAC twin). Also enabled by remux_mkv = true in the [enrich] section.
+    /// Remux MKV files to MP4 (stream copy; Dolby Digital audio and a
+    /// default track wider than stereo gain a stereo AAC twin ahead of
+    /// them), and give MP4 files whose default track needs one the same
+    /// twin. Also enabled by remux_mkv = true in the [enrich] section.
     #[arg(long)]
     remux_mkv: bool,
     /// Skip extracting embedded text subtitle tracks to .srt sidecars (on
@@ -501,7 +503,8 @@ fn remove_stale_temps(config: &ScannerConfig) {
     }
 }
 
-/// Remux every eligible .mkv under the video roots to .mp4. Dry run:
+/// Remux every eligible .mkv under the video roots to .mp4, and rewrite
+/// every .mp4 whose default audio track needs a stereo twin. Dry run:
 /// probe and report only.
 /// Returns the level of every stereo twin measured along the way, by the
 /// new file's path, so the loudness step need not measure it again.
@@ -525,18 +528,26 @@ fn remux_mkv_files(
             .flatten()
             .filter(|e| e.file_type().is_file())
             .map(|e| e.into_path())
-            .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mkv")))
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("mkv") || e.eq_ignore_ascii_case("mp4"))
+            })
             .collect();
         paths.sort();
         for path in paths {
+            let mkv = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mkv"));
             match remux::remux_if_applicable(&config.enrich.ffmpeg_path, &config.ffprobe_path, &path, dry_run, loudness) {
+                Ok(remux::Outcome::Fine) => {}
                 Ok(remux::Outcome::WouldRemux(plan)) => {
                     planned += 1;
-                    println!("would remux: {}{}", path.display(), describe_plan(&plan));
+                    let what = if mkv { "would remux" } else { "would add stereo twin" };
+                    println!("{what}: {}{}", path.display(), describe_plan(&plan));
                 }
                 Ok(remux::Outcome::Remuxed(plan)) => {
                     remuxed += 1;
-                    println!("remuxed to mp4: {}{}", path.display(), describe_plan(&plan));
+                    let what = if mkv { "remuxed to mp4" } else { "stereo twin added" };
+                    println!("{what}: {}{}", path.display(), describe_plan(&plan));
                     // The first twin is the default track: the one that counts.
                     if let Some(level) = plan.twin_levels.first() {
                         twin_levels.push((path.with_extension("mp4"), *level));
@@ -555,10 +566,10 @@ fn remux_mkv_files(
     }
     if dry_run {
         if planned > 0 {
-            println!("(dry run) mkv files that would be remuxed: {planned}");
+            println!("(dry run) files that would be remuxed: {planned}");
         }
     } else if remuxed > 0 {
-        println!("mkv files remuxed to mp4: {remuxed}");
+        println!("files remuxed: {remuxed}");
     }
     twin_levels
 }
@@ -755,10 +766,10 @@ fn normalize_loudness(config: &ScannerConfig, job: &LoudnessJob, state: &mut Lou
 
 fn describe_plan(plan: &remux::Plan) -> String {
     let mut out = String::new();
-    match plan.twins() {
-        0 => {}
-        1 => out.push_str(" (+ stereo AAC twin for the AC-3/E-AC-3 track)"),
-        n => out.push_str(&format!(" (+ stereo AAC twins for {n} AC-3/E-AC-3 tracks)")),
+    match plan.twin_reasons.as_slice() {
+        [] => {}
+        [one] => out.push_str(&format!(" (+ stereo AAC twin ahead of the {one} track)")),
+        many => out.push_str(&format!(" (+ stereo AAC twins ahead of the {} tracks)", many.join(", "))),
     }
     for level in &plan.twin_levels {
         if let Some(gain) = level.gain {
