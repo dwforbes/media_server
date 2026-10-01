@@ -61,6 +61,16 @@ embed_subtitles = true
 # web player needs no on-demand extraction. Only adds sidecars; on by
 # default.
 #extract_subtitles = true
+# Remux .mkv files to .mp4 (stream copy), with a stereo AAC twin ahead of
+# a default audio track browsers can't play — Dolby Digital, or wider
+# than stereo. Newly arrived .mp4 files whose default track needs it get
+# the same twin (after the loudness step, whose raised track is a stereo
+# mixdown already). Replaces whole media files — opt-in.
+#remux_mkv = true
+# "Newly arrived" for the .mp4 twin pass: catalogued on or after this day
+# (UTC). Unset: from the pass's first run on. Older files one at a time:
+# media-enrich --twin-path.
+#twin_since = "2026-10-01"
 # Films mastered far below everything else (a theatrical mix can sit 15 dB
 # under a TV episode): measure the default audio track of newly arrived
 # videos and, when it is well under the target and its peaks leave room,

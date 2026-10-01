@@ -763,10 +763,17 @@ place, whose titles ffmpeg itself would drop; the pass reads them from the file 
 A raised twin's name carries the gain as well ("English Stereo Mixdown, normalized
 +6.0 dB (media-enrich)").
 
-The same pass looks at `.mp4` files, since a rip can arrive as one: when its default
-track would earn a twin, the file is rewritten in place with the twin ahead. An `.mp4`
-whose default track already plays in browsers is left untouched — this costs one
-`ffprobe` per `.mp4` per enrichment run and nothing more.
+The same twin goes into `.mp4` files, since a rip can arrive as one: when the default
+track would earn one, the file is rewritten in place with the twin ahead. This half is
+**going forward only**, like loudness: an `.mp4` whose catalog added-at is on or after
+`twin_since = "YYYY-MM-DD"` (or, unset, after the pass's first run) is looked at once
+and remembered in `enrich-loudness.json`; the existing library is never walked for
+it, since every rewrite is a full copy of a multi-gigabyte file. Older ones by hand:
+`media-enrich --twin-path "/mnt/media/Movies/The Bourne Identity (2002)"` (a file or
+a folder; `--dry-run` lists what would change). It runs **after the loudness step**:
+a file that step raised already has a stereo default (its mixdown, see below), so the
+plain twin is the fallback for new files loudness left alone — within range, or with
+no headroom to raise.
 
 Only clean candidates are converted; everything else is listed as "kept as-is" with
 the reason: video other than H.264/HEVC/AV1, audio MP4 can't carry natively (DTS,
@@ -814,10 +821,14 @@ a change to the mix, which is not this tool's to make. Files within `loudness_mi
   step's first run. The existing library is never walked for this. To do one older
   film (or a folder), name it: `media-enrich --loudness-path "/mnt/media/Movies/Halloween
   (1978).mp4"`, with `--dry-run` to see the numbers only.
-- **The raised track** is AAC in the source's channel layout (5.1 stays 5.1), labelled
-  "Normalized +10.2 dB (media-enrich)" in players' audio menus — which is also how a
-  later run knows the file is done. Every other stream is copied bit-for-bit, the
-  caption record survives, and the file keeps its mtime.
+- **The raised track** is AAC, and a **stereo mixdown** whenever the source is wider
+  than stereo — so it is also the track browsers can play (Firefox skips 5.1 AAC), and
+  a file the loudness step raised needs no separate twin. The original keeps its
+  layout right behind it. The track is named "English Stereo Mixdown, normalized
+  +10.2 dB (media-enrich)" (or "Normalized +10.2 dB (media-enrich)" for a mono or
+  stereo source) in players' audio menus — which is also how a later run knows the
+  file is done. Every other stream is copied bit-for-bit, the caption record survives,
+  and the file keeps its mtime.
 - **With remuxing**, the stereo AAC twin is an encode already, so a quiet one is
   raised as it is made ("Stereo (AAC), normalized +9.0 dB") at no cost in quality; a
   bare twin from an earlier remux is replaced by a raised one made afresh from the

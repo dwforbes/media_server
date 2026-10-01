@@ -109,6 +109,9 @@ pub struct EnrichConfig {
     pub loudness_since: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
+    pub twin_since: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
     pub loudness_target: Option<f64>,
     #[serde(default)]
     #[allow(dead_code)]

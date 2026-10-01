@@ -8,6 +8,10 @@
 //!
 //! It also holds `since`: the step is for media arriving from now on, and
 //! when the config names no date, "now" is the first run, remembered here.
+//!
+//! The stereo-twin pass over .mp4 files keeps its memory here as well
+//! (`twin_since`, and a stamp per file it has looked at), being the same
+//! kind of going-forward step over the same files.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +42,12 @@ struct Entry {
     gain: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TwinLook {
+    file: String,
+    stamp: Stamp,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct FileFormat {
     version: u32,
@@ -45,12 +55,18 @@ struct FileFormat {
     since: Option<i64>,
     #[serde(default)]
     files: HashMap<String, Entry>,
+    #[serde(default)]
+    twin_since: Option<i64>,
+    #[serde(default)]
+    twins: HashMap<String, TwinLook>,
 }
 
 pub struct LoudnessState {
     path: PathBuf,
     since: Option<i64>,
     entries: HashMap<String, Entry>,
+    twin_since: Option<i64>,
+    twins: HashMap<String, TwinLook>,
     dirty: bool,
 }
 
@@ -67,7 +83,14 @@ impl LoudnessState {
             .and_then(|bytes| serde_json::from_slice::<FileFormat>(&bytes).ok())
             .filter(|f| f.version == VERSION)
             .unwrap_or_default();
-        LoudnessState { path, since: stored.since, entries: stored.files, dirty: false }
+        LoudnessState {
+            path,
+            since: stored.since,
+            entries: stored.files,
+            twin_since: stored.twin_since,
+            twins: stored.twins,
+            dirty: false,
+        }
     }
 
     /// Whether an earlier run has already fixed the starting point.
@@ -81,6 +104,47 @@ impl LoudnessState {
             self.dirty = true;
             now
         })
+    }
+
+    /// Whether the twin pass has fixed its starting point.
+    pub fn twin_started(&self) -> bool {
+        self.twin_since.is_some()
+    }
+
+    /// The twin pass's remembered first-run time, set to `now` on the
+    /// first call.
+    pub fn twin_since_or_start(&mut self, now: i64) -> i64 {
+        *self.twin_since.get_or_insert_with(|| {
+            self.dirty = true;
+            now
+        })
+    }
+
+    /// The twin pass looked at the file already, and it is unchanged.
+    pub fn twin_settled(&self, media: &Path) -> bool {
+        match (self.twins.get(&key(media)), Stamp::of(media)) {
+            (Some(look), Some(stamp)) => look.stamp == stamp,
+            _ => false,
+        }
+    }
+
+    /// The twin pass is done with the file as it is on disk now.
+    pub fn twin_record(&mut self, media: &Path) {
+        let Some(stamp) = Stamp::of(media) else { return };
+        self.twins.insert(key(media), TwinLook { file: media.to_string_lossy().into_owned(), stamp });
+        self.dirty = true;
+    }
+
+    /// Another step rewrote a file this one had measured: the measurement
+    /// stands (the audio it describes is still there, behind whatever
+    /// was added), so refresh the stamp rather than decode it again.
+    pub fn restamp(&mut self, media: &Path) {
+        let Some(stamp) = Stamp::of(media) else { return };
+        if let Some(entry) = self.entries.get_mut(&key(media)) {
+            entry.stamp = stamp;
+            entry.file = media.to_string_lossy().into_owned();
+            self.dirty = true;
+        }
     }
 
     /// Looked at already, and unchanged since.
@@ -125,9 +189,10 @@ impl LoudnessState {
 
     /// Drop entries whose file is gone.
     pub fn forget_missing(&mut self) {
-        let before = self.entries.len();
+        let before = self.entries.len() + self.twins.len();
         self.entries.retain(|_, e| Path::new(&e.file).exists());
-        self.dirty |= self.entries.len() != before;
+        self.twins.retain(|_, t| Path::new(&t.file).exists());
+        self.dirty |= self.entries.len() + self.twins.len() != before;
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -138,6 +203,8 @@ impl LoudnessState {
             version: VERSION,
             since: self.since,
             files: self.entries.clone(),
+            twin_since: self.twin_since,
+            twins: self.twins.clone(),
         })
         .map_err(std::io::Error::other)?;
         media_db::sidecar::write_atomic(&self.path, &json)
@@ -179,9 +246,22 @@ mod tests {
         assert!(state.settled(&mp4));
         assert_eq!(state.entries.len(), 1);
 
+        // The twin pass's own memory, and a rewrite that keeps a measurement.
+        assert_eq!(state.twin_since_or_start(5000), 5000);
+        assert!(!state.twin_settled(&mp4));
+        state.twin_record(&mp4);
+        assert!(state.twin_settled(&mp4));
+        std::fs::write(&mp4, b"rewritten with a twin").unwrap();
+        assert!(!state.twin_settled(&mp4) && !state.settled(&mp4));
+        state.restamp(&mp4);
+        assert!(state.settled(&mp4), "the measurement is kept under the new stamp");
+        state.save().unwrap();
+        let state2 = LoudnessState::load(&dir);
+        assert!(state2.twin_started() && state2.twin_settled(&mp4) == false);
+
         std::fs::remove_file(&mp4).unwrap();
         state.forget_missing();
-        assert!(state.entries.is_empty());
+        assert!(state.entries.is_empty() && state.twins.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

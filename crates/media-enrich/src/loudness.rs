@@ -10,7 +10,10 @@
 //! default audio track (EBU R 128 integrated loudness and true peak, one
 //! audio-only decode), and when it is well under the target *and* its
 //! peaks leave room, add a copy of that track raised by a plain linear
-//! gain as the new default track, the original right behind it. Nothing
+//! gain as the new default track, the original right behind it. A track
+//! wider than stereo is raised as a stereo mixdown, so the new track is
+//! also the one browsers can play (Firefox skips 5.1 AAC) and no
+//! separate twin is needed; the original keeps its layout. Nothing
 //! is ever compressed or limited: the gain is capped by the track's own
 //! headroom, so the mix is untouched and cannot clip. A quiet file whose
 //! peaks are already near full scale is left alone — raising it would
@@ -159,6 +162,7 @@ struct Stream {
     default: bool,
     /// Title and handler name together: whichever the container keeps.
     label: String,
+    language: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -184,7 +188,7 @@ fn probe(ffprobe: &str, path: &Path) -> Result<Probe> {
         .args([
             "-v", "error",
             "-show_entries",
-            "stream=index,codec_type,codec_name,channels:stream_tags=title,handler_name:\
+            "stream=index,codec_type,codec_name,channels:stream_tags=title,handler_name,language:\
              stream_disposition=default:format=duration:format_tags=encoder",
         ])
         .arg(path)
@@ -205,7 +209,7 @@ fn parse_probe(text: &str) -> Probe {
             "[STREAM]" => {
                 current = Some(Stream {
                     index: 0, kind: Kind::Other, codec: String::new(),
-                    channels: 0, default: false, label: String::new(),
+                    channels: 0, default: false, label: String::new(), language: None,
                 });
             }
             "[/STREAM]" => probe.streams.extend(current.take()),
@@ -229,6 +233,7 @@ fn parse_probe(text: &str) -> Probe {
                         }
                         "channels" => s.channels = value.parse().unwrap_or(0),
                         "disposition:default" => s.default = value == "1",
+                        "tag:language" => s.language = Some(value.to_string()).filter(|l| !l.is_empty() && l != "und"),
                         "tag:title" | "tag:handler_name" => {
                             s.label.push_str(value);
                             s.label.push(' ');
@@ -253,10 +258,14 @@ fn parse_probe(text: &str) -> Probe {
 struct Plan {
     /// Input stream the raised track is encoded from.
     source: usize,
-    /// Layout the raised track is converted to first (a stereo twin's
-    /// downmix; 5.1 for wider sources, the widest AAC is sure to take).
+    /// Layout the raised track is converted to first: stereo whenever
+    /// the source is wider, so the raised track doubles as the one for
+    /// browsers; none for a mono or stereo source.
     layout: Option<&'static str>,
     channels_out: usize,
+    /// The name a stereo mixdown shows in audio menus ("English Stereo
+    /// Mixdown"); the plain "Normalized …" label otherwise.
+    mixdown_name: Option<String>,
     /// An un-normalized stereo twin the raised one replaces.
     drop: Option<usize>,
     /// Audio streams kept behind the new track, in order.
@@ -303,14 +312,27 @@ fn plan(probe: &Probe, media: &Path) -> std::result::Result<Plan, String> {
         {
             (original.index, Some("stereo"), 2, Some(playing.index))
         }
-        _ if playing.channels > 6 => (playing.index, Some("5.1"), 6, None),
+        _ if playing.channels > 2 => (playing.index, Some("stereo"), 2, None),
         _ => (playing.index, None, playing.channels.max(1), None),
     };
     let hevc = probe.streams.iter().any(|s| s.kind == Kind::Video && s.codec == "hevc");
+    let mixdown_name = layout.map(|_| {
+        let language = probe
+            .streams
+            .iter()
+            .find(|s| s.index == source)
+            .and_then(|s| s.language.as_deref())
+            .and_then(crate::remux::language_name);
+        match language {
+            Some(lang) => format!("{lang} Stereo Mixdown"),
+            None => "Stereo Mixdown".to_string(),
+        }
+    });
     Ok(Plan {
         source,
         layout,
         channels_out,
+        mixdown_name,
         drop,
         keep: probe.audio().map(|s| s.index).filter(|i| Some(*i) != drop).collect(),
         hevc_mp4: hevc && is_mp4(media),
@@ -363,11 +385,18 @@ fn ffmpeg_args(plan: &Plan, gain: f64, input: &Path, keep_encoder: Option<&str>,
         Some(l) => format!("aformat=channel_layouts={l},volume={gain:.1}dB"),
         None => format!("volume={gain:.1}dB"),
     });
-    let name = label(gain, plan.drop.is_some());
+    // The title is what players list; the handler name is the marker
+    // by which this step and the twin pass know the track (the twin
+    // form for a mixdown, so a later remux sees a twin ahead already).
+    let handler = label(gain, plan.layout.is_some());
+    let title = match &plan.mixdown_name {
+        Some(name) => format!("{name}, normalized {gain:+.1} dB (media-enrich)"),
+        None => handler.clone(),
+    };
     push("-metadata:s:a:0".into());
-    push(format!("title={name}"));
+    push(format!("title={title}"));
     push("-metadata:s:a:0".into());
-    push(format!("handler_name={name}"));
+    push(format!("handler_name={handler}"));
     push("-disposition:a:0".into());
     push("default".into());
     for n in 1..=plan.keep.len() {
@@ -538,7 +567,7 @@ mod tests {
     }
 
     fn stream(index: usize, kind: Kind, codec: &str, channels: usize, default: bool, label: &str) -> Stream {
-        Stream { index, kind, codec: codec.into(), channels, default, label: label.into() }
+        Stream { index, kind, codec: codec.into(), channels, default, label: label.into(), language: None }
     }
 
     #[test]
@@ -552,13 +581,24 @@ mod tests {
             ..Default::default()
         };
         let p = plan(&plain, Path::new("x.mp4")).unwrap();
-        assert_eq!((p.source, p.layout, p.channels_out, p.drop, p.keep.clone()), (1, None, 6, None, vec![1]));
+        assert_eq!((p.source, p.layout, p.channels_out, p.drop, p.keep.clone()), (1, Some("stereo"), 2, None, vec![1]));
+        assert_eq!(p.mixdown_name.as_deref(), Some("Stereo Mixdown"));
         assert!(p.hevc_mp4 && !p.matroska);
         let args: Vec<String> = ffmpeg_args(&p, 10.2, Path::new("x.mp4"), Some("rec"), Path::new("t.mp4"))
             .iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let joined = args.join(" ");
-        assert!(joined.contains("-map 0:v? -map 0:1 -map 0:1 -map 0:s? -c copy -c:a:0 aac -b:a:0 384k -filter:a:0 volume=10.2dB"), "{joined}");
+        assert!(joined.contains("-map 0:v? -map 0:1 -map 0:1 -map 0:s? -c copy -c:a:0 aac -b:a:0 192k -filter:a:0 aformat=channel_layouts=stereo,volume=10.2dB"), "{joined}");
+        assert!(joined.contains("-metadata:s:a:0 title=Stereo Mixdown, normalized +10.2 dB (media-enrich) -metadata:s:a:0 handler_name=Stereo (AAC), normalized +10.2 dB (media-enrich)"), "{joined}");
         assert!(joined.contains("-disposition:a:0 default -disposition:a:1 0 -tag:v hvc1 -metadata encoding_tool=rec"), "{joined}");
+        // A stereo source is raised as it is, under the plain label.
+        let stereo = Probe {
+            streams: vec![stream(0, Kind::Video, "h264", 0, true, ""), stream(1, Kind::Audio, "aac", 2, true, "")],
+            ..Default::default()
+        };
+        let p = plan(&stereo, Path::new("x.mp4")).unwrap();
+        assert_eq!((p.layout, p.channels_out, p.mixdown_name.clone()), (None, 2, None));
+        let j = ffmpeg_args(&p, 6.0, Path::new("x.mp4"), None, Path::new("t.mp4")).iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(j.contains("title=Normalized +6.0 dB (media-enrich) -metadata:s:a:0 handler_name=Normalized +6.0 dB (media-enrich)"), "{j}");
 
         // A twin made before this step existed: a new one from the Dolby
         // track behind it takes its place.

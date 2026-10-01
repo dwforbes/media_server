@@ -58,8 +58,8 @@ struct Args {
     embed_subtitles: bool,
     /// Remux MKV files to MP4 (stream copy; Dolby Digital audio and a
     /// default track wider than stereo gain a stereo AAC twin ahead of
-    /// them), and give MP4 files whose default track needs one the same
-    /// twin. Also enabled by remux_mkv = true in the [enrich] section.
+    /// them), and give newly arrived MP4 files whose default track needs
+    /// one the same twin. Also enabled by remux_mkv = true in [enrich].
     #[arg(long)]
     remux_mkv: bool,
     /// Skip extracting embedded text subtitle tracks to .srt sidecars (on
@@ -88,6 +88,11 @@ struct Args {
     /// --normalize-loudness, and with --dry-run to see the numbers only.
     #[arg(long, value_name = "PATH")]
     loudness_path: Vec<PathBuf>,
+    /// Give these .mp4 files (or every .mp4 under these folders) the
+    /// stereo twin whatever their arrival date — the twin pass otherwise
+    /// takes newly arrived files only (twin_since in [enrich]).
+    #[arg(long, value_name = "PATH")]
+    twin_path: Vec<PathBuf>,
     /// Re-download the cached IMDb ratings dataset when older than this.
     #[arg(long, default_value_t = 7)]
     ratings_max_age_days: u64,
@@ -180,6 +185,10 @@ struct EnrichSection {
     /// day count as newly arrived. Unset: from this step's first run on.
     #[serde(default)]
     loudness_since: Option<String>,
+    /// "YYYY-MM-DD": .mp4 files that entered the catalog on or after
+    /// this day get the stereo-twin pass. Unset: from its first run on.
+    #[serde(default)]
+    twin_since: Option<String>,
     /// Integrated loudness quiet tracks are raised towards, LUFS.
     #[serde(default = "default_loudness_target")]
     loudness_target: f64,
@@ -503,9 +512,9 @@ fn remove_stale_temps(config: &ScannerConfig) {
     }
 }
 
-/// Remux every eligible .mkv under the video roots to .mp4, and rewrite
-/// every .mp4 whose default audio track needs a stereo twin. Dry run:
-/// probe and report only.
+/// Remux every eligible .mkv under the video roots to .mp4. Dry run:
+/// probe and report only. (The .mp4 twin pass is twin_mp4_files, after
+/// the loudness step.)
 /// Returns the level of every stereo twin measured along the way, by the
 /// new file's path, so the loudness step need not measure it again.
 fn remux_mkv_files(
@@ -528,26 +537,19 @@ fn remux_mkv_files(
             .flatten()
             .filter(|e| e.file_type().is_file())
             .map(|e| e.into_path())
-            .filter(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case("mkv") || e.eq_ignore_ascii_case("mp4"))
-            })
+            .filter(|p| ext_is(p, "mkv"))
             .collect();
         paths.sort();
         for path in paths {
-            let mkv = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mkv"));
             match remux::remux_if_applicable(&config.enrich.ffmpeg_path, &config.ffprobe_path, &path, dry_run, loudness) {
                 Ok(remux::Outcome::Fine) => {}
                 Ok(remux::Outcome::WouldRemux(plan)) => {
                     planned += 1;
-                    let what = if mkv { "would remux" } else { "would add stereo twin" };
-                    println!("{what}: {}{}", path.display(), describe_plan(&plan));
+                    println!("would remux: {}{}", path.display(), describe_plan(&plan));
                 }
                 Ok(remux::Outcome::Remuxed(plan)) => {
                     remuxed += 1;
-                    let what = if mkv { "remuxed to mp4" } else { "stereo twin added" };
-                    println!("{what}: {}{}", path.display(), describe_plan(&plan));
+                    println!("remuxed to mp4: {}{}", path.display(), describe_plan(&plan));
                     // The first twin is the default track: the one that counts.
                     if let Some(level) = plan.twin_levels.first() {
                         twin_levels.push((path.with_extension("mp4"), *level));
@@ -566,12 +568,127 @@ fn remux_mkv_files(
     }
     if dry_run {
         if planned > 0 {
-            println!("(dry run) files that would be remuxed: {planned}");
+            println!("(dry run) mkv files that would be remuxed: {planned}");
         }
     } else if remuxed > 0 {
-        println!("files remuxed: {remuxed}");
+        println!("mkv files remuxed to mp4: {remuxed}");
     }
     twin_levels
+}
+
+fn ext_is(path: &Path, ext: &str) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(ext))
+}
+
+/// The since-cutoff for a going-forward step: the configured day, or the
+/// remembered first run (set now if this is it). None means the config
+/// value could not be read, and the automatic pass is skipped.
+fn cutoff(step: &str, configured: Option<&str>, started: bool, start: impl FnOnce() -> i64, hint: &str) -> Option<i64> {
+    match configured {
+        Some(text) => parse_day(text).or_else(|| {
+            eprintln!("{step}: {step}_since = {text:?} is not a YYYY-MM-DD date; automatic pass skipped");
+            None
+        }),
+        None => {
+            if !started {
+                println!("{step}: media arriving from now on is looked at; what is already here is left alone ({hint})");
+            }
+            Some(start())
+        }
+    }
+}
+
+/// Every .mp4 under the roots that entered the catalog on or after the
+/// cutoff, or was named on the command line.
+fn new_mp4_candidates(config: &ScannerConfig, explicit: &[PathBuf], auto: Option<i64>) -> Vec<(PathBuf, bool)> {
+    let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
+    for path in explicit {
+        if path.is_dir() {
+            candidates.extend(video_files_under(path).into_iter().filter(|p| ext_is(p, "mp4")).map(|p| (p, true)));
+        } else if path.is_file() && ext_is(path, "mp4") {
+            candidates.push((path.clone(), true));
+        } else {
+            eprintln!("twins: {} is not an .mp4 file or a folder", path.display());
+        }
+    }
+    let Some(since) = auto else { return candidates };
+    let db_path = config.db_path.clone().unwrap_or_else(media_db::open::default_db_path);
+    let added = media_db::open_ro(&db_path).and_then(|conn| media_db::queries::files::video_added_times(&conn));
+    match added {
+        Ok(added) => {
+            for root in config.roots.iter().filter(|r| (r.kind == "movies" || r.kind == "tv") && r.path.is_dir()) {
+                for path in video_files_under(&root.path).into_iter().filter(|p| ext_is(p, "mp4")) {
+                    let arrived_since = added.get(&path).is_none_or(|t| *t >= since);
+                    if arrived_since && !candidates.iter().any(|(p, _)| *p == path) {
+                        candidates.push((path, false));
+                    }
+                }
+            }
+        }
+        Err(err) => eprintln!(
+            "twins: the catalog could not be read ({err:#}), so new media cannot be told from old; automatic pass skipped"
+        ),
+    }
+    candidates
+}
+
+/// Give newly arrived .mp4 files whose default audio track browsers
+/// cannot play a stereo twin ahead of it. Runs after the loudness step:
+/// a file that step raised already has a stereo default (its mixdown),
+/// so this is the fallback for files loudness left alone. Going forward
+/// only, like loudness — the existing library is never walked for this —
+/// with --twin-path for anything older. The pass never measures: when
+/// loudness is on it has already decided, and when it is off there is
+/// no policy to apply.
+fn twin_mp4_files(config: &ScannerConfig, dry_run: bool, auto: bool, explicit: &[PathBuf], state: &mut LoudnessState) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let since = if auto {
+        cutoff(
+            "twins",
+            config.enrich.twin_since.as_deref(),
+            state.twin_started(),
+            || state.twin_since_or_start(now),
+            "set twin_since in [enrich] to reach back, or name files with --twin-path",
+        )
+    } else {
+        None
+    };
+    let (mut settled, mut looked, mut added, mut planned) = (0usize, 0usize, 0usize, 0usize);
+    for (path, named) in new_mp4_candidates(config, explicit, since) {
+        if !named && state.twin_settled(&path) {
+            settled += 1;
+            continue;
+        }
+        looked += 1;
+        match remux::remux_if_applicable(&config.enrich.ffmpeg_path, &config.ffprobe_path, &path, dry_run, None) {
+            Ok(remux::Outcome::Fine) | Ok(remux::Outcome::Skipped(_)) => {
+                if !dry_run {
+                    state.twin_record(&path);
+                }
+            }
+            Ok(remux::Outcome::WouldRemux(plan)) => {
+                planned += 1;
+                println!("would add stereo twin: {}{}", path.display(), describe_plan(&plan));
+            }
+            Ok(remux::Outcome::Remuxed(plan)) => {
+                added += 1;
+                println!("stereo twin added: {}{}", path.display(), describe_plan(&plan));
+                state.twin_record(&path);
+                state.restamp(&path);
+            }
+            Err(err) => eprintln!("{}: stereo twin failed: {err:#}", path.display()),
+        }
+    }
+    if looked + settled > 0 {
+        if dry_run {
+            println!("twins: {looked} looked at, {planned} would get a stereo twin, {settled} unchanged since an earlier look");
+        } else {
+            println!("twins: {looked} looked at, {added} given a stereo twin, {settled} unchanged since an earlier look");
+        }
+    }
 }
 
 /// "YYYY-MM-DD" as unix seconds at the start of that day (UTC).
@@ -644,20 +761,13 @@ fn normalize_loudness(config: &ScannerConfig, job: &LoudnessJob, state: &mut Lou
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let since = match config.enrich.loudness_since.as_deref() {
-            Some(text) => parse_day(text).or_else(|| {
-                eprintln!("loudness: loudness_since = {text:?} is not a YYYY-MM-DD date; automatic pass skipped");
-                None
-            }),
-            None => {
-                if !state.started() {
-                    println!(
-                        "loudness: media arriving from now on is measured; what is already here is left alone (set loudness_since in [enrich] to reach back, or name files with --loudness-path)"
-                    );
-                }
-                Some(state.since_or_start(now))
-            }
-        };
+        let since = cutoff(
+            "loudness",
+            config.enrich.loudness_since.as_deref(),
+            state.started(),
+            || state.since_or_start(now),
+            "set loudness_since in [enrich] to reach back, or name files with --loudness-path",
+        );
         let db_path = config.db_path.clone().unwrap_or_else(media_db::open::default_db_path);
         let added = media_db::open_ro(&db_path)
             .and_then(|conn| media_db::queries::files::video_added_times(&conn));
@@ -1003,6 +1113,9 @@ fn main() -> Result<()> {
             };
             normalize_loudness(&config, &job, &mut loudness_state);
         }
+        if do_remux || !args.twin_path.is_empty() {
+            twin_mp4_files(&config, true, do_remux, &args.twin_path, &mut loudness_state);
+        }
     } else {
         // Remux first so subtitle embedding sees the resulting MP4s, and
         // subtitles before titles so the title pass sees the final file.
@@ -1040,6 +1153,13 @@ fn main() -> Result<()> {
                 twin_levels: &twin_levels,
             };
             normalize_loudness(&config, &job, &mut loudness_state);
+        }
+        // Loudness first: a raised default is a stereo mixdown already.
+        // The plain twin is the fallback for new .mp4s it left alone.
+        if do_remux || !args.twin_path.is_empty() {
+            twin_mp4_files(&config, false, do_remux, &args.twin_path, &mut loudness_state);
+        }
+        {
             loudness_state.forget_missing();
             if let Err(err) = loudness_state.save() {
                 eprintln!("could not save the loudness memory: {err}");
