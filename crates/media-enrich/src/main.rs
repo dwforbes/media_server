@@ -840,20 +840,27 @@ fn normalize_loudness(config: &ScannerConfig, job: &LoudnessJob, state: &mut Lou
                 );
                 ("quiet, but no headroom for a linear raise".into(), Some(m), None)
             }
-            Ok(loudness::Outcome::WouldNormalize { measured: m, gain }) => {
+            Ok(loudness::Outcome::WouldNormalize { measured: m, tracks }) => {
                 println!(
-                    "loudness: {shown} — {:.1} LUFS, peak {:.1} dBTP: would add a {gain:+.1} dB default track",
-                    m.integrated, m.true_peak
+                    "loudness: {shown} — {:.1} LUFS, peak {:.1} dBTP: would add {}",
+                    m.integrated, m.true_peak, loudness::describe(&tracks)
                 );
                 continue;
             }
-            Ok(loudness::Outcome::Normalized { before, after, gain }) => {
+            Ok(loudness::Outcome::Normalized { before, tracks }) => {
                 raised += 1;
+                let added: Vec<loudness::Raised> = tracks.iter().map(|(t, _)| t.clone()).collect();
+                let now = tracks
+                    .iter()
+                    .map(|(_, after)| format!("{:.1} LUFS, peak {:.1} dBTP", after.integrated, after.true_peak))
+                    .collect::<Vec<_>>()
+                    .join("; ");
                 println!(
-                    "loudness: {shown} — {:.1} LUFS, peak {:.1} dBTP: added a {gain:+.1} dB default track (now {:.1} LUFS, peak {:.1} dBTP); the original follows it",
-                    before.integrated, before.true_peak, after.integrated, after.true_peak
+                    "loudness: {shown} — {:.1} LUFS, peak {:.1} dBTP: added {} (now {now}); the original follows",
+                    before.integrated, before.true_peak, loudness::describe(&added)
                 );
-                ("normalized".into(), Some(before), Some(gain))
+                let gain = added.last().map(|t| t.gain);
+                ("normalized".into(), Some(before), gain)
             }
             Err(err) => {
                 eprintln!("loudness: {shown} — failed: {err:#}");
@@ -886,6 +893,12 @@ fn describe_plan(plan: &remux::Plan) -> String {
             out.push_str(&format!(
                 " [twin raised {gain:+.1} dB from {:.1} LUFS]",
                 level.measured.integrated
+            ));
+        }
+        if let Some((measured, gain)) = level.wide {
+            out.push_str(&format!(
+                " [+ a {gain:+.1} dB copy in the source layout, from {:.1} LUFS]",
+                measured.integrated
             ));
         }
     }

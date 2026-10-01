@@ -805,8 +805,9 @@ leave room, adds a copy raised by a **plain linear gain** as the new default tra
 with the original right behind it:
 
 ```
-loudness: Movies/Halloween (1978).mp4 — -38.2 LUFS, peak -12.3 dBTP: added a +10.2 dB
-          default track (now -28.0 LUFS, peak -2.1 dBTP); the original follows it
+loudness: Movies/Halloween (1978).mp4 — -38.2 LUFS, peak -12.3 dBTP: added a +9.0 dB
+          stereo mixdown and a +10.2 dB 5.1 track (now -30.1 LUFS, peak -2.4 dBTP;
+          -28.0 LUFS, peak -2.1 dBTP); the original follows
 ```
 
 Nothing is ever compressed or limited. The gain is the smaller of what the target
@@ -821,18 +822,21 @@ a change to the mix, which is not this tool's to make. Files within `loudness_mi
   step's first run. The existing library is never walked for this. To do one older
   film (or a folder), name it: `media-enrich --loudness-path "/mnt/media/Movies/Halloween
   (1978).mp4"`, with `--dry-run` to see the numbers only.
-- **The raised track** is AAC, and a **stereo mixdown** whenever the source is wider
-  than stereo — so it is also the track browsers can play (Firefox skips 5.1 AAC), and
-  a file the loudness step raised needs no separate twin. The original keeps its
-  layout right behind it. The track is named "English Stereo Mixdown, normalized
-  +10.2 dB (media-enrich)" (or "Normalized +10.2 dB (media-enrich)" for a mono or
-  stereo source) in players' audio menus — which is also how a later run knows the
-  file is done. Every other stream is copied bit-for-bit, the caption record survives,
-  and the file keeps its mtime.
+- **The raised tracks** are AAC. A mono or stereo source gets one, raised in place,
+  named "English Stereo, normalized +10.2 dB (media-enrich)". A source wider than
+  stereo gets **two**: a stereo mixdown first, as the default — the track browsers can
+  play (Firefox skips 5.1 AAC), so a file this step raised needs no separate twin —
+  and the same raise in the source's own layout behind it ("English 5.1, normalized
+  +10.2 dB (media-enrich)") for receivers and VLC; the original follows both. The
+  mixdown is measured and raised on its own, since a downmix sits a little lower and
+  peaks differently (one extra decode, for quiet wide files only). The names are also
+  how a later run knows the file is done. Every other stream is copied bit-for-bit,
+  the caption record survives, and the file keeps its mtime.
 - **With remuxing**, the stereo AAC twin is an encode already, so a quiet one is
-  raised as it is made ("Stereo (AAC), normalized +9.0 dB") at no cost in quality; a
-  bare twin from an earlier remux is replaced by a raised one made afresh from the
-  Dolby or multichannel original behind it, rather than stacked on.
+  raised as it is made ("English Stereo Mixdown, normalized +9.0 dB") at no cost in
+  quality, with the raised copy in the source layout behind it just as above; a bare
+  twin from an earlier remux is replaced by raised ones made afresh from the Dolby or
+  multichannel original behind it, rather than stacked on.
 - Like the other steps that replace a media file, the mux goes to a temp file beside
   the original and is verified — stream census, duration, and a measurement of the
   new track against the arithmetic — before an atomic rename. What each file measured

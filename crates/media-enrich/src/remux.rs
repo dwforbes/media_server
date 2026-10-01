@@ -347,6 +347,8 @@ pub struct Plan {
     pub twin_reasons: Vec<String>,
     /// Per entry of `audio`: the original's name, and the twin's.
     pub names: Vec<(String, String)>,
+    /// Per entry of `audio`: the track's channel count.
+    pub channels: Vec<usize>,
     /// The track that plays by default is among the twinned: the case
     /// that matters for browsers, and the only one worth rewriting an
     /// .mp4 for.
@@ -363,8 +365,12 @@ pub struct Plan {
 pub struct TwinLevel {
     /// Input index of the track the twin is made from.
     pub index: usize,
+    /// The twin's own level: the stereo downmix for a wide source.
     pub measured: crate::loudness::Measurement,
     pub gain: Option<f64>,
+    /// A raised copy in the source's own layout to add behind the twin,
+    /// when the source is wide and quiet: its measurement and gain.
+    pub wide: Option<(crate::loudness::Measurement, f64)>,
 }
 
 impl Plan {
@@ -374,6 +380,24 @@ impl Plan {
 
     fn twin_gain(&self, index: usize) -> Option<f64> {
         self.twin_levels.iter().find(|t| t.index == index).and_then(|t| t.gain)
+    }
+
+    fn wide_raise(&self, index: usize) -> Option<f64> {
+        self.twin_levels.iter().find(|t| t.index == index).and_then(|t| t.wide).map(|(_, g)| g)
+    }
+
+    fn wide_bitrate(&self, index: usize) -> &'static str {
+        let channels = self.audio.iter().position(|(i, _)| *i == index).and_then(|n| self.channels.get(n)).copied().unwrap_or(6);
+        match channels {
+            0..=2 => "192k",
+            3..=6 => "384k",
+            _ => "512k",
+        }
+    }
+
+    /// Raised copies in the source layout added behind quiet wide twins.
+    pub fn wide_raises(&self) -> usize {
+        self.twin_levels.iter().filter(|t| t.wide.is_some()).count()
     }
 }
 
@@ -416,6 +440,7 @@ pub fn plan(probe: &Probe, srt_sidecar: bool) -> std::result::Result<Plan, Strin
                 }
                 plan.audio.push((s.index, twin));
                 plan.names.push((track_name(s), twin_name(s)));
+                plan.channels.push(s.channels);
                 previous = Some(s);
             }
             StreamKind::Subtitle => {
@@ -515,6 +540,22 @@ pub fn ffmpeg_args(
                 twin_opts.extend([format!("-filter:a:{audio_out}"), format!("volume={g:.1}dB")]);
             }
             audio_out += 1;
+            if let Some(g) = plan.wide_raise(*idx) {
+                // The same raise in the source's own layout, for players
+                // that want the wide mix loud; the original follows.
+                push("-map".into());
+                push(format!("0:{idx}"));
+                let stream = plan.names.get(n).map(|(name, _)| name.clone()).unwrap_or_default();
+                twin_opts.extend([
+                    format!("-c:a:{audio_out}"), "aac".into(),
+                    format!("-b:a:{audio_out}"), plan.wide_bitrate(*idx).into(),
+                    format!("-filter:a:{audio_out}"), format!("volume={g:.1}dB"),
+                    format!("-metadata:s:a:{audio_out}"), format!("title={stream}, normalized {g:+.1} dB (media-enrich)"),
+                    format!("-metadata:s:a:{audio_out}"), format!("handler_name={}", crate::loudness::label(g, false)),
+                    format!("-disposition:a:{audio_out}"), "0".into(),
+                ]);
+                audio_out += 1;
+            }
         }
         push("-map".into());
         push(format!("0:{idx}"));
@@ -656,17 +697,33 @@ pub fn remux_if_applicable(
         return Ok(Outcome::WouldRemux(plan));
     }
     if let Some(policy) = loudness {
-        let twinned: Vec<usize> = plan.audio.iter().filter(|(_, twin)| *twin).map(|(i, _)| *i).collect();
-        for index in twinned {
+        let twinned: Vec<(usize, usize, (String, String))> = plan
+            .audio
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, twin))| *twin)
+            .map(|(n, (i, _))| (*i, plan.channels.get(n).copied().unwrap_or(0), plan.names.get(n).cloned().unwrap_or_default()))
+            .collect();
+        for (index, channels, (name, twin)) in twinned {
+            // The twin is the stereo mixdown of the loudness step's
+            // decision; a quiet wide source also earns a raised copy in
+            // its own layout behind the twin, as that step would add.
             // A failed measurement costs the raise, not the remux.
-            match crate::loudness::measure(ffmpeg, media, &format!("0:{index}"), Some("stereo")) {
-                Ok(measured) => {
-                    let gain = match policy.decide(&measured) {
-                        crate::loudness::Verdict::Gain(g) => Some(g),
-                        _ => None,
-                    };
-                    plan.twin_levels.push(TwinLevel { index, measured, gain });
+            use crate::loudness::Decision;
+            match crate::loudness::decide(ffmpeg, media, &format!("0:{index}"), channels, policy, &twin, &name) {
+                Ok(Decision::Raise { measured, tracks }) => {
+                    let mixdown = tracks.iter().find(|t| t.layout.is_some());
+                    let wide = tracks.iter().find(|t| t.layout.is_none());
+                    match (mixdown, wide) {
+                        (Some(m), Some(w)) => plan.twin_levels.push(TwinLevel { index, measured: m.measured, gain: Some(m.gain), wide: Some((measured, w.gain)) }),
+                        (None, Some(w)) => plan.twin_levels.push(TwinLevel { index, measured, gain: Some(w.gain), wide: None }),
+                        _ => {}
+                    }
                 }
+                Ok(Decision::Normal(measured)) | Ok(Decision::NoHeadroom { measured, .. }) => {
+                    plan.twin_levels.push(TwinLevel { index, measured, gain: None, wide: None })
+                }
+                Ok(Decision::Silent) => {}
                 Err(err) => eprintln!("{}: twin loudness not measured: {err:#}", media.display()),
             }
         }
@@ -717,7 +774,7 @@ pub fn remux_if_applicable(
         }
     };
     let count = |kind: StreamKind| after.streams.iter().filter(|s| s.kind == kind).count();
-    let want_audio = plan.audio.len() + plan.twins();
+    let want_audio = plan.audio.len() + plan.twins() + plan.wide_raises();
     let want_subs = plan.subtitles.len() + plan.embed_srt as usize;
     let sane = count(StreamKind::Video) == plan.video.len()
         && count(StreamKind::Audio) == want_audio
@@ -797,10 +854,18 @@ mod tests {
         assert!(j.contains("-metadata:s:a:1 title=English 5.1"), "{j}");
         assert!(j.contains("-metadata:s:a:2 title=Commentary"), "{j}");
         // A raised twin says so in both names.
-        plan.twin_levels.push(TwinLevel { index: 1, measured: crate::loudness::Measurement { integrated: -30.0, true_peak: -4.0, range: 10.0 }, gain: Some(6.0) });
+        let m = crate::loudness::Measurement { integrated: -30.0, true_peak: -4.0, range: 10.0 };
+        plan.twin_levels.push(TwinLevel { index: 1, measured: m, gain: Some(6.0), wide: Some((m, 5.5)) });
         let j = joined(&plan);
         assert!(j.contains("title=English Stereo Mixdown, normalized +6.0 dB (media-enrich)"), "{j}");
         assert!(j.contains("handler_name=Stereo (AAC), normalized +6.0 dB (media-enrich)"), "{j}");
+        // The wide raise rides between the twin and the original: twin,
+        // raised 5.1, original 5.1, commentary.
+        assert!(j.contains("-map 0:0 -map 0:1 -map 0:1 -map 0:1 -map 0:2"), "{j}");
+        assert!(j.contains("-c:a:1 aac -b:a:1 384k -filter:a:1 volume=5.5dB -metadata:s:a:1 title=English 5.1, normalized +5.5 dB (media-enrich) -metadata:s:a:1 handler_name=Normalized +5.5 dB (media-enrich) -disposition:a:1 0"), "{j}");
+        assert!(j.contains("-metadata:s:a:2 title=English 5.1 -disposition:a:2 0"), "{j}");
+        assert!(j.contains("-metadata:s:a:3 title=Commentary -disposition:a:3 0"), "{j}");
+        assert_eq!(plan.wide_raises(), 1);
     }
 
     #[test]

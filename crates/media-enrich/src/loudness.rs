@@ -10,10 +10,12 @@
 //! default audio track (EBU R 128 integrated loudness and true peak, one
 //! audio-only decode), and when it is well under the target *and* its
 //! peaks leave room, add a copy of that track raised by a plain linear
-//! gain as the new default track, the original right behind it. A track
-//! wider than stereo is raised as a stereo mixdown, so the new track is
-//! also the one browsers can play (Firefox skips 5.1 AAC) and no
-//! separate twin is needed; the original keeps its layout. Nothing
+//! gain as the new default track, the original right behind it. A source
+//! wider than stereo gets two raised tracks: a stereo mixdown first, as
+//! the default — the one browsers can play (Firefox skips 5.1 AAC), so
+//! no separate twin is needed — and the same raise in the source's own
+//! layout behind it, for receivers and VLC; each measured and raised on
+//! its own, since a downmix has its own level and peaks. Nothing
 //! is ever compressed or limited: the gain is capped by the track's own
 //! headroom, so the mix is untouched and cannot clip. A quiet file whose
 //! peaks are already near full scale is left alone — raising it would
@@ -256,22 +258,44 @@ fn parse_probe(text: &str) -> Probe {
 /// What the rewrite will do, decided from the probe.
 #[derive(Debug, Clone, PartialEq)]
 struct Plan {
-    /// Input stream the raised track is encoded from.
+    /// Input stream the raised track(s) are encoded from.
     source: usize,
-    /// Layout the raised track is converted to first: stereo whenever
-    /// the source is wider, so the raised track doubles as the one for
-    /// browsers; none for a mono or stereo source.
-    layout: Option<&'static str>,
-    channels_out: usize,
-    /// The name a stereo mixdown shows in audio menus ("English Stereo
-    /// Mixdown"); the plain "Normalized …" label otherwise.
-    mixdown_name: Option<String>,
-    /// An un-normalized stereo twin the raised one replaces.
+    /// Its channel count: wider than stereo earns a mixdown as well.
+    channels: usize,
+    /// An un-normalized stereo twin the raised ones replace.
     drop: Option<usize>,
-    /// Audio streams kept behind the new track, in order.
+    /// Audio streams kept behind the new tracks, in order.
     keep: Vec<usize>,
     hevc_mp4: bool,
     matroska: bool,
+    /// Names for players' menus, by language and layout: the mixdown's
+    /// ("English Stereo Mixdown") and the source layout's ("English 5.1").
+    mixdown_name: String,
+    wide_name: String,
+}
+
+/// One track the rewrite adds: what it is made from, how, and its names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Raised {
+    /// Layout the source is converted to first; None keeps its own.
+    pub layout: Option<&'static str>,
+    pub channels: usize,
+    pub gain: f64,
+    /// What it measured before the raise, in the layout it is made in.
+    pub measured: Measurement,
+    title: String,
+    handler: String,
+}
+
+/// What measuring a source decided.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Decision {
+    Silent,
+    Normal(Measurement),
+    NoHeadroom { measured: Measurement, wanted: f64, headroom: f64 },
+    /// Raise: the tracks to add, in output order (a mixdown first when
+    /// the source is wide), and the source's own measurement.
+    Raise { measured: Measurement, tracks: Vec<Raised> },
 }
 
 fn is_mp4(path: &Path) -> bool {
@@ -301,43 +325,111 @@ fn plan(probe: &Probe, media: &Path) -> std::result::Result<Plan, String> {
         .find(|s| s.default)
         .or_else(|| probe.audio().next())
         .ok_or("no audio stream")?;
-    // A stereo twin remux made without this step: raise a fresh twin
-    // from the Dolby or multichannel track behind it rather than
-    // re-encode an encode.
+    // A stereo twin remux made without this step: raise afresh from the
+    // Dolby or multichannel track behind it rather than re-encode an
+    // encode, and drop the bare twin.
     let behind = probe.audio().skip_while(|s| s.index != playing.index).nth(1);
-    let (source, layout, channels_out, drop) = match behind {
+    let (source, drop) = match behind {
         Some(original)
             if playing.label.contains(TWIN_LABEL)
                 && (matches!(original.codec.as_str(), "ac3" | "eac3") || original.channels > 2) =>
         {
-            (original.index, Some("stereo"), 2, Some(playing.index))
+            (original, Some(playing.index))
         }
-        _ if playing.channels > 2 => (playing.index, Some("stereo"), 2, None),
-        _ => (playing.index, None, playing.channels.max(1), None),
+        _ => (playing, None),
     };
     let hevc = probe.streams.iter().any(|s| s.kind == Kind::Video && s.codec == "hevc");
-    let mixdown_name = layout.map(|_| {
-        let language = probe
-            .streams
-            .iter()
-            .find(|s| s.index == source)
-            .and_then(|s| s.language.as_deref())
-            .and_then(crate::remux::language_name);
-        match language {
-            Some(lang) => format!("{lang} Stereo Mixdown"),
-            None => "Stereo Mixdown".to_string(),
-        }
-    });
+    let language = source.language.as_deref().and_then(crate::remux::language_name);
+    let named = |rest: &str| match language {
+        Some(lang) => format!("{lang} {rest}"),
+        None => rest.to_string(),
+    };
     Ok(Plan {
-        source,
-        layout,
-        channels_out,
-        mixdown_name,
+        source: source.index,
+        channels: source.channels.max(1),
         drop,
         keep: probe.audio().map(|s| s.index).filter(|i| Some(*i) != drop).collect(),
         hevc_mp4: hevc && is_mp4(media),
         matroska: is_matroska(media),
+        mixdown_name: named("Stereo Mixdown"),
+        wide_name: named(&match source.channels {
+            1 => "Mono".to_string(),
+            2 => "Stereo".to_string(),
+            n => crate::remux::layout_name(n),
+        }),
     })
+}
+
+/// Measure a source and decide what to add. The source's own layout
+/// decides whether it is quiet at all (one decode, the common cost);
+/// only a quiet wide source is decoded a second time, as its stereo
+/// downmix, for the mixdown's own gain — a downmix sits a little lower
+/// and peaks differently. Shared with the remux twin path.
+pub fn decide(
+    ffmpeg: &str,
+    media: &Path,
+    spec: &str,
+    channels: usize,
+    policy: &Policy,
+    mixdown_name: &str,
+    wide_name: &str,
+) -> Result<Decision> {
+    let measured = measure(ffmpeg, media, spec, None)?;
+    if measured.integrated <= SILENCE_LUFS {
+        return Ok(Decision::Silent);
+    }
+    let gain = match policy.decide(&measured) {
+        Verdict::Normal => return Ok(Decision::Normal(measured)),
+        Verdict::NoHeadroom { wanted, headroom } => {
+            return Ok(Decision::NoHeadroom { measured, wanted, headroom })
+        }
+        Verdict::Gain(gain) => gain,
+    };
+    let mut tracks = Vec::new();
+    if channels > 2 {
+        let downmix = measure(ffmpeg, media, spec, Some("stereo"))?;
+        // Its own gain where the policy grants one; otherwise as much of
+        // the source's raise as its peaks allow (a downmix of a quiet
+        // track is quiet too, so this is a corner).
+        let mixdown_gain = match policy.decide(&downmix) {
+            Verdict::Gain(g) => g,
+            _ => ((gain.min(CEILING_DBTP - downmix.true_peak).max(0.0)) * 10.0).floor() / 10.0,
+        };
+        tracks.push(Raised {
+            layout: Some("stereo"),
+            channels: 2,
+            gain: mixdown_gain,
+            measured: downmix,
+            title: format!("{mixdown_name}, normalized {mixdown_gain:+.1} dB (media-enrich)"),
+            handler: label(mixdown_gain, true),
+        });
+    }
+    tracks.push(Raised {
+        layout: None,
+        channels,
+        gain,
+        measured,
+        title: format!("{wide_name}, normalized {gain:+.1} dB (media-enrich)"),
+        handler: label(gain, false),
+    });
+    Ok(Decision::Raise { measured, tracks })
+}
+
+/// "a +9.0 dB stereo mixdown and a +8.0 dB 5.1 track", for the log.
+pub fn describe(tracks: &[Raised]) -> String {
+    let one = |t: &Raised| match t.layout {
+        Some(_) => format!("a {:+.1} dB stereo mixdown", t.gain),
+        None => format!(
+            "a {:+.1} dB {} track",
+            t.gain,
+            match t.channels {
+                1 => "mono".to_string(),
+                2 => "stereo".to_string(),
+                n => crate::remux::layout_name(n),
+            }
+        ),
+    };
+    tracks.iter().map(one).collect::<Vec<_>>().join(" and ")
 }
 
 const DONE: &str = "already carries a normalized track";
@@ -351,19 +443,21 @@ fn bitrate(channels: usize) -> &'static str {
     }
 }
 
-fn ffmpeg_args(plan: &Plan, gain: f64, input: &Path, keep_encoder: Option<&str>, output: &Path) -> Vec<std::ffi::OsString> {
+fn ffmpeg_args(plan: &Plan, tracks: &[Raised], input: &Path, keep_encoder: Option<&str>, output: &Path) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = Vec::new();
     for a in ["-v", "error", "-nostdin", "-y", "-i"] {
         args.push(a.into());
     }
     args.push(input.into());
     let mut push = |a: String| args.push(a.into());
-    // Video (cover art included), the raised track, the audio kept behind
-    // it, subtitles; Matroska attachments (fonts) come along.
+    // Video (cover art included), the raised track(s), the audio kept
+    // behind them, subtitles; Matroska attachments (fonts) come along.
     push("-map".into());
     push("0:v?".into());
-    push("-map".into());
-    push(format!("0:{}", plan.source));
+    for _ in tracks {
+        push("-map".into());
+        push(format!("0:{}", plan.source));
+    }
     for idx in &plan.keep {
         push("-map".into());
         push(format!("0:{idx}"));
@@ -376,30 +470,27 @@ fn ffmpeg_args(plan: &Plan, gain: f64, input: &Path, keep_encoder: Option<&str>,
     }
     push("-c".into());
     push("copy".into());
-    push("-c:a:0".into());
-    push("aac".into());
-    push("-b:a:0".into());
-    push(bitrate(plan.channels_out).into());
-    push("-filter:a:0".into());
-    push(match plan.layout {
-        Some(l) => format!("aformat=channel_layouts={l},volume={gain:.1}dB"),
-        None => format!("volume={gain:.1}dB"),
-    });
-    // The title is what players list; the handler name is the marker
-    // by which this step and the twin pass know the track (the twin
-    // form for a mixdown, so a later remux sees a twin ahead already).
-    let handler = label(gain, plan.layout.is_some());
-    let title = match &plan.mixdown_name {
-        Some(name) => format!("{name}, normalized {gain:+.1} dB (media-enrich)"),
-        None => handler.clone(),
-    };
-    push("-metadata:s:a:0".into());
-    push(format!("title={title}"));
-    push("-metadata:s:a:0".into());
-    push(format!("handler_name={handler}"));
-    push("-disposition:a:0".into());
-    push("default".into());
-    for n in 1..=plan.keep.len() {
+    for (n, t) in tracks.iter().enumerate() {
+        push(format!("-c:a:{n}"));
+        push("aac".into());
+        push(format!("-b:a:{n}"));
+        push(bitrate(t.channels).into());
+        push(format!("-filter:a:{n}"));
+        push(match t.layout {
+            Some(l) => format!("aformat=channel_layouts={l},volume={:.1}dB", t.gain),
+            None => format!("volume={:.1}dB", t.gain),
+        });
+        // The title is what players list; the handler name is the marker
+        // by which this step and the twin pass know the track (the twin
+        // form for a mixdown, so a later remux sees a twin ahead already).
+        push(format!("-metadata:s:a:{n}"));
+        push(format!("title={}", t.title));
+        push(format!("-metadata:s:a:{n}"));
+        push(format!("handler_name={}", t.handler));
+        push(format!("-disposition:a:{n}"));
+        push(if n == 0 { "default".into() } else { "0".into() });
+    }
+    for n in tracks.len()..tracks.len() + plan.keep.len() {
         push(format!("-disposition:a:{n}"));
         push("0".into());
     }
@@ -425,8 +516,10 @@ pub enum Outcome {
     Normal(Measurement),
     NoHeadroom { measured: Measurement, wanted: f64, headroom: f64 },
     /// Dry run: what a real run would do.
-    WouldNormalize { measured: Measurement, gain: f64 },
-    Normalized { before: Measurement, after: Measurement, gain: f64 },
+    WouldNormalize { measured: Measurement, tracks: Vec<Raised> },
+    /// Done: the source's measurement, and each added track with what
+    /// it measured afterwards.
+    Normalized { before: Measurement, tracks: Vec<(Raised, Measurement)> },
 }
 
 /// Measure one file and, when the policy says so, give it a raised
@@ -447,19 +540,18 @@ pub fn normalize_if_applicable(
         Err(why) if why == DONE => return Ok(Outcome::AlreadyNormalized),
         Err(why) => return Ok(Outcome::Skipped(why)),
     };
-    let measured = measure(ffmpeg, media, &format!("0:{}", plan.source), plan.layout)?;
-    if measured.integrated <= SILENCE_LUFS {
-        return Ok(Outcome::Skipped("the audio is silent".into()));
-    }
-    let gain = match policy.decide(&measured) {
-        Verdict::Normal => return Ok(Outcome::Normal(measured)),
-        Verdict::NoHeadroom { wanted, headroom } => {
+    let (measured, tracks) = match decide(
+        ffmpeg, media, &format!("0:{}", plan.source), plan.channels, policy, &plan.mixdown_name, &plan.wide_name,
+    )? {
+        Decision::Silent => return Ok(Outcome::Skipped("the audio is silent".into())),
+        Decision::Normal(m) => return Ok(Outcome::Normal(m)),
+        Decision::NoHeadroom { measured, wanted, headroom } => {
             return Ok(Outcome::NoHeadroom { measured, wanted, headroom })
         }
-        Verdict::Gain(gain) => gain,
+        Decision::Raise { measured, tracks } => (measured, tracks),
     };
     if dry_run {
-        return Ok(Outcome::WouldNormalize { measured, gain });
+        return Ok(Outcome::WouldNormalize { measured, tracks });
     }
 
     let dir = media.parent().unwrap_or_else(|| Path::new("."));
@@ -468,7 +560,7 @@ pub fn normalize_if_applicable(
     let temp = crate::remux::temp_beside(dir, &stem, "loudness-tmp", &ext);
     let record = media_db::captions::recorded_hash(&before.encoder).map(|_| before.encoder.as_str());
     let status = Command::new(ffmpeg)
-        .args(ffmpeg_args(&plan, gain, media, record, &temp))
+        .args(ffmpeg_args(&plan, &tracks, media, record, &temp))
         .status()
         .with_context(|| format!("running {ffmpeg}"))?;
     if !status.success() {
@@ -479,13 +571,13 @@ pub fn normalize_if_applicable(
         let _ = f.sync_all();
     }
 
-    // Verify before touching the original: the same streams plus one
-    // (less a replaced twin), the raised track first and labelled, the
-    // caption record intact, the duration unchanged — and the new track
-    // measuring where the arithmetic says it should.
-    let verified = (|| -> Result<Measurement> {
+    // Verify before touching the original: the same streams plus the
+    // new ones (less a replaced twin), the raised track first and
+    // labelled, the caption record intact, the duration unchanged — and
+    // each new track measuring where the arithmetic says it should.
+    let verified = (|| -> Result<Vec<Measurement>> {
         let after = probe(ffprobe, &temp).context("probing the result")?;
-        let want_audio = before.count(Kind::Audio) + 1 - plan.drop.is_some() as usize;
+        let want_audio = before.count(Kind::Audio) + tracks.len() - plan.drop.is_some() as usize;
         let first = after.audio().next();
         let sane = after.count(Kind::Video) == before.count(Kind::Video)
             && after.count(Kind::Audio) == want_audio
@@ -503,18 +595,22 @@ pub fn normalize_if_applicable(
                 if record.is_none() || after.encoder == before.encoder { "ok" } else { "lost" }
             );
         }
-        let level = measure(ffmpeg, &temp, "0:a:0", None).context("measuring the new track")?;
-        let expected = measured.integrated + gain;
-        if (level.integrated - expected).abs() > 1.5 || level.true_peak > -0.5 {
-            bail!(
-                "the new track measures {:.1} LUFS, peak {:.1} dBTP (expected about {expected:.1}, peak under {CEILING_DBTP:.0})",
-                level.integrated, level.true_peak
-            );
+        let mut levels = Vec::new();
+        for (n, t) in tracks.iter().enumerate() {
+            let level = measure(ffmpeg, &temp, &format!("0:a:{n}"), None).context("measuring the new track")?;
+            let expected = t.measured.integrated + t.gain;
+            if (level.integrated - expected).abs() > 1.5 || level.true_peak > -0.5 {
+                bail!(
+                    "new track {n} measures {:.1} LUFS, peak {:.1} dBTP (expected about {expected:.1}, peak under {CEILING_DBTP:.0})",
+                    level.integrated, level.true_peak
+                );
+            }
+            levels.push(level);
         }
-        Ok(level)
+        Ok(levels)
     })();
-    let after = match verified {
-        Ok(level) => level,
+    let levels = match verified {
+        Ok(levels) => levels,
         Err(err) => {
             let _ = std::fs::remove_file(&temp);
             return Err(err.context("verification failed; original untouched"));
@@ -529,7 +625,7 @@ pub fn normalize_if_applicable(
         }
     }
     std::fs::rename(&temp, media).with_context(|| format!("replacing {}", media.display()))?;
-    Ok(Outcome::Normalized { before: measured, after, gain })
+    Ok(Outcome::Normalized { before: measured, tracks: tracks.into_iter().zip(levels).collect() })
 }
 
 #[cfg(test)]
@@ -581,26 +677,36 @@ mod tests {
             ..Default::default()
         };
         let p = plan(&plain, Path::new("x.mp4")).unwrap();
-        assert_eq!((p.source, p.layout, p.channels_out, p.drop, p.keep.clone()), (1, Some("stereo"), 2, None, vec![1]));
-        assert_eq!(p.mixdown_name.as_deref(), Some("Stereo Mixdown"));
+        assert_eq!((p.source, p.channels, p.drop, p.keep.clone()), (1, 6, None, vec![1]));
+        assert_eq!((p.mixdown_name.as_str(), p.wide_name.as_str()), ("Stereo Mixdown", "5.1"));
         assert!(p.hevc_mp4 && !p.matroska);
-        let args: Vec<String> = ffmpeg_args(&p, 10.2, Path::new("x.mp4"), Some("rec"), Path::new("t.mp4"))
+        let m = Measurement { integrated: -38.0, true_peak: -12.0, range: 10.0 };
+        let tracks = vec![
+            Raised { layout: Some("stereo"), channels: 2, gain: 9.0, measured: m, title: "Stereo Mixdown, normalized +9.0 dB (media-enrich)".into(), handler: label(9.0, true) },
+            Raised { layout: None, channels: 6, gain: 10.2, measured: m, title: "5.1, normalized +10.2 dB (media-enrich)".into(), handler: label(10.2, false) },
+        ];
+        let args: Vec<String> = ffmpeg_args(&p, &tracks, Path::new("x.mp4"), Some("rec"), Path::new("t.mp4"))
             .iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let joined = args.join(" ");
-        assert!(joined.contains("-map 0:v? -map 0:1 -map 0:1 -map 0:s? -c copy -c:a:0 aac -b:a:0 192k -filter:a:0 aformat=channel_layouts=stereo,volume=10.2dB"), "{joined}");
-        assert!(joined.contains("-metadata:s:a:0 title=Stereo Mixdown, normalized +10.2 dB (media-enrich) -metadata:s:a:0 handler_name=Stereo (AAC), normalized +10.2 dB (media-enrich)"), "{joined}");
-        assert!(joined.contains("-disposition:a:0 default -disposition:a:1 0 -tag:v hvc1 -metadata encoding_tool=rec"), "{joined}");
+        assert!(joined.contains("-map 0:v? -map 0:1 -map 0:1 -map 0:1 -map 0:s? -c copy -c:a:0 aac -b:a:0 192k -filter:a:0 aformat=channel_layouts=stereo,volume=9.0dB"), "{joined}");
+        assert!(joined.contains("-metadata:s:a:0 title=Stereo Mixdown, normalized +9.0 dB (media-enrich) -metadata:s:a:0 handler_name=Stereo (AAC), normalized +9.0 dB (media-enrich) -disposition:a:0 default"), "{joined}");
+        assert!(joined.contains("-c:a:1 aac -b:a:1 384k -filter:a:1 volume=10.2dB -metadata:s:a:1 title=5.1, normalized +10.2 dB (media-enrich) -metadata:s:a:1 handler_name=Normalized +10.2 dB (media-enrich) -disposition:a:1 0"), "{joined}");
+        assert!(joined.contains("-disposition:a:2 0 -tag:v hvc1 -metadata encoding_tool=rec"), "{joined}");
+        assert_eq!(describe(&tracks), "a +9.0 dB stereo mixdown and a +10.2 dB 5.1 track");
         // A stereo source is raised as it is, under the plain label.
         let stereo = Probe {
             streams: vec![stream(0, Kind::Video, "h264", 0, true, ""), stream(1, Kind::Audio, "aac", 2, true, "")],
             ..Default::default()
         };
         let p = plan(&stereo, Path::new("x.mp4")).unwrap();
-        assert_eq!((p.layout, p.channels_out, p.mixdown_name.clone()), (None, 2, None));
-        let j = ffmpeg_args(&p, 6.0, Path::new("x.mp4"), None, Path::new("t.mp4")).iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
-        assert!(j.contains("title=Normalized +6.0 dB (media-enrich) -metadata:s:a:0 handler_name=Normalized +6.0 dB (media-enrich)"), "{j}");
+        assert_eq!((p.channels, p.wide_name.as_str()), (2, "Stereo"));
+        let one = vec![Raised { layout: None, channels: 2, gain: 6.0, measured: m, title: "Stereo, normalized +6.0 dB (media-enrich)".into(), handler: label(6.0, false) }];
+        let j = ffmpeg_args(&p, &one, Path::new("x.mp4"), None, Path::new("t.mp4")).iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(j.contains("-map 0:v? -map 0:1 -map 0:1 -map 0:s? -c copy -c:a:0 aac -b:a:0 192k -filter:a:0 volume=6.0dB -metadata:s:a:0 title=Stereo, normalized +6.0 dB (media-enrich)"), "{j}");
+        assert!(j.contains("-disposition:a:0 default -disposition:a:1 0 "), "{j}");
+        assert_eq!(describe(&one), "a +6.0 dB stereo track");
 
-        // A twin made before this step existed: a new one from the Dolby
+        // A twin made before this step existed: a new one from the Dolby        // A twin made before this step existed: a new one from the Dolby
         // track behind it takes its place.
         let twinned = Probe {
             streams: vec![
@@ -611,7 +717,7 @@ mod tests {
             ..Default::default()
         };
         let p = plan(&twinned, Path::new("x.mkv")).unwrap();
-        assert_eq!((p.source, p.layout, p.drop, p.keep.clone()), (2, Some("stereo"), Some(1), vec![2]));
+        assert_eq!((p.source, p.channels, p.drop, p.keep.clone()), (2, 6, Some(1), vec![2]));
         assert!(label(9.0, true).starts_with(TWIN_LABEL) && is_marked(&label(9.0, true)));
 
         // Done once is done.
