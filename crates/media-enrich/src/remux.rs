@@ -60,6 +60,9 @@ pub struct Stream {
     pub default: bool,
     /// Title and handler name, where a twin of ours says what it is.
     pub label: String,
+    /// The track's own title, when it has one (an .mkv's, as ffprobe
+    /// reports it; an .mp4's from its name box, which ffprobe does not).
+    pub title: String,
 }
 
 /// Stream census plus duration, as ffprobe reports them.
@@ -105,6 +108,7 @@ fn parse_probe(text: &str) -> Probe {
                     channels: 0,
                     default: false,
                     label: String::new(),
+                    title: String::new(),
                 })
             }
             "[/STREAM]" => probe.streams.extend(current.take()),
@@ -131,6 +135,9 @@ fn parse_probe(text: &str) -> Probe {
                     "disposition:default" => s.default = v == "1",
                     "tag:language" => s.language = Some(v.to_string()).filter(|l| !l.is_empty() && l != "und"),
                     "tag:title" | "tag:handler_name" => {
+                        if key.ends_with("title") {
+                            s.title = v.to_string();
+                        }
                         s.label.push_str(v);
                         s.label.push(' ');
                     }
@@ -151,6 +158,165 @@ const AUDIO_COPY: &[&str] = &["aac", "mp3", "opus", "alac", "ac3", "eac3"];
 /// Audio codecs that always get a browser-playable AAC twin. A track of
 /// any codec gets one when it is the default and wider than stereo.
 const AUDIO_TWIN: &[&str] = &["ac3", "eac3"];
+
+/// What a language tag means to a viewer, for the common ones; anything
+/// else is left off the track name rather than shown as a code.
+pub fn language_name(tag: &str) -> Option<&'static str> {
+    Some(match tag.to_ascii_lowercase().as_str() {
+        "eng" | "en" => "English",
+        "fre" | "fra" | "fr" => "French",
+        "ger" | "deu" | "de" => "German",
+        "spa" | "es" => "Spanish",
+        "ita" | "it" => "Italian",
+        "por" | "pt" => "Portuguese",
+        "dut" | "nld" | "nl" => "Dutch",
+        "swe" | "sv" => "Swedish",
+        "nor" | "nob" | "no" => "Norwegian",
+        "dan" | "da" => "Danish",
+        "fin" | "fi" => "Finnish",
+        "pol" | "pl" => "Polish",
+        "cze" | "ces" | "cs" => "Czech",
+        "hun" | "hu" => "Hungarian",
+        "gre" | "ell" | "el" => "Greek",
+        "rus" | "ru" => "Russian",
+        "ukr" | "uk" => "Ukrainian",
+        "tur" | "tr" => "Turkish",
+        "heb" | "he" => "Hebrew",
+        "ara" | "ar" => "Arabic",
+        "hin" | "hi" => "Hindi",
+        "jpn" | "ja" => "Japanese",
+        "kor" | "ko" => "Korean",
+        "chi" | "zho" | "zh" => "Chinese",
+        "tha" | "th" => "Thai",
+        _ => return None,
+    })
+}
+
+/// The name a track shows in a player's audio menu — the MP4 name box,
+/// which Safari and VLC list (and ffprobe does not show). A track that
+/// came with a title keeps it; the rest are named by language and
+/// layout: "English 5.1", "English 5.1 Dolby Digital Plus", "French
+/// Stereo". The twin's name, "English Stereo Mixdown", says what it is
+/// next to the original.
+fn track_name(s: &Stream) -> String {
+    if !s.title.trim().is_empty() {
+        return s.title.trim().to_string();
+    }
+    let codec = match s.codec.as_str() {
+        "ac3" => " Dolby Digital",
+        "eac3" => " Dolby Digital Plus",
+        _ => "",
+    };
+    let layout = match s.channels {
+        1 => "Mono".to_string(),
+        2 => "Stereo".to_string(),
+        n => layout_name(n),
+    };
+    with_language(s, &format!("{layout}{codec}"))
+}
+
+fn twin_name(s: &Stream) -> String {
+    with_language(s, "Stereo Mixdown")
+}
+
+fn with_language(s: &Stream, rest: &str) -> String {
+    match s.language.as_deref().and_then(language_name) {
+        Some(lang) if rest.is_empty() => lang.to_string(),
+        Some(lang) => format!("{lang} {rest}"),
+        None => rest.to_string(),
+    }
+}
+
+/// Track names from an .mp4's own boxes (moov/trak/udta/name), one per
+/// trak in file order, which is also ffmpeg's stream order. ffmpeg's
+/// reader ignores that box, so a remux would otherwise lose the names.
+pub fn mp4_track_names(path: &Path) -> std::io::Result<Vec<Option<String>>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let mut pos = 0u64;
+    while pos + 8 <= len {
+        f.seek(SeekFrom::Start(pos))?;
+        let mut head = [0u8; 8];
+        f.read_exact(&mut head)?;
+        let mut size = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as u64;
+        let mut header = 8u64;
+        if size == 1 {
+            let mut large = [0u8; 8];
+            f.read_exact(&mut large)?;
+            size = u64::from_be_bytes(large);
+            header = 16;
+        } else if size == 0 {
+            size = len - pos;
+        }
+        if &head[4..8] == b"moov" {
+            let body = size.saturating_sub(header).min(64 << 20) as usize;
+            let mut moov = vec![0u8; body];
+            f.read_exact(&mut moov)?;
+            return Ok(names_in_moov(&moov));
+        }
+        if size < header {
+            break;
+        }
+        pos += size;
+    }
+    Ok(Vec::new())
+}
+
+/// Walk a box's children, calling `f` with each child's type and body.
+fn boxes(data: &[u8], mut f: impl FnMut(&[u8], &[u8])) {
+    let mut pos = 0usize;
+    while pos + 8 <= data.len() {
+        let size = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let kind = &data[pos + 4..pos + 8];
+        let (header, size) = match size {
+            0 => (8, data.len() - pos),
+            1 if pos + 16 <= data.len() => {
+                let mut large = [0u8; 8];
+                large.copy_from_slice(&data[pos + 8..pos + 16]);
+                (16, u64::from_be_bytes(large).min(usize::MAX as u64) as usize)
+            }
+            s => (8, s),
+        };
+        if size < header || pos + size > data.len() {
+            break;
+        }
+        f(kind, &data[pos + header..pos + size]);
+        pos += size;
+    }
+}
+
+fn names_in_moov(moov: &[u8]) -> Vec<Option<String>> {
+    let mut names = Vec::new();
+    boxes(moov, |kind, trak| {
+        if kind != b"trak" {
+            return;
+        }
+        let mut name = None;
+        boxes(trak, |kind, udta| {
+            if kind != b"udta" {
+                return;
+            }
+            boxes(udta, |kind, body| {
+                if kind == b"name" && name.is_none() {
+                    name = Some(udta_text(body));
+                }
+            });
+        });
+        names.push(name.filter(|n| !n.is_empty()));
+    });
+    names
+}
+
+/// A udta text item: either a bare string, or (QuickTime style, and
+/// ffmpeg's) a 16-bit length, a 16-bit language code, then the text.
+fn udta_text(body: &[u8]) -> String {
+    let text = match body {
+        [a, b, _, _, rest @ ..] if u16::from_be_bytes([*a, *b]) as usize == rest.len() => rest,
+        _ => body,
+    };
+    String::from_utf8_lossy(text).trim_matches(char::from(0)).trim().to_string()
+}
 
 /// A channel count as a person would say it.
 pub fn layout_name(channels: usize) -> String {
@@ -179,6 +345,8 @@ pub struct Plan {
     pub twin_levels: Vec<TwinLevel>,
     /// What each twin stands in for ("eac3 5.1", "aac 5.1"), in order.
     pub twin_reasons: Vec<String>,
+    /// Per entry of `audio`: the original's name, and the twin's.
+    pub names: Vec<(String, String)>,
     /// The track that plays by default is among the twinned: the case
     /// that matters for browsers, and the only one worth rewriting an
     /// .mp4 for.
@@ -247,6 +415,7 @@ pub fn plan(probe: &Probe, srt_sidecar: bool) -> std::result::Result<Plan, Strin
                     plan.default_twin |= is_playing;
                 }
                 plan.audio.push((s.index, twin));
+                plan.names.push((track_name(s), twin_name(s)));
                 previous = Some(s);
             }
             StreamKind::Subtitle => {
@@ -315,23 +484,30 @@ pub fn ffmpeg_args(
     // Map first, then codec/disposition options by output audio ordinal.
     let mut audio_out = 0usize;
     let mut twin_opts: Vec<String> = Vec::new();
-    for (idx, twin) in &plan.audio {
+    let no_names = (String::new(), String::new());
+    for (n, (idx, twin)) in plan.audio.iter().enumerate() {
+        let (original_name, twin_name) = plan.names.get(n).unwrap_or(&no_names);
         if *twin {
             push("-map".into());
             push(format!("0:{idx}"));
-            // MP4 has no per-track title; the handler name is what
-            // players list in their audio-track menu. A raised twin says
-            // so there (which is also how the loudness step knows).
+            // Two names: the title (MP4's name box) is what players list
+            // in their audio menu; the handler name is the marker by
+            // which this pass and the loudness step recognise a twin of
+            // ours, raised or not.
             let gain = plan.twin_gain(*idx);
-            let name = match gain {
-                Some(g) => crate::loudness::label(g, true),
-                None => crate::loudness::TWIN_LABEL.to_string(),
+            let (title, handler) = match gain {
+                Some(g) => (
+                    format!("{twin_name}, normalized {g:+.1} dB (media-enrich)"),
+                    crate::loudness::label(g, true),
+                ),
+                None => (twin_name.clone(), crate::loudness::TWIN_LABEL.to_string()),
             };
             twin_opts.extend([
                 format!("-c:a:{audio_out}"), "aac".into(),
                 format!("-b:a:{audio_out}"), "192k".into(),
                 format!("-ac:a:{audio_out}"), "2".into(),
-                format!("-metadata:s:a:{audio_out}"), format!("handler_name={name}"),
+                format!("-metadata:s:a:{audio_out}"), format!("title={title}"),
+                format!("-metadata:s:a:{audio_out}"), format!("handler_name={handler}"),
                 format!("-disposition:a:{audio_out}"), if audio_out == 0 { "default".into() } else { "0".into() },
             ]);
             if let Some(g) = gain {
@@ -342,8 +518,11 @@ pub fn ffmpeg_args(
         }
         push("-map".into());
         push(format!("0:{idx}"));
-        // Originals: default only when nothing precedes them.
+        // Originals: default only when nothing precedes them. The name
+        // is set outright — its own if it had one — since ffmpeg's
+        // reader does not pick an .mp4's up to copy.
         twin_opts.extend([
+            format!("-metadata:s:a:{audio_out}"), format!("title={original_name}"),
             format!("-disposition:a:{audio_out}"),
             if audio_out == 0 { "default".into() } else { "0".into() },
         ]);
@@ -451,7 +630,18 @@ pub fn remux_if_applicable(
     let srt_bytes = media_db::sidecar::read_capped(&srt, media_db::sidecar::MAX_TEXT).unwrap_or_default();
     let srt_text = if srt_bytes.is_empty() { None } else { decode_subtitle_text(&srt_bytes) };
 
-    let before = probe(ffprobe, media)?;
+    let mut before = probe(ffprobe, media)?;
+    if !mkv {
+        // Titles live in a box ffprobe does not report; read them so the
+        // rewrite keeps them.
+        if let Ok(names) = mp4_track_names(media) {
+            for s in before.streams.iter_mut() {
+                if let Some(Some(name)) = names.get(s.index) {
+                    s.title = name.clone();
+                }
+            }
+        }
+    }
     let mut plan = match plan(&before, srt_text.is_some()) {
         Ok(plan) => plan,
         Err(why) if mkv => return Ok(Outcome::Skipped(why)),
@@ -567,7 +757,76 @@ mod tests {
     use super::*;
 
     fn s(index: usize, kind: StreamKind, codec: &str) -> Stream {
-        Stream { index, kind, codec: codec.into(), language: None, dovi: false, channels: 0, default: false, label: String::new() }
+        Stream { index, kind, codec: codec.into(), language: None, dovi: false, channels: 0, default: false, label: String::new(), title: String::new() }
+    }
+
+    #[test]
+    fn tracks_are_named_by_language_and_layout_unless_titled() {
+        let mut t = audio(1, "aac", 6, true, "");
+        t.language = Some("eng".into());
+        assert_eq!(track_name(&t), "English 5.1");
+        assert_eq!(twin_name(&t), "English Stereo Mixdown");
+        t.codec = "eac3".into();
+        assert_eq!(track_name(&t), "English 5.1 Dolby Digital Plus");
+        t.codec = "ac3".into();
+        t.channels = 2;
+        t.language = Some("fra".into());
+        assert_eq!(track_name(&t), "French Stereo Dolby Digital");
+        t.language = Some("xyz".into());
+        t.codec = "aac".into();
+        t.channels = 1;
+        assert_eq!(track_name(&t), "Mono");
+        assert_eq!(twin_name(&t), "Stereo Mixdown");
+        t.title = " Commentary ".into();
+        assert_eq!(track_name(&t), "Commentary", "a title of its own wins");
+        assert_eq!(language_name("EN"), Some("English"));
+    }
+
+    #[test]
+    fn names_are_written_for_twin_and_originals() {
+        let mut main = audio(1, "aac", 6, true, "");
+        main.language = Some("eng".into());
+        let mut commentary = audio(2, "aac", 2, false, "");
+        commentary.language = Some("eng".into());
+        commentary.title = "Commentary".into();
+        let p = Probe { streams: vec![s(0, StreamKind::Video, "h264"), main, commentary], duration: 1.0 };
+        let mut plan = plan(&p, false).unwrap();
+        assert_eq!(plan.names, vec![("English 5.1".to_string(), "English Stereo Mixdown".to_string()), ("Commentary".to_string(), "English Stereo Mixdown".to_string())]);
+        let j = joined(&plan);
+        assert!(j.contains("-metadata:s:a:0 title=English Stereo Mixdown -metadata:s:a:0 handler_name=Stereo (AAC)"), "{j}");
+        assert!(j.contains("-metadata:s:a:1 title=English 5.1"), "{j}");
+        assert!(j.contains("-metadata:s:a:2 title=Commentary"), "{j}");
+        // A raised twin says so in both names.
+        plan.twin_levels.push(TwinLevel { index: 1, measured: crate::loudness::Measurement { integrated: -30.0, true_peak: -4.0, range: 10.0 }, gain: Some(6.0) });
+        let j = joined(&plan);
+        assert!(j.contains("title=English Stereo Mixdown, normalized +6.0 dB (media-enrich)"), "{j}");
+        assert!(j.contains("handler_name=Stereo (AAC), normalized +6.0 dB (media-enrich)"), "{j}");
+    }
+
+    #[test]
+    fn reads_track_names_from_mp4_boxes() {
+        fn bx(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut v = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+            v.extend_from_slice(kind);
+            v.extend_from_slice(body);
+            v
+        }
+        // ffmpeg style: length, language, text.
+        let mut ffm = (7u16).to_be_bytes().to_vec();
+        ffm.extend_from_slice(&[0, 0]);
+        ffm.extend_from_slice(b"English");
+        let trak1 = bx(b"trak", &[bx(b"tkhd", &[0; 4]), bx(b"udta", &bx(b"name", &ffm))].concat());
+        // Bare text, as other muxers write it.
+        let trak2 = bx(b"trak", &bx(b"udta", &bx(b"name", b"Commentary\0")));
+        let trak3 = bx(b"trak", &bx(b"mdia", &[]));
+        let moov = [trak1, trak2, trak3].concat();
+        assert_eq!(names_in_moov(&moov), vec![Some("English".to_string()), Some("Commentary".to_string()), None]);
+        let dir = std::env::temp_dir().join(format!("enrich-names-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("t.mp4");
+        std::fs::write(&file, [bx(b"ftyp", b"isom"), bx(b"mdat", &[0; 32]), bx(b"moov", &moov)].concat()).unwrap();
+        assert_eq!(mp4_track_names(&file).unwrap().len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn audio(index: usize, codec: &str, channels: usize, default: bool, label: &str) -> Stream {

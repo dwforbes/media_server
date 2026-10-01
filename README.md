@@ -754,6 +754,15 @@ whatever comes next — a commentary, as likely as not). Browsers play the twin;
 receivers, TVs and VLC still find the original behind it. A file this pass made
 earlier is recognised by the twin's name and left alone.
 
+Tracks come out named for players' audio menus (Safari, VLC and the like show the
+MP4 name box, not the language alone): the twin is "English Stereo Mixdown", and an
+original that had no title of its own becomes "English 5.1", "English 5.1 Dolby
+Digital Plus", "French Stereo" and so on, from its language tag and layout. A track
+that came with a title ("Commentary") keeps it — including on an `.mp4` rewritten in
+place, whose titles ffmpeg itself would drop; the pass reads them from the file first.
+A raised twin's name carries the gain as well ("English Stereo Mixdown, normalized
++6.0 dB (media-enrich)").
+
 The same pass looks at `.mp4` files, since a rip can arrive as one: when its default
 track would earn a twin, the file is rewritten in place with the twin ahead. An `.mp4`
 whose default track already plays in browsers is left untouched — this costs one
