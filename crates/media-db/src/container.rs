@@ -44,22 +44,22 @@ pub enum TitleStatus {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Atom {
+pub struct Atom {
     /// File offset of the atom's first byte (the size field).
-    offset: u64,
-    size: u64,
-    header_len: u64,
-    kind: [u8; 4],
+    pub offset: u64,
+    pub size: u64,
+    pub header_len: u64,
+    pub kind: [u8; 4],
 }
 
 impl Atom {
-    fn body(&self) -> (u64, u64) {
+    pub fn body(&self) -> (u64, u64) {
         (self.offset + self.header_len, self.offset + self.size)   // both ≤ end: see atoms_in
     }
 }
 
 /// Parse the atoms in [start, end).
-fn atoms_in(file: &mut File, start: u64, end: u64) -> Result<Vec<Atom>> {
+pub fn atoms_in(file: &mut File, start: u64, end: u64) -> Result<Vec<Atom>> {
     let mut out = Vec::new();
     let mut pos = start;
     while pos.saturating_add(8) <= end {
@@ -91,7 +91,7 @@ fn atoms_in(file: &mut File, start: u64, end: u64) -> Result<Vec<Atom>> {
 /// Descend a path of container atoms from [start, end), returning the body
 /// range of the final one. `meta` is a FullBox: its children start 4 bytes
 /// (version/flags) into the body.
-fn descend(file: &mut File, path: &[&[u8; 4]], start: u64, end: u64) -> Result<Option<(u64, u64)>> {
+pub fn descend(file: &mut File, path: &[&[u8; 4]], start: u64, end: u64) -> Result<Option<(u64, u64)>> {
     let (mut lo, mut hi) = (start, end);
     for want in path {
         let Some(found) = atoms_in(file, lo, hi)?.into_iter().find(|a| a.kind == **want)
@@ -296,7 +296,8 @@ enum Container {
 }
 
 /// Handler type of a trak (moov/trak/mdia/hdlr body offset 8..12).
-fn trak_handler(file: &mut File, trak: &Atom) -> Result<Option<[u8; 4]>> {
+/// The handler type of a trak (vide, soun, sbtl, text, ...).
+pub fn trak_handler(file: &mut File, trak: &Atom) -> Result<Option<[u8; 4]>> {
     let (lo, hi) = trak.body();
     let Some((hlo, hhi)) = descend(file, &[b"mdia", b"hdlr"], lo, hi)? else {
         return Ok(None);

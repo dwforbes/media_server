@@ -112,6 +112,9 @@ pub struct EnrichConfig {
     pub twin_since: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
+    pub fix_frame_timing: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
     pub loudness_target: Option<f64>,
     #[serde(default)]
     #[allow(dead_code)]

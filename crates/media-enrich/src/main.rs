@@ -4,6 +4,7 @@ mod loudness_state;
 mod remux;
 mod captions_state;
 mod subtitles;
+mod timing;
 mod tmdb;
 
 use std::path::{Path, PathBuf};
@@ -71,6 +72,16 @@ struct Args {
     /// in place, which is what Safari, QuickTime and iOS need to play them.
     #[arg(long)]
     no_fix_hevc_tags: bool,
+    /// Restore composition offsets to HEVC MP4s that have none despite
+    /// B-frames (juddery in browsers, fine in VLC): lossless, the file is
+    /// rewritten with a ctts box. Also enabled by fix_frame_timing = true
+    /// in [enrich].
+    #[arg(long)]
+    fix_frame_timing: bool,
+    /// Restore the composition offsets of these files (or every MP4 under
+    /// these folders) whether or not the step is on.
+    #[arg(long, value_name = "PATH")]
+    timing_path: Vec<PathBuf>,
     /// With subtitle embedding: an MP4 whose single caption track carries no
     /// record and says something other than its .srt sidecar normally keeps
     /// its track; this says the sidecar wins and re-embeds it. A one-off for
@@ -176,6 +187,11 @@ struct EnrichSection {
     /// Apple's players require. On by default.
     #[serde(default = "default_true")]
     fix_hevc_tags: bool,
+    /// Restore composition offsets (ctts) to HEVC MP4s that reorder
+    /// frames but carry none — juddery in browsers, fine in VLC (see
+    /// timing.rs). Lossless, but the file is rewritten. Opt-in.
+    #[serde(default)]
+    fix_frame_timing: bool,
     /// Add a louder default audio track to newly arrived videos mastered
     /// far below the target (see loudness.rs). Replaces the file after
     /// verification. Opt-in.
@@ -394,6 +410,61 @@ fn fix_hevc_tags(config: &ScannerConfig, dry_run: bool) {
     }
     if stuck > 0 {
         println!("HEVC files needing a remux for Apple playback: {stuck}");
+    }
+}
+
+/// Restore composition offsets to HEVC MP4s that have none despite
+/// reordering frames (timing.rs). The check is a header read per MP4,
+/// so the whole library is looked at every run; only the defective few
+/// are rewritten, losslessly. Named paths are done whether or not the
+/// step is on.
+fn fix_frame_timing(config: &ScannerConfig, dry_run: bool, auto: bool, explicit: &[PathBuf], state: &mut LoudnessState) {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for path in explicit {
+        if path.is_dir() {
+            paths.extend(video_files_under(path).into_iter().filter(|p| ext_is(p, "mp4")));
+        } else if path.is_file() {
+            paths.push(path.clone());
+        } else {
+            eprintln!("frame timing: {} is not a file or folder", path.display());
+        }
+    }
+    if auto {
+        for root in config.roots.iter().filter(|r| (r.kind == "movies" || r.kind == "tv") && r.path.is_dir()) {
+            for path in video_files_under(&root.path).into_iter().filter(|p| ext_is(p, "mp4")) {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    let (mut looked, mut planned, mut repaired) = (0usize, 0usize, 0usize);
+    for path in paths {
+        looked += 1;
+        match timing::repair_if_needed(&config.enrich.ffmpeg_path, &config.ffprobe_path, &path, dry_run) {
+            Ok(timing::Outcome::Fine(why)) => tracing::debug!("{}: frame timing: {why}", path.display()),
+            Ok(timing::Outcome::WouldRepair { reorder }) => {
+                planned += 1;
+                println!("would restore frame timing: {} (HEVC reordering {reorder} frame(s), no ctts box)", path.display());
+            }
+            Ok(timing::Outcome::Repaired(r)) => {
+                repaired += 1;
+                println!(
+                    "frame timing restored: {} ({} pictures in {} sequence(s); ctts of {} runs, presentation delayed {:.3} s)",
+                    path.display(), r.pictures, r.sequences, r.runs, r.delay as f64 / r.timescale.max(1) as f64
+                );
+                // Only the moov changed: what loudness measured still holds.
+                state.restamp(&path);
+            }
+            Err(err) => eprintln!("{}: frame timing: {err:#}", path.display()),
+        }
+    }
+    if dry_run {
+        if planned > 0 {
+            println!("(dry run) frame timing: {looked} looked at, {planned} would be repaired");
+        }
+    } else if repaired > 0 {
+        println!("frame timing: {looked} looked at, {repaired} repaired");
     }
 }
 
@@ -1090,6 +1161,7 @@ fn main() -> Result<()> {
     let do_remux = args.remux_mkv || config.enrich.remux_mkv;
     let do_extract = !args.no_extract_subtitles && config.enrich.extract_subtitles;
     let do_hvc1 = !args.no_fix_hevc_tags && config.enrich.fix_hevc_tags;
+    let do_timing = args.fix_frame_timing || config.enrich.fix_frame_timing;
     let do_loudness = args.normalize_loudness || config.enrich.normalize_loudness;
     let loudness_policy = loudness::Policy {
         target: config.enrich.loudness_target,
@@ -1107,6 +1179,9 @@ fn main() -> Result<()> {
         }
         if do_hvc1 {
             fix_hevc_tags(&config, true);
+        }
+        if do_timing || !args.timing_path.is_empty() {
+            fix_frame_timing(&config, true, do_timing, &args.timing_path, &mut loudness_state);
         }
         if do_strip {
             println!("(dry run: embedded-title stripping skipped)");
@@ -1151,6 +1226,12 @@ fn main() -> Result<()> {
         // left is what arrived hev1 and was never remuxed.
         if do_hvc1 {
             fix_hevc_tags(&config, false);
+        }
+        // After the muxing steps too (a remux writes a proper ctts of its
+        // own); before loudness, whose stamp memory is refreshed for a
+        // file this rewrites.
+        if do_timing || !args.timing_path.is_empty() {
+            fix_frame_timing(&config, false, do_timing, &args.timing_path, &mut loudness_state);
         }
         if do_strip {
             strip_embedded_titles(&config);

@@ -472,6 +472,29 @@ name is four bytes in the header. So:
   lists what it would do. The MKV remux and the subtitle embed steps write `hvc1`
   themselves, so nothing they produce needs it.
 
+### Frame timing: HEVC without composition offsets
+
+Some x265 releases arrive with B-frames but no `ctts` box in the video track, so
+every frame's presentation time equals its decode time. VLC and ffmpeg re-sort frames
+by picture order count and never notice; browsers hand the decoder display-order
+timestamps in decode order and drop whatever comes out late — about a sixth of the
+frames, seen as judder — while the same file is flawless in VLC. The tell is
+`ffprobe -select_streams v:0 -read_intervals %+#8 -show_entries packet=dts_time,pts_time`
+showing every pair equal on a file whose stream reorders.
+
+With `fix_frame_timing = true` in `[enrich]` (or `media-enrich --fix-frame-timing`),
+enrichment checks every `.mp4` on each run — a header read, plus one `ffprobe` for an
+HEVC track without `ctts` to see whether it reorders at all — and repairs the
+defective ones **losslessly**: the picture order counts are read from the slice headers
+(ffmpeg's `trace_headers` bitstream filter: a parse, no decode), the display order
+derived per coded video sequence, a `ctts` box inserted into the sample table, and the
+edit list and durations set to match. Not a byte of the streams changes, but the moov
+grows, so the file is rewritten beside itself, verified (size, offsets in effect,
+duration) and renamed over the original with its mtime kept. Opt-in, since it
+replaces files; one file by hand: `media-enrich --timing-path "/mnt/media/Movies/Older/
+Film.mp4"` (a file or a folder), with `--dry-run` to list what would change. H.264
+files with the same defect are rare and not handled.
+
 ### Cover strip and art caching
 
 A browse page that lists movies — a franchise, a genre, a year, a director, All Movies —
