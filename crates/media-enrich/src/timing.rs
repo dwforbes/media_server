@@ -114,12 +114,21 @@ pub fn check(ffprobe: &str, path: &Path) -> Result<Check> {
     Ok(Check::Missing { reorder })
 }
 
-/// Picture order counts per picture in decode order, from the slice
-/// headers: (nal_unit_type, poc_lsb). IDR pictures carry no lsb and
-/// have POC 0.
-fn picture_order(ffmpeg: &str, path: &Path) -> Result<(u32, Vec<(u32, u32)>)> {
+/// Per packet (= per sample, the edit list ignored so every sample comes
+/// through), the picture it carries as (nal_unit_type, poc_lsb) from its
+/// slice header — IDR pictures carry no lsb and have POC 0 — or None for
+/// a packet with no slice at all (parameter sets or SEI on their own,
+/// an end-of-sequence marker), which some muxers write as a sample of
+/// its own. A packet with slices but no first slice segment is a
+/// damaged picture and refused.
+/// (nal_unit_type, poc_lsb) of a picture.
+type Picture = (u32, u32);
+/// While parsing: saw a slice header; the picture, its lsb still owed.
+type PacketTrace = (bool, Option<(u32, Option<u32>)>);
+
+fn picture_order(ffmpeg: &str, path: &Path) -> Result<(u32, Vec<Option<Picture>>)> {
     let mut child = Command::new(ffmpeg)
-        .args(["-v", "info", "-nostdin", "-i"])
+        .args(["-v", "info", "-nostdin", "-nostats", "-ignore_editlist", "1", "-i"])
         .arg(path)
         .args(["-map", "0:v:0", "-c", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"])
         .stdin(Stdio::null())
@@ -130,17 +139,32 @@ fn picture_order(ffmpeg: &str, path: &Path) -> Result<(u32, Vec<(u32, u32)>)> {
     let stderr = child.stderr.take().context("no stderr")?;
     let mut log2_max: Option<u32> = None;
     let mut nal: u32 = 0;
-    let mut pics: Vec<(u32, Option<u32>)> = Vec::new();
-    let mut pending: Option<usize> = None;
+    // Per packet: (saw a slice header, the picture).
+    let mut packets: Vec<PacketTrace> = Vec::new();
+    let mut pending = false;
     for line in std::io::BufReader::new(stderr).split(b'\n') {
         let line = line?;
+        // "[trace_headers @ 0x…] Packet: 2773 bytes, key frame, pts …"
+        // "[trace_headers @ 0x…] Slice Segment Header"
         // "[trace_headers @ 0x…] 171  log2_max_pic_order_cnt_lsb_minus4  00101 = 4"
-        if !line.starts_with(b"[trace_headers") {
+        // Anything ffmpeg wrote before it on the same line (a progress
+        // line ends in a carriage return, not a newline) is skipped.
+        let text = String::from_utf8_lossy(&line);
+        let Some(at) = text.rfind("[trace_headers") else { continue };
+        let Some(rest) = text[at..].split_once("] ").map(|(_, r)| r) else { continue };
+        if rest.starts_with("Packet:") {
+            packets.push((false, None));
+            pending = false;
             continue;
         }
-        let text = String::from_utf8_lossy(&line);
-        let mut parts = text.split_whitespace();
-        let Some(name) = parts.nth(4) else { continue };
+        if rest.starts_with("Slice Segment Header") {
+            if let Some(p) = packets.last_mut() {
+                p.0 = true;
+            }
+            continue;
+        }
+        let mut parts = rest.split_whitespace();
+        let Some(name) = parts.nth(1) else { continue };
         let Some(value) = text.rsplit("= ").next().and_then(|v| v.trim().parse::<i64>().ok()) else { continue };
         match name {
             "log2_max_pic_order_cnt_lsb_minus4" => {
@@ -152,18 +176,23 @@ fn picture_order(ffmpeg: &str, path: &Path) -> Result<(u32, Vec<(u32, u32)>)> {
             }
             "nal_unit_type" => nal = value as u32,
             "first_slice_segment_in_pic_flag" if value == 1 => {
+                let Some(p) = packets.last_mut() else { continue };
+                if let Some((first, _)) = p.1 {
+                    bail!("sample {}: two pictures in one sample (nal types {first} and {nal}); not handled", packets.len() - 1);
+                }
                 if nal == 19 || nal == 20 {
-                    pics.push((nal, Some(0)));
-                    pending = None;
+                    p.1 = Some((nal, Some(0)));
+                    pending = false;
                 } else {
-                    pending = Some(pics.len());
-                    pics.push((nal, None));
+                    p.1 = Some((nal, None));
+                    pending = true;
                 }
             }
-            "slice_pic_order_cnt_lsb" => {
-                if let Some(i) = pending.take() {
-                    pics[i].1 = Some(value as u32);
+            "slice_pic_order_cnt_lsb" if pending => {
+                if let Some((_, Some((_, lsb)))) = packets.last_mut() {
+                    *lsb = Some(value as u32);
                 }
+                pending = false;
             }
             _ => {}
         }
@@ -173,11 +202,16 @@ fn picture_order(ffmpeg: &str, path: &Path) -> Result<(u32, Vec<(u32, u32)>)> {
         bail!("ffmpeg could not parse the stream ({status})");
     }
     let log2_max = log2_max.context("no SPS seen in the stream")?;
-    let pics = pics
-        .into_iter()
-        .map(|(nt, lsb)| lsb.map(|l| (nt, l)).context("a slice without a picture order count"))
-        .collect::<Result<Vec<_>>>()?;
-    Ok((log2_max, pics))
+    let mut out = Vec::with_capacity(packets.len());
+    for (i, (sliced, pic)) in packets.into_iter().enumerate() {
+        out.push(match pic {
+            Some((nt, Some(lsb))) => Some((nt, lsb)),
+            Some((_, None)) => bail!("sample {i}: a slice without a picture order count"),
+            None if sliced => bail!("sample {i}: slices but no first slice segment (a damaged picture)"),
+            None => None,
+        });
+    }
+    Ok((log2_max, out))
 }
 
 /// Display rank of every picture (H.265 8.3.1 for the POC msb), and the
@@ -221,16 +255,26 @@ pub fn display_ranks(log2_max: u32, pics: &[(u32, u32)]) -> (Vec<usize>, usize) 
     (rank, (cvs_id + 1).max(0) as usize)
 }
 
-/// Composition offsets from decode times and display ranks:
-/// pts_i = dts[rank_i] + delay, with the smallest delay keeping every
-/// offset non-negative. Returns (delay, offsets).
-pub fn offsets(dts: &[u64], rank: &[usize]) -> (u64, Vec<u64>) {
-    let delay = (0..dts.len())
-        .map(|i| dts[i] as i64 - dts[rank[i]] as i64)
+/// Composition offsets from decode times and display ranks. `picture`
+/// says which samples carry a picture (the rest — a parameter-set or
+/// end-of-sequence sample — are not displayed and keep offset 0); the
+/// j-th picture shows at the decode time of the picture of rank j, plus
+/// the smallest delay keeping every offset non-negative. Returns
+/// (delay, offsets).
+pub fn offsets(dts: &[u64], picture: &[bool], rank: &[usize]) -> (u64, Vec<u64>) {
+    let samples: Vec<usize> = (0..dts.len()).filter(|&i| picture[i]).collect();
+    debug_assert_eq!(samples.len(), rank.len());
+    let delay = samples
+        .iter()
+        .enumerate()
+        .map(|(j, &i)| dts[i] as i64 - dts[samples[rank[j]]] as i64)
         .max()
         .unwrap_or(0)
         .max(0) as u64;
-    let offs = (0..dts.len()).map(|i| dts[rank[i]] + delay - dts[i]).collect();
+    let mut offs = vec![0u64; dts.len()];
+    for (j, &i) in samples.iter().enumerate() {
+        offs[i] = dts[samples[rank[j]]] + delay - dts[i];
+    }
     (delay, offs)
 }
 
@@ -314,7 +358,8 @@ fn grow_box(buf: &mut [u8], at: usize, by: usize) {
 /// A new moov with the ctts in the video track's stbl, sizes, edit list,
 /// durations and (if the mdat follows the moov) chunk offsets adjusted.
 /// Pure: `moov` is the box's bytes including its header.
-pub fn rebuild_moov(moov: &[u8], pics: usize, rank: &[usize], mdat_after_moov: bool) -> Result<(Vec<u8>, Repair)> {
+pub fn rebuild_moov(moov: &[u8], picture: &[bool], rank: &[usize], mdat_after_moov: bool) -> Result<(Vec<u8>, Repair)> {
+    let pics = picture.len();
     let top = boxes(moov, 0, moov.len());
     let &(_, mp, mhl, msize) = top.first().filter(|(k, ..)| k == b"moov").context("not a moov box")?;
     let video = find(moov, mp + mhl, mp + msize, &[b"trak"])
@@ -342,7 +387,7 @@ pub fn rebuild_moov(moov: &[u8], pics: usize, rank: &[usize], mdat_after_moov: b
         durs.extend(std::iter::repeat_n(d, count));
     }
     if durs.len() != pics {
-        bail!("{} samples in the track but {pics} pictures in the stream", durs.len());
+        bail!("{} samples in the track but {pics} packets in the stream", durs.len());
     }
     let mut dts = Vec::with_capacity(pics);
     let mut t = 0u64;
@@ -351,7 +396,7 @@ pub fn rebuild_moov(moov: &[u8], pics: usize, rank: &[usize], mdat_after_moov: b
         t += d;
     }
     let total = t;
-    let (delay, offs) = offsets(&dts, rank);
+    let (delay, offs) = offsets(&dts, picture, rank);
     if offs.iter().any(|&o| o > u32::MAX as u64) {
         bail!("a composition offset does not fit 32 bits");
     }
@@ -422,7 +467,7 @@ pub fn rebuild_moov(moov: &[u8], pics: usize, rank: &[usize], mdat_after_moov: b
             }
         }
     }
-    Ok((new, Repair { pictures: pics, sequences: 0, delay, timescale: media_ts, runs }))
+    Ok((new, Repair { pictures: rank.len(), sequences: 0, delay, timescale: media_ts, runs }))
 }
 
 /// Restore the composition offsets of one file if it needs them.
@@ -434,7 +479,12 @@ pub fn repair_if_needed(ffmpeg: &str, ffprobe: &str, path: &Path, dry_run: bool)
     if dry_run {
         return Ok(Outcome::WouldRepair { reorder });
     }
-    let (log2_max, pics) = picture_order(ffmpeg, path)?;
+    let (log2_max, packets) = picture_order(ffmpeg, path)?;
+    let picture: Vec<bool> = packets.iter().map(|p| p.is_some()).collect();
+    let pics: Vec<Picture> = packets.iter().flatten().copied().collect();
+    if pics.len() < packets.len() {
+        tracing::debug!("{}: {} sample(s) carry no picture", path.display(), packets.len() - pics.len());
+    }
     let (rank, sequences) = display_ranks(log2_max, &pics);
 
     let mut file = std::fs::File::open(path)?;
@@ -448,7 +498,7 @@ pub fn repair_if_needed(ffmpeg: &str, ffprobe: &str, path: &Path, dry_run: bool)
     let mut moov_bytes = vec![0u8; moov.size as usize];
     file.seek(SeekFrom::Start(moov.offset))?;
     file.read_exact(&mut moov_bytes)?;
-    let (new_moov, mut repair) = rebuild_moov(&moov_bytes, pics.len(), &rank, mdat_after)?;
+    let (new_moov, mut repair) = rebuild_moov(&moov_bytes, &picture, &rank, mdat_after)?;
     repair.sequences = sequences;
 
     // Write beside, byte for byte but for the moov.
@@ -546,13 +596,24 @@ mod tests {
     fn offsets_delay_just_enough() {
         let dts = [0, 10, 20, 30, 40];
         let rank = [0, 3, 1, 2, 4];
-        let (delay, offs) = offsets(&dts, &rank);
-        // Frame 1 (rank 3) must show at dts[3] + delay = 30 + delay ≥ its dts 10 → delay 0?
-        // Frame 2 (rank 1) shows at 10 + delay, decoded at 20 → delay ≥ 10.
+        let (delay, offs) = offsets(&dts, &[true; 5], &rank);
+        // Frame 2 (rank 1) shows at 10 + delay but is decoded at 20 → delay ≥ 10.
         assert_eq!(delay, 10);
         assert_eq!(offs, vec![10, 30, 0, 0, 10]);
+        // A trailing sample with no picture (an end-of-sequence marker)
+        // is left out of the ranking and keeps offset 0.
+        let dts = [0, 10, 20, 30, 40, 50];
+        let (delay, offs) = offsets(&dts, &[true, true, true, true, true, false], &rank);
+        assert_eq!(delay, 10);
+        assert_eq!(offs, vec![10, 30, 0, 0, 10, 0]);
+        // One in the middle: the pictures around it keep their ranks, and
+        // the delay grows to cover the gap (picture 2, decoded at 30, is
+        // shown second, at 10 + delay).
+        let (delay, offs) = offsets(&[0, 10, 20, 30, 40, 50], &[true, true, false, true, true, true], &rank);
+        assert_eq!(delay, 20);
+        assert_eq!(offs, vec![20, 50, 0, 0, 10, 20]);
         let (ctts, runs) = ctts_box(&offs);
-        assert_eq!(runs, 4);
+        assert_eq!(runs, 5, "20 | 50 | 0 0 | 10 | 20");
         assert_eq!(&ctts[4..8], b"ctts");
         assert_eq!(u32::from_be_bytes(ctts[0..4].try_into().unwrap()) as usize, ctts.len());
     }
@@ -605,7 +666,7 @@ mod tests {
         let moov = bx(b"moov", &[bx(b"mvhd", &mvhd), trak].concat());
 
         let rank = [0, 3, 1, 2, 4];
-        let (new, repair) = rebuild_moov(&moov, 5, &rank, true).unwrap();
+        let (new, repair) = rebuild_moov(&moov, &[true; 5], &rank, true).unwrap();
         assert_eq!(repair.delay, 10);
         assert_eq!(repair.runs, 4);
         assert_eq!(new.len(), moov.len() + 8 + 8 + 8 * 4);
@@ -623,9 +684,10 @@ mod tests {
         let mvhd = find(&new, 8, new.len(), &[b"mvhd"])[0];
         assert_eq!(be32(&new, mvhd.0 + 24), 500, "the movie grows to the longest track");
         // Done once is refused.
-        assert!(rebuild_moov(&new, 5, &rank, true).is_err());
+        assert!(rebuild_moov(&new, &[true; 5], &rank, true).is_err());
+        assert!(rebuild_moov(&moov, &[true; 4], &rank[..4], true).is_err(), "sample count must match the packets");
         // A moov before an mdat leaves chunk offsets alone.
-        let (new2, _) = rebuild_moov(&moov, 5, &rank, false).unwrap();
+        let (new2, _) = rebuild_moov(&moov, &[true; 5], &rank, false).unwrap();
         let stco = find(&new2, 8, new2.len(), &[b"trak", b"mdia", b"minf", b"stbl", b"stco"])[0];
         assert_eq!(be32(&new2, stco.0 + 16), 1000);
     }

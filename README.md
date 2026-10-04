@@ -488,7 +488,9 @@ HEVC track without `ctts` to see whether it reorders at all — and repairs the
 defective ones **losslessly**: the picture order counts are read from the slice headers
 (ffmpeg's `trace_headers` bitstream filter: a parse, no decode), the display order
 derived per coded video sequence, a `ctts` box inserted into the sample table, and the
-edit list and durations set to match. Not a byte of the streams changes, but the moov
+edit list and durations set to match (a sample carrying no picture — parameter sets or
+an end-of-sequence marker on their own — is left where it is). Not a byte of the
+streams changes, but the moov
 grows, so the file is rewritten beside itself, verified (size, offsets in effect,
 duration) and renamed over the original with its mtime kept. Opt-in, since it
 replaces files; one file by hand: `media-enrich --timing-path "/mnt/media/Movies/Older/
