@@ -597,7 +597,9 @@ are never overwritten. Disable with `extract_subtitles = false` (or
 The web player falls back to extracting on demand — same track choice — into a
 `vtt-cache` directory beside the catalog, for files enrichment has not reached yet
 (or could not write beside). Concurrent viewers of the same file share one
-extraction.
+extraction. The cache (and the detail page's note of what a file carries) is keyed
+to the file's size and mtime together, since enrichment's rewrites keep the mtime
+on purpose; a rewritten file is probed afresh.
 
 ### Skip intro / skip credits
 

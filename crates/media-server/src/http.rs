@@ -1218,8 +1218,15 @@ fn with_speakers(media: &std::path::Path, vtt: String) -> String {
     }
 }
 
-fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+/// The identity of a media file for the subtitle caches: its size and
+/// mtime, as text. Enrichment rewrites a file keeping its mtime on
+/// purpose (loudness, the stereo twin, the timing repair), so an mtime
+/// alone cannot tell a rewritten file from the one that was probed; the
+/// size changes every time.
+fn media_stamp(path: &std::path::Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(format!("{}:{}.{:09}", meta.len(), mtime.as_secs(), mtime.subsec_nanos()))
 }
 
 /// What a file carries by way of embedded subtitles: a text track worth
@@ -1245,14 +1252,20 @@ async fn embedded_subs(state: &AppState, id: i64, path: &std::path::Path) -> Emb
     // An earlier build kept "none" as an empty `{id}.nosubs`, written for
     // bitmap-only files too; it is not trusted, only tidied away.
     let _ = std::fs::remove_file(state.vtt_cache.join(format!("{id}.nosubs")));
-    let media_time = file_mtime(path);
-    if matches!((file_mtime(&marker), media_time), (Some(mt), Some(media)) if mt >= media) {
-        match std::fs::read_to_string(&marker).unwrap_or_default().trim() {
-            "none" => return EmbeddedSubs::None,
-            "bitmap" => return EmbeddedSubs::BitmapOnly,
-            n => {
-                if let Ok(ordinal) = n.parse::<usize>() {
-                    return EmbeddedSubs::Text(ordinal);
+    // The marker names the file it describes (size and mtime) on its
+    // first line and the answer on its second; one from an earlier
+    // build, with the answer alone, is probed again.
+    let stamp = media_stamp(path);
+    if let (Some(stamp), Ok(text)) = (&stamp, std::fs::read_to_string(&marker)) {
+        let mut lines = text.lines();
+        if lines.next() == Some(stamp.as_str()) {
+            match lines.next().unwrap_or("").trim() {
+                "none" => return EmbeddedSubs::None,
+                "bitmap" => return EmbeddedSubs::BitmapOnly,
+                n => {
+                    if let Ok(ordinal) = n.parse::<usize>() {
+                        return EmbeddedSubs::Text(ordinal);
+                    }
                 }
             }
         }
@@ -1280,7 +1293,11 @@ async fn embedded_subs(state: &AppState, id: i64, path: &std::path::Path) -> Emb
         EmbeddedSubs::BitmapOnly => "bitmap".to_string(),
         EmbeddedSubs::Text(n) => n.to_string(),
     };
-    let _ = std::fs::write(&marker, record);
+    // Stamped as the file was before the probe, so a rewrite that lands
+    // during the probe leaves a marker that no longer matches.
+    if let Some(stamp) = stamp {
+        let _ = std::fs::write(&marker, format!("{stamp}\n{record}\n"));
+    }
     found
 }
 
@@ -1314,14 +1331,15 @@ async fn serve_subs(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
         }
     }
 
-    // 2. Cached extraction, unless the media file changed since.
+    // 2. Cached extraction, unless the media file changed since: the
+    // `.src` beside the cache names the file (size and mtime) the text
+    // came from.
     let cache = state.vtt_cache.join(format!("{id}.vtt"));
-    let media_mtime = file_mtime(&servable.abs_path);
-    if let (Some(cache_time), Some(media_time)) = (file_mtime(&cache), media_mtime) {
-        if cache_time >= media_time {
-            if let Ok(body) = std::fs::read_to_string(&cache) {
-                return vtt_response(with_speakers(&servable.abs_path, body));
-            }
+    let current = media_stamp(&servable.abs_path);
+    let recorded = std::fs::read_to_string(cache.with_extension("vtt.src")).ok();
+    if current.is_some() && recorded.as_deref().map(str::trim) == current.as_deref() {
+        if let Ok(body) = std::fs::read_to_string(&cache) {
+            return vtt_response(with_speakers(&servable.abs_path, body));
         }
     }
 
@@ -1602,6 +1620,9 @@ async fn extract_subs(state: &AppState, id: i64, path: &std::path::Path, cache: 
         tracing::debug!("no text subtitle track in {id}");
         return;
     };
+    // The file as it is before reading it: a rewrite that lands during
+    // the extraction leaves a record that no longer matches.
+    let stamp = media_stamp(path);
     let _permit = state.probes.acquire().await;
     let output = tokio::process::Command::new(&state.ffmpeg)
         .args(["-v", "error", "-nostdin", "-i"])
@@ -1613,7 +1634,8 @@ async fn extract_subs(state: &AppState, id: i64, path: &std::path::Path, cache: 
         Ok(out) if out.status.success() && !out.stdout.is_empty() => {
             let tmp = cache.with_extension("vtt.part");
             let written = std::fs::write(&tmp, &out.stdout)
-                .and_then(|_| std::fs::rename(&tmp, cache));
+                .and_then(|_| std::fs::rename(&tmp, cache))
+                .and_then(|_| std::fs::write(cache.with_extension("vtt.src"), stamp.unwrap_or_default()));
             if let Err(err) = written {
                 tracing::warn!("could not write subtitle cache for {id}: {err}");
                 let _ = std::fs::remove_file(&tmp);
