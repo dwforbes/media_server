@@ -259,6 +259,9 @@ struct NfoProbe {
     has_premiered: bool,
     /// `<uniqueid type="tmdb">` — the identity, when the sidecar names one.
     tmdb_id: Option<i64>,
+    /// `<uniqueid type="imdb">`, when non-empty: lets a sidecar written
+    /// before IMDb had rated the title pick its rating up later.
+    imdb_id: Option<String>,
 }
 
 impl NfoProbe {
@@ -296,6 +299,7 @@ fn nfo_state(nfo_path: &Path) -> NfoProbe {
         has_aired: text.contains("<aired>") || text.contains("<aired/>"),
         has_premiered: text.contains("<premiered>") || text.contains("<premiered/>"),
         tmdb_id: tmdb_uniqueid(&text),
+        imdb_id: uniqueid(&text, "imdb").map(str::to_string),
     }
 }
 
@@ -303,6 +307,12 @@ fn nfo_state(nfo_path: &Path) -> NfoProbe {
 /// present. Attribute order and quoting vary between writers (Kodi, tinyMediaManager,
 /// a text editor), so this scans rather than parses.
 fn tmdb_uniqueid(text: &str) -> Option<i64> {
+    uniqueid(text, "tmdb")?.parse().ok()
+}
+
+/// The non-empty value of the first `<uniqueid type="KIND">`.
+fn uniqueid<'a>(text: &'a str, kind: &str) -> Option<&'a str> {
+    let (double, single) = (format!("type=\"{kind}\""), format!("type='{kind}'"));
     let mut rest = text;
     while let Some(start) = rest.find("<uniqueid") {
         let tag = &rest[start..];
@@ -311,8 +321,8 @@ fn tmdb_uniqueid(text: &str) -> Option<i64> {
         let body = &tag[close + 1..];
         let end = body.find('<').unwrap_or(body.len());
         let value = body[..end].trim();
-        if (attrs.contains("type=\"tmdb\"") || attrs.contains("type='tmdb'")) && !value.is_empty() {
-            return value.parse().ok();
+        if (attrs.contains(&double) || attrs.contains(&single)) && !value.is_empty() {
+            return Some(value);
         }
         rest = &tag[close + 1..];
     }
@@ -1365,6 +1375,11 @@ fn main() -> Result<()> {
     let season_dir_re = regex::Regex::new(r"(?i)^(season[ ._-]*\d*|s\d{1,2})$").unwrap();
     let mut groups: std::collections::BTreeMap<String, SeriesAcc> = Default::default();
     let mut tv_up_to_date = 0usize;
+    // Up-to-date generated sidecars (episode and tvshow.nfo) that carry an
+    // IMDb id but no rating: IMDb hadn't rated the title yet when they
+    // were written (a just-aired episode). Re-checked against the ratings
+    // dataset each run and patched in place — no TMDB calls.
+    let mut unrated: Vec<(PathBuf, String)> = Vec::new();
     for root in config.roots.iter().filter(|r| r.kind == "tv") {
         if !root.path.is_dir() {
             tracing::warn!("tv root {} not accessible; skipping", root.path.display());
@@ -1429,6 +1444,11 @@ fn main() -> Result<()> {
                 group.episodes.push(EpTask { path: path.clone(), season: parsed.season, episode: parsed.episode });
             } else {
                 tv_up_to_date += 1;
+                if probe.state == NfoState::Generated && !probe.has_rating && !args.no_ratings {
+                    if let Some(id) = probe.imdb_id {
+                        unrated.push((path.with_extension("nfo"), id));
+                    }
+                }
             }
             if !args.no_posters && loose && (!poster_path_for(&path).exists() || args.refresh) {
                 group.loose_posters.push(path);
@@ -1457,6 +1477,16 @@ fn main() -> Result<()> {
                 }
                 NfoState::HandWritten => args.refresh && args.force,
             };
+        if is_series_folder
+            && !write_show_nfo
+            && show_probe.state == NfoState::Generated
+            && !show_probe.has_rating
+            && !args.no_ratings
+        {
+            if let Some(id) = show_probe.imdb_id.clone() {
+                unrated.push((show_nfo.clone(), id));
+            }
+        }
         // Season-level season.nfo (the season's own TMDB overview), one
         // per season subfolder.
         let season_nfo_dests: Vec<(i64, PathBuf)> = season_dirs
@@ -1500,9 +1530,10 @@ fn main() -> Result<()> {
         }
     );
     println!(
-        "tv: {} series with work, {} episode .nfo up to date",
+        "tv: {} series with work, {} episode .nfo up to date, {} .nfo awaiting an IMDb rating",
         series_plans.len(),
-        tv_up_to_date
+        tv_up_to_date,
+        unrated.len()
     );
 
     if args.dry_run {
@@ -1547,14 +1578,17 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
-    if tasks.is_empty() && series_plans.is_empty() {
+    let tmdb_work = !tasks.is_empty() || !series_plans.is_empty();
+    if !tmdb_work && unrated.is_empty() {
         return Ok(());
     }
 
     let key = args
         .api_key
         .or_else(|| std::env::var("TMDB_API_KEY").ok())
-        .filter(|k| !k.is_empty());
+        .filter(|k| !k.is_empty())
+        // Patching late ratings in reads only the IMDb dataset.
+        .or_else(|| (!tmdb_work).then(String::new));
     let Some(key) = key else {
         bail!(
             "no TMDB API key: pass --api-key or set TMDB_API_KEY.\n\
@@ -1790,11 +1824,12 @@ fn main() -> Result<()> {
         );
     }
 
-    if !pending_episodes.is_empty() || !pending_shows.is_empty() {
+    if !pending_episodes.is_empty() || !pending_shows.is_empty() || !unrated.is_empty() {
         let needed: std::collections::HashSet<String> = pending_episodes
             .iter()
             .filter_map(|e| e.imdb_id.clone())
             .chain(pending_shows.iter().filter_map(|s| s.imdb_id.clone()))
+            .chain(unrated.iter().map(|(_, id)| id.clone()))
             .collect();
         let ep_ratings = if needed.is_empty() || args.no_ratings {
             Default::default()
@@ -1840,6 +1875,23 @@ fn main() -> Result<()> {
                 Err(err) => eprintln!("{}: nfo not written: {err:#}", show.nfo_path.display()),
             }
         }
+        let mut late_rated = 0usize;
+        for (nfo_path, id) in &unrated {
+            let Some(&rating) = ep_ratings.get(id) else { continue };
+            let text = media_db::sidecar::read_text_capped(nfo_path, media_db::sidecar::MAX_TEXT)
+                .unwrap_or_default();
+            let Some(patched) = with_rating(&text, rating) else { continue };
+            match write_sidecar(nfo_path, patched) {
+                Ok(()) => {
+                    late_rated += 1;
+                    nfos_written += 1;
+                }
+                Err(err) => eprintln!("{}: rating not written: {err:#}", nfo_path.display()),
+            }
+        }
+        if !unrated.is_empty() {
+            println!("IMDb ratings now available: {late_rated}/{} unrated .nfo", unrated.len());
+        }
     }
 
     println!(
@@ -1856,6 +1908,22 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A generated sidecar with `<rating>` added just before its imdb
+/// uniqueid, where the renderers put it; None when it already has one or
+/// has no imdb uniqueid line.
+fn with_rating(text: &str, rating: f64) -> Option<String> {
+    if text.contains("<rating>") {
+        return None;
+    }
+    let at = text.find("<uniqueid type=\"imdb\">")?;
+    let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    Some(format!(
+        "{}  <rating>{rating:.1}</rating>\n{}",
+        &text[..line_start],
+        &text[line_start..]
+    ))
 }
 
 fn xml_escape(s: &str) -> String {
@@ -1983,6 +2051,24 @@ fn render_nfo(info: &tmdb::MovieInfo, rating: Option<f64>, imdb_id: Option<&str>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_rating_slots_in_before_the_imdb_id_once() {
+        let bare = render_episode_nfo("Blue Lights", 4, 1, "T", "P", None, Some("tt36388325"), Some("2026-09-29"));
+        let patched = with_rating(&bare, 7.5).unwrap();
+        assert_eq!(
+            patched,
+            render_episode_nfo("Blue Lights", 4, 1, "T", "P", Some(7.5), Some("tt36388325"), Some("2026-09-29"))
+        );
+        assert_eq!(with_rating(&patched, 8.0), None);
+        let show = render_show_nfo("Blue Lights", None, None, Some("tt21307994"), None);
+        assert_eq!(
+            with_rating(&show, 8.2).unwrap(),
+            render_show_nfo("Blue Lights", None, Some(8.2), Some("tt21307994"), None)
+        );
+        assert_eq!(uniqueid(&bare, "imdb"), Some("tt36388325"));
+        assert_eq!(uniqueid(&render_episode_nfo("S", 1, 1, "T", "", None, None, None), "imdb"), None);
+    }
 
     #[test]
     fn tmdb_uniqueid_reads_the_pin_form_and_kodi_forms() {
